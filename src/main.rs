@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use cathedrals::chunking;
 use cathedrals::config::{self, Parser};
-use cathedrals::ingest::{self, OllamaClient};
+use cathedrals::ingest::{self, OllamaClient, SegmentationOptions};
 use cathedrals::markdown;
 use cathedrals::minhash;
 use cathedrals::storage;
@@ -69,10 +69,18 @@ fn ingest_file(
 		.map(|m| m.merge_strategy)
 		.unwrap_or(MergeStrategy::None);
 
+	let segmentation_options = doctype_match.as_ref()
+		.map(|m| SegmentationOptions {
+			doctype_prompt: m.prompt.clone(),
+			cleanup_patterns: m.cleanup_patterns.clone(),
+			merge_consecutive_same_author: m.merge_consecutive_same_author,
+		})
+		.unwrap_or_default();
+
 	let segmented = match parser {
 		Parser::Markdown => markdown::parse_markdown_sections(&body),
 		Parser::Ollama => {
-			let result = ollama.segment(&source_title, &body)?;
+			let result = ollama.segment(&source_title, &body, &segmentation_options)?;
 			result.entries
 		}
 		Parser::Whisper => {

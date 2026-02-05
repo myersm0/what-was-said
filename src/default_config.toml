@@ -1,24 +1,59 @@
 [[doctype]]
 name = "email"
-source_pattern = "- (Outlook|Mail|Gmail|ProtonMail) -"
+source_pattern = "- (Outlook|Mail|Gmail) -"
 parser = "ollama"
 merge_strategy = "positional"
+prompt = """
+CRITICAL RULES FOR EMAIL THREADS:
+- Each "From:" header marks the START of a new entry
+- The author is ALWAYS from the "From:" line, NEVER from "To:" or "Cc:"
+- Extract timestamp from "Date:" or "Sent:" header
+- The topmost message (newest) may lack From:/Date: headers - infer author from signature if present
+- body_start_line should be the first line of actual message content AFTER the headers
+- body_end_line should be the last line BEFORE any signature block or the next From: header
+"""
+cleanup_patterns = [
+    "(?i)^Sent from my (iPhone|iPad|Android|Mobile).*$",
+    "(?i)^Get Outlook for .*$",
+    "(?ms)^-{2,}\\s*$.*",
+    "(?ms)^_{10,}$.*",
+    "(?i)CONFIDENTIAL.*NOTICE.*",
+    "(?i)This email and any attachments.*confidential.*",
+    "(?i)If you have received this.*error.*",
+]
 
 [[doctype]]
 name = "slack"
 source_pattern = "- Slack -"
 parser = "ollama"
 merge_strategy = "positional"
+merge_consecutive_same_author = true
+prompt = """
+CRITICAL RULES FOR SLACK:
+- Messages are DELIMITED by text like: "Name  [HH:MM AM/PM]" or "Name [HH:MM AM/PM]" followed by message text
+- A line starting with just a timestamp like "[10:01 AM]" continues the PREVIOUS author's message
+- Thread indicators like "N replies" should be ignored
+- Extract author from the name portion before the timestamp
+- body_start_line is the line containing the actual message (may be same line as author or next line)
+- body_end_line is the last line before the next author/timestamp line
+"""
 
 [[doctype]]
 name = "meeting_transcript"
-source_pattern = "(Zoom|Teams Meeting)"
+source_pattern = "(Zoom|Teams Meeting|Google Meet)"
 parser = "ollama"
 merge_strategy = "timestamped"
+merge_consecutive_same_author = true
+prompt = """
+RULES FOR MEETING TRANSCRIPTS:
+- Each speaker turn is a separate entry
+- Author is the speaker name
+- Timestamp is the timecode if present
+"""
 
 [[doctype]]
 name = "claude"
-source_pattern = "- Claude -"
+source_pattern = "Claude( - Brave)?$"
 parser = "markdown"
 merge_strategy = "none"
 

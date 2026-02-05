@@ -21,15 +21,24 @@ struct DoctypeToml {
 	extension: Option<String>,
 	parser: String,
 	merge_strategy: String,
+	#[serde(default)]
+	prompt: Option<String>,
+	#[serde(default)]
+	cleanup_patterns: Vec<String>,
+	#[serde(default)]
+	merge_consecutive_same_author: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Doctype {
 	pub name: String,
 	pub source_pattern: Option<Regex>,
 	pub extension: Option<String>,
 	pub parser: Parser,
 	pub merge_strategy: MergeStrategy,
+	pub prompt: Option<String>,
+	pub cleanup_patterns: Vec<Regex>,
+	pub merge_consecutive_same_author: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,9 +52,13 @@ pub struct Config {
 	pub doctypes: Vec<Doctype>,
 }
 
+#[derive(Debug, Clone)]
 pub struct DoctypeMatch {
 	pub parser: Parser,
 	pub merge_strategy: MergeStrategy,
+	pub prompt: Option<String>,
+	pub cleanup_patterns: Vec<Regex>,
+	pub merge_consecutive_same_author: bool,
 }
 
 fn parse_parser(value: &str) -> Result<Parser> {
@@ -83,6 +96,14 @@ impl Config {
 				.map(|pattern| Regex::new(&pattern))
 				.transpose()
 				.with_context(|| format!("invalid regex in doctype '{}'", entry.name))?;
+			let cleanup_patterns: Vec<Regex> = entry.cleanup_patterns
+				.iter()
+				.enumerate()
+				.map(|(i, pattern)| {
+					Regex::new(pattern)
+						.with_context(|| format!("invalid cleanup_pattern {} in doctype '{}'", i, entry.name))
+				})
+				.collect::<Result<Vec<_>>>()?;
 			doctypes.push(Doctype {
 				name: entry.name.clone(),
 				source_pattern,
@@ -91,6 +112,9 @@ impl Config {
 					.with_context(|| format!("in doctype '{}'", entry.name))?,
 				merge_strategy: parse_merge_strategy(&entry.merge_strategy)
 					.with_context(|| format!("in doctype '{}'", entry.name))?,
+				prompt: entry.prompt,
+				cleanup_patterns,
+				merge_consecutive_same_author: entry.merge_consecutive_same_author,
 			});
 		}
 		Ok(Config { doctypes })
@@ -109,6 +133,9 @@ impl Config {
 				return Some(DoctypeMatch {
 					parser: doctype.parser,
 					merge_strategy: doctype.merge_strategy,
+					prompt: doctype.prompt.clone(),
+					cleanup_patterns: doctype.cleanup_patterns.clone(),
+					merge_consecutive_same_author: doctype.merge_consecutive_same_author,
 				});
 			}
 		}
