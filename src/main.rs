@@ -62,7 +62,7 @@ fn ingest_file(
 
 	let parser = doctype_match.as_ref()
 		.map(|m| m.parser)
-		.unwrap_or(Parser::Ollama);
+		.unwrap_or(Parser::Whole);
 
 	let merge_strategy = doctype_match.as_ref()
 		.map(|m| m.merge_strategy)
@@ -77,6 +77,18 @@ fn ingest_file(
 		Parser::Whisper => {
 			eprintln!("  whisper parser not yet implemented, skipping");
 			return Ok(());
+		}
+		Parser::Whole => {
+			vec![SegmentedEntry {
+				start_line: 1,
+				end_line: body.lines().count(),
+				author: None,
+				timestamp: None,
+				body: body.clone(),
+				is_quote: false,
+				heading_level: None,
+				heading_title: None,
+			}]
 		}
 	};
 
@@ -151,6 +163,7 @@ fn print_usage() {
 		"usage:
   cathedrals ingest <directory> [--model <name>]
   cathedrals search <query>
+  cathedrals dump [source_title_filter]
   cathedrals stats
 
 options:
@@ -248,6 +261,34 @@ fn main() -> Result<()> {
 			println!("database: {}", db_path.display());
 			println!("documents: {}", documents);
 			println!("entries: {}", entries);
+		}
+		Some("dump") => {
+			let query = positional[1..].join(" ");
+			let results = storage::dump_document(&connection, if query.is_empty() { None } else { Some(&query) })?;
+			for doc in &results {
+				println!("=== [{}] {} (id={}) ===", doc.merge_strategy, doc.source_title, doc.document_id);
+				for entry in &doc.entries {
+					let author_str = entry.author.as_deref().unwrap_or("");
+					let heading_str = entry.heading_title.as_deref().unwrap_or("");
+					if !author_str.is_empty() || !heading_str.is_empty() {
+						print!("  --- ");
+						if !author_str.is_empty() {
+							print!("{}", author_str);
+						}
+						if !heading_str.is_empty() {
+							if !author_str.is_empty() {
+								print!(" | ");
+							}
+							print!("{}", heading_str);
+						}
+						println!(" ---");
+					}
+					for line in entry.body.lines() {
+						println!("  {}", line);
+					}
+					println!();
+				}
+			}
 		}
 		_ => {
 			print_usage();

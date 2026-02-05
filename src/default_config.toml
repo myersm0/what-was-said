@@ -18,7 +18,7 @@ merge_strategy = "timestamped"
 
 [[doctype]]
 name = "claude"
-source_pattern = "- Claude$"
+source_pattern = "- Claude( - Brave)?$"
 parser = "markdown"
 merge_strategy = "none"
 

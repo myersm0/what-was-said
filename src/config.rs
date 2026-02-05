@@ -11,6 +11,7 @@ pub enum Parser {
 	Ollama,
 	Markdown,
 	Whisper,
+	Whole,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +53,7 @@ fn parse_parser(value: &str) -> Result<Parser> {
 		"ollama" => Ok(Parser::Ollama),
 		"markdown" => Ok(Parser::Markdown),
 		"whisper" => Ok(Parser::Whisper),
+		"whole" => Ok(Parser::Whole),
 		other => anyhow::bail!("unknown parser: {}", other),
 	}
 }

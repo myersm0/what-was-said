@@ -180,3 +180,58 @@ pub fn document_count(connection: &Connection) -> Result<i64> {
 pub fn entry_count(connection: &Connection) -> Result<i64> {
 	Ok(connection.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?)
 }
+
+pub struct DumpEntry {
+	pub body: String,
+	pub author: Option<String>,
+	pub heading_title: Option<String>,
+	pub position: u32,
+}
+
+pub struct DumpDocument {
+	pub document_id: i64,
+	pub source_title: String,
+	pub merge_strategy: String,
+	pub entries: Vec<DumpEntry>,
+}
+
+pub fn dump_document(connection: &Connection, title_filter: Option<&str>) -> Result<Vec<DumpDocument>> {
+	let (where_clause, filter_param) = match title_filter {
+		Some(filter) => ("WHERE d.source_title LIKE ?1", format!("%{}%", filter)),
+		None => ("", String::new()),
+	};
+	let query = format!(
+		"SELECT d.id, d.source_title, d.merge_strategy,
+		        e.body, e.author, e.heading_title, e.position
+		 FROM documents d
+		 JOIN entries e ON e.document_id = d.id
+		 {} ORDER BY d.id, e.position",
+		where_clause
+	);
+	let mut statement = connection.prepare(&query)?;
+	let rows: Vec<(i64, String, String, String, Option<String>, Option<String>, u32)> = if title_filter.is_some() {
+		statement.query_map([&filter_param], |row| {
+			Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+		})?.collect::<std::result::Result<Vec<_>, _>>()?
+	} else {
+		statement.query_map([], |row| {
+			Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+		})?.collect::<std::result::Result<Vec<_>, _>>()?
+	};
+
+	let mut documents: Vec<DumpDocument> = Vec::new();
+	for (doc_id, source_title, merge_strategy, body, author, heading_title, position) in rows {
+		let doc = documents.iter_mut().find(|d| d.document_id == doc_id);
+		let entry = DumpEntry { body, author, heading_title, position };
+		match doc {
+			Some(doc) => doc.entries.push(entry),
+			None => documents.push(DumpDocument {
+				document_id: doc_id,
+				source_title,
+				merge_strategy,
+				entries: vec![entry],
+			}),
+		}
+	}
+	Ok(documents)
+}
