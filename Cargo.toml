@@ -1,0 +1,15 @@
+[package]
+name = "cathedrals"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+ratatui = "0.28"
+crossterm = "0.28"
+anyhow = "1"
+regex = "1"
