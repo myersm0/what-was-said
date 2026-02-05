@@ -54,6 +54,7 @@ pub struct Config {
 
 #[derive(Debug, Clone)]
 pub struct DoctypeMatch {
+	pub name: String,
 	pub parser: Parser,
 	pub merge_strategy: MergeStrategy,
 	pub prompt: Option<String>,
@@ -131,6 +132,7 @@ impl Config {
 			};
 			if source_match || extension_match {
 				return Some(DoctypeMatch {
+					name: doctype.name.clone(),
 					parser: doctype.parser,
 					merge_strategy: doctype.merge_strategy,
 					prompt: doctype.prompt.clone(),

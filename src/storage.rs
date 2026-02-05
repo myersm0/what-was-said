@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::types::*;
 
@@ -8,9 +8,12 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 		"
 		CREATE TABLE IF NOT EXISTS documents (
 			id INTEGER PRIMARY KEY,
+			title TEXT,
 			source_title TEXT NOT NULL,
+			doctype_name TEXT,
 			merge_strategy TEXT NOT NULL CHECK (merge_strategy IN ('none', 'positional', 'timestamped')),
-			origin_path TEXT
+			origin_path TEXT,
+			clip_date TEXT NOT NULL
 		);
 
 		CREATE TABLE IF NOT EXISTS entries (
@@ -92,20 +95,34 @@ fn merge_strategy_to_str(strategy: MergeStrategy) -> &'static str {
 
 pub fn insert_document(
 	connection: &Connection,
+	title: Option<&str>,
 	source_title: &str,
+	doctype_name: Option<&str>,
 	merge_strategy: MergeStrategy,
 	origin_path: Option<&str>,
+	clip_date: &str,
 ) -> Result<DocumentId> {
 	connection.execute(
-		"INSERT INTO documents (source_title, merge_strategy, origin_path)
-		 VALUES (?1, ?2, ?3)",
+		"INSERT INTO documents (title, source_title, doctype_name, merge_strategy, origin_path, clip_date)
+		 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
 		params![
+			title,
 			source_title,
+			doctype_name,
 			merge_strategy_to_str(merge_strategy),
 			origin_path,
+			clip_date,
 		],
 	)?;
 	Ok(DocumentId(connection.last_insert_rowid()))
+}
+
+pub fn update_document_title(connection: &Connection, document_id: DocumentId, title: &str) -> Result<()> {
+	connection.execute(
+		"UPDATE documents SET title = ?1 WHERE id = ?2",
+		params![title, document_id.0],
+	)?;
+	Ok(())
 }
 
 pub fn insert_entry(
@@ -322,4 +339,171 @@ pub fn dump_document(connection: &Connection, title_filter: Option<&str>) -> Res
 		}
 	}
 	Ok(documents)
+}
+
+#[derive(Debug, Clone)]
+pub struct DocumentSummary {
+	pub id: i64,
+	pub title: Option<String>,
+	pub source_title: String,
+	pub doctype_name: Option<String>,
+	pub clip_date: String,
+	pub entry_count: i64,
+	pub chunk_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortColumn {
+	Title,
+	Source,
+	Doctype,
+	Date,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+	Ascending,
+	Descending,
+}
+
+pub fn list_documents(
+	connection: &Connection,
+	sort_column: SortColumn,
+	sort_direction: SortDirection,
+) -> Result<Vec<DocumentSummary>> {
+	let order_col = match sort_column {
+		SortColumn::Title => "COALESCE(d.title, d.source_title)",
+		SortColumn::Source => "d.source_title",
+		SortColumn::Doctype => "d.doctype_name",
+		SortColumn::Date => "d.clip_date",
+	};
+	let order_dir = match sort_direction {
+		SortDirection::Ascending => "ASC",
+		SortDirection::Descending => "DESC",
+	};
+	let query = format!(
+		"SELECT d.id, d.title, d.source_title, d.doctype_name, d.clip_date,
+		        COUNT(DISTINCT e.id) as entry_count,
+		        COUNT(c.id) as chunk_count
+		 FROM documents d
+		 LEFT JOIN entries e ON e.document_id = d.id
+		 LEFT JOIN chunks c ON c.entry_id = e.id
+		 GROUP BY d.id
+		 ORDER BY {} {} NULLS LAST",
+		order_col, order_dir
+	);
+	let mut statement = connection.prepare(&query)?;
+	let results = statement
+		.query_map([], |row| {
+			Ok(DocumentSummary {
+				id: row.get(0)?,
+				title: row.get(1)?,
+				source_title: row.get(2)?,
+				doctype_name: row.get(3)?,
+				clip_date: row.get(4)?,
+				entry_count: row.get(5)?,
+				chunk_count: row.get(6)?,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(results)
+}
+
+#[derive(Debug, Clone)]
+pub struct DocumentContent {
+	pub id: i64,
+	pub title: Option<String>,
+	pub source_title: String,
+	pub doctype_name: Option<String>,
+	pub clip_date: String,
+	pub entries: Vec<EntryContent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntryContent {
+	pub id: i64,
+	pub position: u32,
+	pub body: String,
+	pub author: Option<String>,
+	pub timestamp: Option<String>,
+	pub heading_level: Option<u8>,
+	pub heading_title: Option<String>,
+	pub chunks: Vec<ChunkContent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkContent {
+	pub id: i64,
+	pub chunk_index: u32,
+	pub start_char: usize,
+	pub end_char: usize,
+	pub body: String,
+}
+
+pub fn get_document(connection: &Connection, document_id: i64) -> Result<Option<DocumentContent>> {
+	let doc_row: Option<(i64, Option<String>, String, Option<String>, String)> = connection
+		.query_row(
+			"SELECT id, title, source_title, doctype_name, clip_date FROM documents WHERE id = ?1",
+			params![document_id],
+			|row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+		)
+		.optional()?;
+
+	let Some((id, title, source_title, doctype_name, clip_date)) = doc_row else {
+		return Ok(None);
+	};
+
+	let mut entry_stmt = connection.prepare(
+		"SELECT id, position, body, author, timestamp, heading_level, heading_title
+		 FROM entries WHERE document_id = ?1 ORDER BY position"
+	)?;
+	let entry_rows: Vec<(i64, u32, String, Option<String>, Option<String>, Option<u8>, Option<String>)> = entry_stmt
+		.query_map(params![document_id], |row| {
+			Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+
+	let mut chunk_stmt = connection.prepare(
+		"SELECT id, chunk_index, start_char, end_char, body FROM chunks WHERE entry_id = ?1 ORDER BY chunk_index"
+	)?;
+
+	let mut entries = Vec::new();
+	for (entry_id, position, body, author, timestamp, heading_level, heading_title) in entry_rows {
+		let chunk_rows: Vec<(i64, u32, usize, usize, String)> = chunk_stmt
+			.query_map(params![entry_id], |row| {
+				Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+			})?
+			.collect::<std::result::Result<Vec<_>, _>>()?;
+
+		let chunks: Vec<ChunkContent> = chunk_rows
+			.into_iter()
+			.map(|(id, chunk_index, start_char, end_char, body)| ChunkContent {
+				id,
+				chunk_index,
+				start_char,
+				end_char,
+				body,
+			})
+			.collect();
+
+		entries.push(EntryContent {
+			id: entry_id,
+			position,
+			body,
+			author,
+			timestamp,
+			heading_level,
+			heading_title,
+			chunks,
+		});
+	}
+
+	Ok(Some(DocumentContent {
+		id,
+		title,
+		source_title,
+		doctype_name,
+		clip_date,
+		entries,
+	}))
 }

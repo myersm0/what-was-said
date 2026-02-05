@@ -7,3 +7,4 @@ pub mod markdown;
 pub mod storage;
 pub mod ingest;
 pub mod whisper;
+pub mod tui;

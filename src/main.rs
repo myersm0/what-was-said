@@ -7,6 +7,7 @@ use cathedrals::ingest::{self, OllamaClient, SegmentationOptions};
 use cathedrals::markdown;
 use cathedrals::minhash;
 use cathedrals::storage;
+use cathedrals::tui;
 use cathedrals::types::*;
 
 fn default_db_path() -> PathBuf {
@@ -106,15 +107,24 @@ fn ingest_file(
 		return Ok(());
 	}
 
+	let title = segmented.iter()
+		.find(|e| e.heading_title.is_some())
+		.and_then(|e| e.heading_title.clone());
+
+	let doctype_name = doctype_match.as_ref().map(|m| m.name.as_str());
+
 	let file_path_str = file_path.to_string_lossy();
 
 	let transaction = connection.unchecked_transaction()?;
 
 	let document_id = storage::insert_document(
 		&transaction,
+		title.as_deref(),
 		&source_title,
+		doctype_name,
 		merge_strategy,
 		Some(&file_path_str),
+		&clip_date_str,
 	)?;
 
 	let mut total_chunks = 0usize;
@@ -195,10 +205,6 @@ options:
 
 fn main() -> Result<()> {
 	let args: Vec<String> = std::env::args().collect();
-	if args.len() < 2 {
-		print_usage();
-		std::process::exit(1);
-	}
 
 	let mut db_path: Option<PathBuf> = None;
 	let mut config_path: Option<PathBuf> = None;
@@ -224,6 +230,10 @@ fn main() -> Result<()> {
 			"--model" => {
 				index += 1;
 				model_name = args[index].clone();
+			}
+			"--help" | "-h" => {
+				print_usage();
+				return Ok(());
 			}
 			other => positional.push(other.to_string()),
 		}
@@ -313,6 +323,9 @@ fn main() -> Result<()> {
 					println!();
 				}
 			}
+		}
+		Some("browse") | None => {
+			tui::run(&connection)?;
 		}
 		_ => {
 			print_usage();

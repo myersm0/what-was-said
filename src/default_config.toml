@@ -1,6 +1,6 @@
 [[doctype]]
 name = "email"
-source_pattern = "- (Outlook|Mail|Gmail) -"
+source_pattern = "- (Outlook|Mail|Gmail)( - Brave)?$"
 parser = "ollama"
 merge_strategy = "positional"
 prompt = """
@@ -24,16 +24,17 @@ cleanup_patterns = [
 
 [[doctype]]
 name = "slack"
-source_pattern = "- Slack -"
+source_pattern = "(Channel|DM).*Slack( - Brave)?$"
 parser = "ollama"
 merge_strategy = "positional"
 merge_consecutive_same_author = true
 prompt = """
 CRITICAL RULES FOR SLACK:
-- Messages are DELIMITED by text like: "Name  [HH:MM AM/PM]" or "Name [HH:MM AM/PM]" followed by message text
+- Message format: "Name  [HH:MM AM/PM]" or "Name [HH:MM AM/PM]" followed by message text
 - A line starting with just a timestamp like "[10:01 AM]" continues the PREVIOUS author's message
 - Thread indicators like "N replies" should be ignored
 - Extract author from the name portion before the timestamp
+- Extract timestamp from the bracketed time
 - body_start_line is the line containing the actual message (may be same line as author or next line)
 - body_end_line is the last line before the next author/timestamp line
 """
