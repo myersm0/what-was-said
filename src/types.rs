@@ -13,7 +13,6 @@ pub struct DocumentId(pub i64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MediaId(pub i64);
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeStrategy {
 	None,
@@ -21,21 +20,12 @@ pub enum MergeStrategy {
 	Timestamped,
 }
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Collection {
-	Personal,
-	Work,
-}
-
-
 #[derive(Debug, Clone)]
 pub struct SourceInfo {
 	pub title: String,
 	pub clip_date: NaiveDateTime,
 	pub file_path: PathBuf,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -49,14 +39,12 @@ pub struct Entry {
 	pub heading_title: Option<String>,
 	pub source: SourceInfo,
 	pub is_quote: bool,
-	pub is_contaminated: bool,
 	pub minhash: MinHashSignature,
 }
 
 #[derive(Debug, Clone)]
 pub struct Document {
 	pub id: DocumentId,
-	pub collection: Collection,
 	pub source_title: String,
 	pub merge_strategy: MergeStrategy,
 	pub origin_path: Option<PathBuf>,
@@ -68,7 +56,6 @@ impl Document {
 		!matches!(self.merge_strategy, MergeStrategy::None)
 	}
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaType {
@@ -86,7 +73,6 @@ pub struct MediaItem {
 	pub duration: Option<f64>,
 	pub document_id: Option<DocumentId>,
 }
-
 
 #[derive(Debug, Clone)]
 pub enum TimelineEvent {
@@ -142,7 +128,6 @@ impl Timeline {
 	}
 }
 
-
 #[derive(Debug, Clone)]
 pub struct SegmentedEntry {
 	pub start_line: usize,
@@ -151,7 +136,6 @@ pub struct SegmentedEntry {
 	pub timestamp: Option<String>,
 	pub body: String,
 	pub is_quote: bool,
-	pub is_contaminated: bool,
 	pub heading_level: Option<u8>,
 	pub heading_title: Option<String>,
 }
@@ -161,18 +145,10 @@ pub struct SegmentationResult {
 	pub entries: Vec<SegmentedEntry>,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct CandidateMatch {
 	pub entry_a: EntryId,
 	pub entry_b: EntryId,
 	pub similarity: f64,
 	pub neighbor_corroborated: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum MergeDecision {
-	KeepExisting,
-	ReplaceWithNew,
-	New,
 }

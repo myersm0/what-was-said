@@ -1,0 +1,29 @@
+[[doctype]]
+name = "email"
+source_pattern = "- (Outlook|Mail|Gmail)$"
+parser = "ollama"
+merge_strategy = "positional"
+
+[[doctype]]
+name = "slack"
+source_pattern = "Slack"
+parser = "ollama"
+merge_strategy = "positional"
+
+[[doctype]]
+name = "meeting_transcript"
+source_pattern = "(Zoom|Teams Meeting)"
+parser = "ollama"
+merge_strategy = "timestamped"
+
+[[doctype]]
+name = "claude"
+source_pattern = "- Claude$"
+parser = "markdown"
+merge_strategy = "none"
+
+[[doctype]]
+name = "markdown"
+extension = "md"
+parser = "markdown"
+merge_strategy = "none"

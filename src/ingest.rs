@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::types::{SegmentedEntry, SegmentationResult, SourceInfo};
+use crate::types::{SegmentedEntry, SegmentationResult};
 
 #[derive(Serialize)]
 struct OllamaRequest {
@@ -30,8 +30,8 @@ struct SegmentedEntryJson {
 	author: Option<String>,
 	timestamp: Option<String>,
 	body: String,
+	#[serde(default)]
 	is_quote: bool,
-	is_contaminated: bool,
 }
 
 pub struct OllamaClient {
@@ -84,7 +84,11 @@ impl OllamaClient {
 			.send()?
 			.json()?;
 
-		let parsed: SegmentationJson = serde_json::from_str(&response.response)?;
+		let parsed: SegmentationJson = serde_json::from_str(&response.response)
+			.map_err(|error| {
+				eprintln!("ollama returned: {}", &response.response[..response.response.len().min(500)]);
+				error
+			})?;
 
 		let entries = parsed
 			.entries
@@ -96,7 +100,6 @@ impl OllamaClient {
 				timestamp: entry.timestamp,
 				body: entry.body,
 				is_quote: entry.is_quote,
-				is_contaminated: entry.is_contaminated,
 				heading_level: None,
 				heading_title: None,
 			})
@@ -125,20 +128,6 @@ pub fn parse_clip_date(filename: &str) -> Option<chrono::NaiveDateTime> {
 		}
 	}
 	None
-}
-
-pub fn infer_merge_strategy(source_title: &str) -> crate::types::MergeStrategy {
-	let lower = source_title.to_lowercase();
-	if lower.contains("slack") {
-		return crate::types::MergeStrategy::Positional;
-	}
-	if lower.contains("outlook") || lower.contains("mail") || lower.contains("gmail") {
-		return crate::types::MergeStrategy::Positional;
-	}
-	if lower.contains("zoom") || lower.contains("teams meeting") {
-		return crate::types::MergeStrategy::Timestamped;
-	}
-	crate::types::MergeStrategy::None
 }
 
 fn segmentation_system_prompt() -> &'static str {

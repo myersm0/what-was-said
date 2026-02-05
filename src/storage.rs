@@ -8,7 +8,6 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 		"
 		CREATE TABLE IF NOT EXISTS documents (
 			id INTEGER PRIMARY KEY,
-			collection TEXT NOT NULL CHECK (collection IN ('personal', 'work')),
 			source_title TEXT NOT NULL,
 			merge_strategy TEXT NOT NULL CHECK (merge_strategy IN ('none', 'positional', 'timestamped')),
 			origin_path TEXT
@@ -27,7 +26,6 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			heading_level INTEGER,
 			heading_title TEXT,
 			is_quote INTEGER NOT NULL DEFAULT 0,
-			is_contaminated INTEGER NOT NULL DEFAULT 0,
 			minhash BLOB NOT NULL
 		);
 
@@ -83,25 +81,16 @@ fn merge_strategy_to_str(strategy: MergeStrategy) -> &'static str {
 	}
 }
 
-fn collection_to_str(collection: Collection) -> &'static str {
-	match collection {
-		Collection::Personal => "personal",
-		Collection::Work => "work",
-	}
-}
-
 pub fn insert_document(
 	connection: &Connection,
-	collection: Collection,
 	source_title: &str,
 	merge_strategy: MergeStrategy,
 	origin_path: Option<&str>,
 ) -> Result<DocumentId> {
 	connection.execute(
-		"INSERT INTO documents (collection, source_title, merge_strategy, origin_path)
-		 VALUES (?1, ?2, ?3, ?4)",
+		"INSERT INTO documents (source_title, merge_strategy, origin_path)
+		 VALUES (?1, ?2, ?3)",
 		params![
-			collection_to_str(collection),
 			source_title,
 			merge_strategy_to_str(merge_strategy),
 			origin_path,
@@ -128,8 +117,8 @@ pub fn insert_entry(
 		"INSERT INTO entries (
 			document_id, body, author, timestamp, source_title,
 			clip_date, file_path, position, heading_level, heading_title,
-			is_quote, is_contaminated, minhash
-		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+			is_quote, minhash
+		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
 		params![
 			document_id.0,
 			entry.body,
@@ -142,7 +131,6 @@ pub fn insert_entry(
 			entry.heading_level.map(|l| l as i32),
 			entry.heading_title,
 			entry.is_quote as i32,
-			entry.is_contaminated as i32,
 			minhash_bytes,
 		],
 	)?;

@@ -88,7 +88,6 @@ fn make_entry(
 		timestamp: Option::None,
 		body: body.to_string(),
 		is_quote: false,
-		is_contaminated: false,
 		heading_level,
 		heading_title,
 	}

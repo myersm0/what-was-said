@@ -7,15 +7,19 @@ For each entry, report:
 - "end_line": the last line number of this entry's body
 - "author": the name of the person who wrote it. In emails, extract this from the "From:" header. In Slack, extract from the author line. Never null if an author is identifiable.
 - "timestamp": any timestamp associated with this entry, copied verbatim. In emails, extract from the "Sent:" header. In Slack, extract from the timestamp line. Never null if a timestamp is present.
-- "body": the message body text only. Exclude: author names, timestamps, headers, formatting artifacts, email signatures (everything after "-- " or similar sign-off lines), "Sent from my iPhone/Android" lines, confidentiality disclaimers, and structured signature blocks (name/title/phone/address blocks at the end of an email). Only include the actual message content.
+- "body": the message body text only. Exclude all of the following from the body:
+  - Author names, timestamps, headers, formatting artifacts
+  - Email signatures (everything after "-- " or similar sign-off lines)
+  - "Sent from my iPhone/Android" lines
+  - Confidentiality disclaimers and legal boilerplate
+  - Structured signature blocks (name/title/phone/address blocks at the end of an email)
+  Only include the actual message content.
 - "is_quote": see rules below
-- "is_contaminated": see rules below
 
 Rules for email threads:
 - Each "From:" / "Sent:" header block marks a separate entry. Always extract the author from "From:" and the timestamp from "Sent:".
 - The FIRST (topmost) entry in an email is the newest reply. It has is_quote=false.
 - Any SUBSEQUENT entry (appearing below the first) is quoted/forwarded text from an earlier message in the chain. These MUST have is_quote=true.
-- If the text contains phrases like "responses inline", "see my comments below", or "answers in red", the author has inserted new content into the body of a quoted earlier message. In this case, the quoted entry MUST have is_contaminated=true, because it no longer faithfully represents the original message. Key indicator: the quoted message's body contains lines that were clearly NOT written by the original author (answers to questions, interjected comments, etc.).
 - A forwarded message (indicated by "Forwarded message" or "FW:") should also have is_quote=true.
 
 Return a JSON object with a single key "entries" containing an array of entry objects. Do not include any text outside the JSON.

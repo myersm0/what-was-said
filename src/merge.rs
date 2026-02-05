@@ -1,4 +1,4 @@
-use crate::minhash::{is_short_entry, jaccard, minhash, minhash_with_context};
+use crate::minhash::{is_short_entry, jaccard};
 use crate::types::*;
 
 const similarity_threshold: f64 = 0.8;
@@ -79,20 +79,6 @@ pub fn filter_candidates(candidates: &[CandidateMatch], existing: &[Entry]) -> V
 		.collect()
 }
 
-pub fn decide_merge(
-	candidate: &CandidateMatch,
-	existing: &Entry,
-	incoming: &Entry,
-) -> MergeDecision {
-	if existing.is_quote && existing.is_contaminated && !incoming.is_contaminated {
-		return MergeDecision::ReplaceWithNew;
-	}
-	if incoming.is_quote && incoming.is_contaminated && !existing.is_contaminated {
-		return MergeDecision::KeepExisting;
-	}
-	MergeDecision::KeepExisting
-}
-
 pub fn merge_incremental(existing: &mut Document, incoming: &Document) {
 	let mut candidates = find_candidates(&existing.entries, &incoming.entries);
 	corroborate_neighbors(&mut candidates, &existing.entries, &incoming.entries);
@@ -111,13 +97,7 @@ pub fn merge_incremental(existing: &mut Document, incoming: &Document) {
 			.find(|entry| entry.id == candidate.entry_b);
 
 		if let (Some(existing_entry), Some(incoming_entry)) = (existing_entry, incoming_entry) {
-			match decide_merge(candidate, existing_entry, incoming_entry) {
-				MergeDecision::ReplaceWithNew => {
-					*existing_entry = incoming_entry.clone();
-				}
-				MergeDecision::KeepExisting => {}
-				MergeDecision::New => {}
-			}
+			*existing_entry = incoming_entry.clone();
 		}
 	}
 

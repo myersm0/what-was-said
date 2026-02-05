@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+use cathedrals::config::{self, Parser};
 use cathedrals::ingest::{self, OllamaClient};
 use cathedrals::markdown;
 use cathedrals::minhash;
@@ -27,7 +28,7 @@ fn ingest_file(
 	connection: &rusqlite::Connection,
 	ollama: &OllamaClient,
 	file_path: &Path,
-	collection: Collection,
+	config: &config::Config,
 ) -> Result<()> {
 	let text = std::fs::read_to_string(file_path)
 		.with_context(|| format!("reading {}", file_path.display()))?;
@@ -53,16 +54,30 @@ fn ingest_file(
 		.unwrap_or_else(|| chrono::Local::now().naive_local());
 	let clip_date_str = clip_date.format("%Y-%m-%d %H:%M:%S").to_string();
 
-	let is_markdown = file_path
+	let file_extension = file_path
 		.extension()
-		.map(|ext| ext == "md")
-		.unwrap_or(false);
+		.and_then(|ext| ext.to_str());
 
-	let segmented = if is_markdown {
-		markdown::parse_markdown_sections(&body)
-	} else {
-		let result = ollama.segment(&source_title, &body)?;
-		result.entries
+	let doctype_match = config.detect(&source_title, file_extension);
+
+	let parser = doctype_match.as_ref()
+		.map(|m| m.parser)
+		.unwrap_or(Parser::Ollama);
+
+	let merge_strategy = doctype_match.as_ref()
+		.map(|m| m.merge_strategy)
+		.unwrap_or(MergeStrategy::None);
+
+	let segmented = match parser {
+		Parser::Markdown => markdown::parse_markdown_sections(&body),
+		Parser::Ollama => {
+			let result = ollama.segment(&source_title, &body)?;
+			result.entries
+		}
+		Parser::Whisper => {
+			eprintln!("  whisper parser not yet implemented, skipping");
+			return Ok(());
+		}
 	};
 
 	if segmented.is_empty() {
@@ -70,17 +85,10 @@ fn ingest_file(
 		return Ok(());
 	}
 
-	let merge_strategy = if is_markdown {
-		MergeStrategy::None
-	} else {
-		ingest::infer_merge_strategy(&source_title)
-	};
-
 	let file_path_str = file_path.to_string_lossy();
 
 	let document_id = storage::insert_document(
 		connection,
-		collection,
 		&source_title,
 		merge_strategy,
 		Some(&file_path_str),
@@ -112,7 +120,7 @@ fn ingest_directory(
 	connection: &rusqlite::Connection,
 	ollama: &OllamaClient,
 	directory: &Path,
-	collection: Collection,
+	config: &config::Config,
 ) -> Result<u32> {
 	let mut count = 0u32;
 	let mut paths: Vec<PathBuf> = std::fs::read_dir(directory)?
@@ -130,7 +138,7 @@ fn ingest_directory(
 
 	for path in &paths {
 		eprint!("ingesting {} ... ", path.display());
-		match ingest_file(connection, ollama, path, collection) {
+		match ingest_file(connection, ollama, path, config) {
 			Ok(()) => count += 1,
 			Err(error) => eprintln!("  error: {:#}", error),
 		}
@@ -141,15 +149,15 @@ fn ingest_directory(
 fn print_usage() {
 	eprintln!(
 		"usage:
-  cathedrals ingest <directory> [--collection personal|work] [--model <name>]
+  cathedrals ingest <directory> [--model <name>]
   cathedrals search <query>
   cathedrals stats
 
 options:
   --db <path>          database path (default: $XDG_DATA_HOME/cathedrals/cathedrals.db)
+  --config <path>      config file (default: $XDG_CONFIG_HOME/cathedrals/config.toml)
   --ollama <url>       ollama endpoint (default: http://localhost:11434)
-  --model <name>       ollama model (default: mistral-nemo)
-  --collection <name>  personal or work (default: personal)"
+  --model <name>       ollama model (default: mistral-nemo)"
 	);
 }
 
@@ -161,9 +169,9 @@ fn main() -> Result<()> {
 	}
 
 	let mut db_path: Option<PathBuf> = None;
+	let mut config_path: Option<PathBuf> = None;
 	let mut ollama_url = "http://localhost:11434".to_string();
 	let mut model_name = "mistral-nemo".to_string();
-	let mut collection = Collection::Personal;
 
 	let mut positional = Vec::new();
 	let mut index = 1;
@@ -173,6 +181,10 @@ fn main() -> Result<()> {
 				index += 1;
 				db_path = Some(PathBuf::from(&args[index]));
 			}
+			"--config" => {
+				index += 1;
+				config_path = Some(PathBuf::from(&args[index]));
+			}
 			"--ollama" => {
 				index += 1;
 				ollama_url = args[index].clone();
@@ -181,19 +193,13 @@ fn main() -> Result<()> {
 				index += 1;
 				model_name = args[index].clone();
 			}
-			"--collection" => {
-				index += 1;
-				collection = match args[index].as_str() {
-					"work" => Collection::Work,
-					_ => Collection::Personal,
-				};
-			}
 			other => positional.push(other.to_string()),
 		}
 		index += 1;
 	}
 
 	let db_path = db_path.unwrap_or_else(default_db_path);
+	let config = config::load_or_default(config_path.as_deref())?;
 	let connection = open_db(&db_path)?;
 
 	match positional.first().map(|s| s.as_str()) {
@@ -206,7 +212,7 @@ fn main() -> Result<()> {
 				&connection,
 				&ollama,
 				Path::new(directory),
-				collection,
+				&config,
 			)?;
 			eprintln!("ingested {} files", count);
 		}
