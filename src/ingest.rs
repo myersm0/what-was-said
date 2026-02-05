@@ -1,8 +1,24 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
 
 use crate::types::{SegmentedEntry, SegmentationResult};
+
+fn bool_from_flexible<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<bool, D::Error> {
+	#[derive(Deserialize)]
+	#[serde(untagged)]
+	enum FlexBool {
+		Bool(bool),
+		Str(String),
+	}
+	match FlexBool::deserialize(deserializer)? {
+		FlexBool::Bool(b) => Ok(b),
+		FlexBool::Str(s) => match s.to_lowercase().as_str() {
+			"true" | "1" | "yes" => Ok(true),
+			_ => Ok(false),
+		},
+	}
+}
 
 #[derive(Serialize)]
 struct OllamaRequest {
@@ -30,7 +46,7 @@ struct SegmentedEntryJson {
 	author: Option<String>,
 	timestamp: Option<String>,
 	body: String,
-	#[serde(default)]
+	#[serde(default, deserialize_with = "bool_from_flexible")]
 	is_quote: bool,
 }
 
@@ -85,9 +101,13 @@ impl OllamaClient {
 			.json()?;
 
 		let parsed: SegmentationJson = serde_json::from_str(&response.response)
-			.map_err(|error| {
-				eprintln!("ollama returned: {}", &response.response[..response.response.len().min(500)]);
-				error
+			.or_else(|_| {
+				let entries: Vec<SegmentedEntryJson> = serde_json::from_str(&response.response)?;
+				Ok(SegmentationJson { entries })
+			})
+			.map_err(|error: serde_json::Error| {
+				let preview: String = response.response.chars().take(300).collect();
+				anyhow::anyhow!("failed to parse segmentation response: {}\nollama returned: {}", error, preview)
 			})?;
 
 		let entries = parsed
