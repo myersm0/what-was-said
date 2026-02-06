@@ -432,7 +432,7 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 		if let Some(ref heading) = entry.heading_title {
 			let level = entry.heading_level.unwrap_or(1);
 			let prefix = "#".repeat(level as usize);
-			all_lines.push((Line::from(format!("{} {}", prefix, heading)), false));
+			all_lines.push((Line::from(expand_tabs(&format!("{} {}", prefix, heading))), false));
 			all_lines.push((Line::from(""), false));
 		}
 
@@ -443,14 +443,14 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 		if entry.chunks.is_empty() {
 			let is_current = chunk_counter == app.current_chunk_index;
 			for body_line in entry.body.lines() {
-				all_lines.push((Line::from(body_line), is_current));
+				all_lines.push((Line::from(expand_tabs(body_line)), is_current));
 			}
 			chunk_counter += 1;
 		} else {
 			for chunk in &entry.chunks {
 				let is_current = chunk_counter == app.current_chunk_index;
 				for body_line in chunk.body.lines() {
-					all_lines.push((Line::from(body_line), is_current));
+					all_lines.push((Line::from(expand_tabs(body_line)), is_current));
 				}
 				chunk_counter += 1;
 			}
@@ -529,7 +529,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 				),
 			])];
 			for chunk in result.chunks.iter().take(2) {
-				let preview = truncate_string(chunk.chunk_body.replace('\n', " "), 60);
+				let preview = truncate_string(expand_tabs(&chunk.chunk_body).replace('\n', " "), 60);
 				lines.push(Line::from(vec![
 					Span::raw("  │ "),
 					Span::styled(preview, Style::default().fg(Color::DarkGray)),
@@ -607,4 +607,8 @@ fn truncate_string(s: String, max_len: usize) -> String {
 		}
 		s[..end].to_string()
 	}
+}
+
+fn expand_tabs(s: &str) -> String {
+	s.replace('\t', "    ")
 }
