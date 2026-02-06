@@ -31,13 +31,20 @@ fn ingest_file(
 	ollama: &OllamaClient,
 	file_path: &Path,
 	config: &config::Config,
-) -> Result<()> {
+	force: bool,
+) -> Result<bool> {
+	let file_path_str = file_path.to_string_lossy();
+
+	if !force && storage::document_exists_by_path(connection, &file_path_str)? {
+		return Ok(false);
+	}
+
 	let text = std::fs::read_to_string(file_path)
 		.with_context(|| format!("reading {}", file_path.display()))?;
 
 	let lines: Vec<&str> = text.lines().collect();
 	if lines.is_empty() {
-		return Ok(());
+		return Ok(false);
 	}
 
 	let source_title = ingest::parse_source_header(lines[0])
@@ -86,7 +93,7 @@ fn ingest_file(
 		}
 		Parser::Whisper => {
 			eprintln!("  whisper parser not yet implemented, skipping");
-			return Ok(());
+			return Ok(false);
 		}
 		Parser::Whole => {
 			vec![SegmentedEntry {
@@ -104,7 +111,7 @@ fn ingest_file(
 
 	if segmented.is_empty() {
 		eprintln!("  no entries found, skipping");
-		return Ok(());
+		return Ok(false);
 	}
 
 	let title = segmented.iter()
@@ -112,8 +119,6 @@ fn ingest_file(
 		.and_then(|e| e.heading_title.clone());
 
 	let doctype_name = doctype_match.as_ref().map(|m| m.name.as_str());
-
-	let file_path_str = file_path.to_string_lossy();
 
 	let transaction = connection.unchecked_transaction()?;
 
@@ -154,7 +159,7 @@ fn ingest_file(
 		total_chunks,
 		source_title,
 	);
-	Ok(())
+	Ok(true)
 }
 
 fn ingest_directory(
@@ -162,8 +167,10 @@ fn ingest_directory(
 	ollama: &OllamaClient,
 	directory: &Path,
 	config: &config::Config,
-) -> Result<u32> {
-	let mut count = 0u32;
+	force: bool,
+) -> Result<(u32, u32)> {
+	let mut ingested = 0u32;
+	let mut skipped = 0u32;
 	let mut paths: Vec<PathBuf> = std::fs::read_dir(directory)?
 		.filter_map(|entry| entry.ok())
 		.map(|entry| entry.path())
@@ -178,28 +185,34 @@ fn ingest_directory(
 	eprintln!("found {} files in {}", paths.len(), directory.display());
 
 	for path in &paths {
-		eprint!("ingesting {} ... ", path.display());
-		match ingest_file(connection, ollama, path, config) {
-			Ok(()) => count += 1,
-			Err(error) => eprintln!("  error: {:#}", error),
+		match ingest_file(connection, ollama, path, config, force) {
+			Ok(true) => {
+				ingested += 1;
+			}
+			Ok(false) => {
+				skipped += 1;
+			}
+			Err(error) => eprintln!("error ingesting {}: {:#}", path.display(), error),
 		}
 	}
-	Ok(count)
+	Ok((ingested, skipped))
 }
 
 fn print_usage() {
 	eprintln!(
 		"usage:
-  cathedrals ingest <directory> [--model <name>]
-  cathedrals search <query>
-  cathedrals dump [source_title_filter]
-  cathedrals stats
+  cathedrals browse                    interactive TUI (default)
+  cathedrals ingest <directory>        ingest new files from directory
+  cathedrals search <query>            search chunks
+  cathedrals dump [filter]             dump documents
+  cathedrals stats                     show database statistics
 
 options:
   --db <path>          database path (default: $XDG_DATA_HOME/cathedrals/cathedrals.db)
   --config <path>      config file (default: $XDG_CONFIG_HOME/cathedrals/config.toml)
   --ollama <url>       ollama endpoint (default: http://localhost:11434)
-  --model <name>       ollama model (default: mistral-nemo)"
+  --model <n>          ollama model (default: mistral-nemo)
+  --force              re-ingest files even if already in database"
 	);
 }
 
@@ -210,6 +223,7 @@ fn main() -> Result<()> {
 	let mut config_path: Option<PathBuf> = None;
 	let mut ollama_url = "http://localhost:11434".to_string();
 	let mut model_name = "mistral-nemo".to_string();
+	let mut force = false;
 
 	let mut positional = Vec::new();
 	let mut index = 1;
@@ -231,6 +245,9 @@ fn main() -> Result<()> {
 				index += 1;
 				model_name = args[index].clone();
 			}
+			"--force" => {
+				force = true;
+			}
 			"--help" | "-h" => {
 				print_usage();
 				return Ok(());
@@ -250,13 +267,18 @@ fn main() -> Result<()> {
 				.get(1)
 				.context("ingest requires a directory argument")?;
 			let ollama = OllamaClient::new(&ollama_url, &model_name);
-			let count = ingest_directory(
+			let (ingested, skipped) = ingest_directory(
 				&connection,
 				&ollama,
 				Path::new(directory),
 				&config,
+				force,
 			)?;
-			eprintln!("ingested {} files", count);
+			if skipped > 0 {
+				eprintln!("ingested {} files, skipped {} (already in db)", ingested, skipped);
+			} else {
+				eprintln!("ingested {} files", ingested);
+			}
 		}
 		Some("search") => {
 			let query = positional[1..].join(" ");

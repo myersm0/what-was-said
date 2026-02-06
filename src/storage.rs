@@ -315,6 +315,15 @@ pub fn document_count(connection: &Connection) -> Result<i64> {
 	Ok(connection.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?)
 }
 
+pub fn document_exists_by_path(connection: &Connection, origin_path: &str) -> Result<bool> {
+	let count: i64 = connection.query_row(
+		"SELECT COUNT(*) FROM documents WHERE origin_path = ?1",
+		params![origin_path],
+		|row| row.get(0),
+	)?;
+	Ok(count > 0)
+}
+
 pub fn entry_count(connection: &Connection) -> Result<i64> {
 	Ok(connection.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?)
 }
