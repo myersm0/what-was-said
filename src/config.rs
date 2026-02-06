@@ -143,6 +143,68 @@ impl Config {
 		}
 		None
 	}
+
+	pub fn detect_with_content(&self, source_title: &str, file_extension: Option<&str>, content: &str) -> Option<DoctypeMatch> {
+		if let Some(m) = self.detect(source_title, file_extension) {
+			return Some(m);
+		}
+
+		if looks_like_markdown(content) {
+			for doctype in &self.doctypes {
+				if doctype.parser == Parser::Markdown {
+					return Some(DoctypeMatch {
+						name: doctype.name.clone(),
+						parser: doctype.parser,
+						merge_strategy: doctype.merge_strategy,
+						prompt: doctype.prompt.clone(),
+						cleanup_patterns: doctype.cleanup_patterns.clone(),
+						merge_consecutive_same_author: doctype.merge_consecutive_same_author,
+					});
+				}
+			}
+			return Some(DoctypeMatch {
+				name: "markdown".to_string(),
+				parser: Parser::Markdown,
+				merge_strategy: MergeStrategy::None,
+				prompt: None,
+				cleanup_patterns: vec![],
+				merge_consecutive_same_author: false,
+			});
+		}
+
+		None
+	}
+}
+
+fn looks_like_markdown(content: &str) -> bool {
+	let mut score = 0;
+
+	for line in content.lines().take(100) {
+		let trimmed = line.trim();
+		if trimmed.starts_with("# ") || trimmed.starts_with("## ") || trimmed.starts_with("### ") {
+			score += 2;
+		}
+		if trimmed.starts_with("```") {
+			score += 2;
+		}
+		if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("1. ") {
+			score += 1;
+		}
+		if trimmed.contains("**") || trimmed.contains("__") {
+			score += 1;
+		}
+		if trimmed.contains("](") && trimmed.contains("[") {
+			score += 1;
+		}
+		if trimmed.starts_with("|") && trimmed.ends_with("|") {
+			score += 1;
+		}
+		if score >= 3 {
+			return true;
+		}
+	}
+
+	false
 }
 
 pub fn default_config_path() -> PathBuf {

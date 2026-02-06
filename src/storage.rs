@@ -280,10 +280,17 @@ pub fn search(
 		};
 		match doc {
 			Some(doc) => {
-				if hit.rank < doc.best_rank {
-					doc.best_rank = hit.rank;
+				let dominated_by_existing = doc.chunks.iter().any(|c| {
+					(c.entry_id == hit.entry_id && c.chunk_index == hit.chunk_index)
+						|| snippets_similar(&c.snippet, &hit.snippet)
+				});
+				if !dominated_by_existing {
+					doc.chunks.retain(|c| !snippets_similar(&hit.snippet, &c.snippet) || hit.rank >= c.rank);
+					if hit.rank < doc.best_rank {
+						doc.best_rank = hit.rank;
+					}
+					doc.chunks.push(hit);
 				}
-				doc.chunks.push(hit);
 			}
 			None => grouped.push(GroupedSearchResult {
 				document_id: row.document_id,
@@ -309,6 +316,27 @@ pub fn search(
 	}
 
 	Ok(grouped)
+}
+
+fn snippets_similar(a: &str, b: &str) -> bool {
+	let a_clean = a.trim().replace('\x01', "").replace('\x02', "").replace('\x03', "");
+	let b_clean = b.trim().replace('\x01', "").replace('\x02', "").replace('\x03', "");
+
+	if a_clean == b_clean {
+		return true;
+	}
+
+	let a_words: Vec<&str> = a_clean.split_whitespace().collect();
+	let b_words: Vec<&str> = b_clean.split_whitespace().collect();
+
+	if a_words.len() < 5 || b_words.len() < 5 {
+		return false;
+	}
+
+	let overlap = a_words.iter().filter(|w| b_words.contains(w)).count();
+	let min_len = a_words.len().min(b_words.len());
+
+	overlap as f64 / min_len as f64 > 0.8
 }
 
 pub fn document_count(connection: &Connection) -> Result<i64> {

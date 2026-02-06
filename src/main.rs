@@ -67,7 +67,7 @@ fn ingest_file(
 		.extension()
 		.and_then(|ext| ext.to_str());
 
-	let doctype_match = config.detect(&source_title, file_extension);
+	let doctype_match = config.detect_with_content(&source_title, file_extension, &body);
 
 	let parser = doctype_match.as_ref()
 		.map(|m| m.parser)
