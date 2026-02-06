@@ -202,6 +202,7 @@ pub struct GroupedSearchResult {
 	pub document_id: i64,
 	pub source_title: String,
 	pub clip_date: String,
+	pub best_rank: f64,
 	pub chunks: Vec<ChunkHit>,
 }
 
@@ -215,7 +216,17 @@ pub struct ChunkHit {
 	pub rank: f64,
 }
 
-pub fn search(connection: &Connection, query: &str) -> Result<Vec<GroupedSearchResult>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchSortColumn {
+	Score,
+	Date,
+}
+
+pub fn search(
+	connection: &Connection,
+	query: &str,
+	sort_by: SearchSortColumn,
+) -> Result<Vec<GroupedSearchResult>> {
 	let mut statement = connection.prepare(
 		"SELECT c.id, c.entry_id, e.document_id, c.body, c.chunk_index, e.position,
 		        e.author, e.source_title, e.clip_date, e.heading_title, f.rank
@@ -224,7 +235,7 @@ pub fn search(connection: &Connection, query: &str) -> Result<Vec<GroupedSearchR
 		 JOIN entries e ON e.id = c.entry_id
 		 WHERE chunks_fts MATCH ?1
 		 ORDER BY f.rank
-		 LIMIT 50",
+		 LIMIT 100",
 	)?;
 	let rows: Vec<ChunkSearchResult> = statement
 		.query_map(params![query], |row| {
@@ -257,11 +268,17 @@ pub fn search(connection: &Connection, query: &str) -> Result<Vec<GroupedSearchR
 			rank: row.rank,
 		};
 		match doc {
-			Some(doc) => doc.chunks.push(hit),
+			Some(doc) => {
+				if hit.rank < doc.best_rank {
+					doc.best_rank = hit.rank;
+				}
+				doc.chunks.push(hit);
+			}
 			None => grouped.push(GroupedSearchResult {
 				document_id: row.document_id,
 				source_title: row.source_title,
-				clip_date: row.clip_date,
+				clip_date: row.clip_date.clone(),
+				best_rank: hit.rank,
 				chunks: vec![hit],
 			}),
 		}
@@ -269,6 +286,15 @@ pub fn search(connection: &Connection, query: &str) -> Result<Vec<GroupedSearchR
 
 	for doc in &mut grouped {
 		doc.chunks.sort_by_key(|c| (c.entry_position, c.chunk_index));
+	}
+
+	match sort_by {
+		SearchSortColumn::Score => {
+			grouped.sort_by(|a, b| a.best_rank.partial_cmp(&b.best_rank).unwrap_or(std::cmp::Ordering::Equal));
+		}
+		SearchSortColumn::Date => {
+			grouped.sort_by(|a, b| b.clip_date.cmp(&a.clip_date));
+		}
 	}
 
 	Ok(grouped)

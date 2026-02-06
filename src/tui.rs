@@ -17,7 +17,7 @@ use std::io;
 
 use crate::storage::{
 	self, DocumentContent, DocumentSummary,
-	GroupedSearchResult, SortColumn, SortDirection,
+	GroupedSearchResult, SearchSortColumn, SortColumn, SortDirection,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +40,9 @@ struct App {
 	total_chunks: usize,
 	search_query: String,
 	search_results: Vec<GroupedSearchResult>,
-	search_state: ListState,
+	search_sort_column: SearchSortColumn,
+	search_chunk_index: usize,
+	total_search_chunks: usize,
 	should_quit: bool,
 	status_message: Option<String>,
 }
@@ -49,8 +51,6 @@ impl App {
 	fn new() -> Self {
 		let mut browse_state = ListState::default();
 		browse_state.select(Some(0));
-		let mut search_state = ListState::default();
-		search_state.select(Some(0));
 		App {
 			mode: Mode::Browse,
 			previous_mode: Mode::Browse,
@@ -64,7 +64,9 @@ impl App {
 			total_chunks: 0,
 			search_query: String::new(),
 			search_results: Vec::new(),
-			search_state,
+			search_sort_column: SearchSortColumn::Score,
+			search_chunk_index: 0,
+			total_search_chunks: 0,
 			should_quit: false,
 			status_message: None,
 		}
@@ -99,31 +101,47 @@ impl App {
 	fn run_search(&mut self, connection: &Connection) -> Result<()> {
 		if self.search_query.is_empty() {
 			self.search_results.clear();
+			self.total_search_chunks = 0;
 			return Ok(());
 		}
-		self.search_results = storage::search(connection, &self.search_query)?;
-		if self.search_results.is_empty() {
-			self.search_state.select(None);
-		} else {
-			self.search_state.select(Some(0));
-		}
+		self.search_results = storage::search(connection, &self.search_query, self.search_sort_column)?;
+		self.total_search_chunks = self.search_results.iter().map(|r| r.chunks.len()).sum();
+		self.search_chunk_index = 0;
 		Ok(())
 	}
 
 	fn open_search_result(&mut self, connection: &Connection) -> Result<()> {
-		if let Some(selected) = self.search_state.selected() {
-			if let Some(result) = self.search_results.get(selected) {
-				self.current_document = storage::get_document(connection, result.document_id)?;
-				self.scroll_offset = 0;
-				self.current_chunk_index = 0;
-				self.total_chunks = self.current_document.as_ref()
-					.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
-					.unwrap_or(0);
-				self.previous_mode = Mode::Search;
-				self.mode = Mode::Read;
-			}
+		let doc_id = self.get_search_chunk_document_id();
+		if let Some(document_id) = doc_id {
+			self.current_document = storage::get_document(connection, document_id)?;
+			self.scroll_offset = 0;
+			self.current_chunk_index = 0;
+			self.total_chunks = self.current_document.as_ref()
+				.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+				.unwrap_or(0);
+			self.previous_mode = Mode::Search;
+			self.mode = Mode::Read;
 		}
 		Ok(())
+	}
+
+	fn get_search_chunk_document_id(&self) -> Option<i64> {
+		let mut chunk_counter = 0usize;
+		for result in &self.search_results {
+			if chunk_counter + result.chunks.len() > self.search_chunk_index {
+				return Some(result.document_id);
+			}
+			chunk_counter += result.chunks.len();
+		}
+		None
+	}
+
+	fn toggle_search_sort(&mut self, connection: &Connection) -> Result<()> {
+		self.search_sort_column = match self.search_sort_column {
+			SearchSortColumn::Score => SearchSortColumn::Date,
+			SearchSortColumn::Date => SearchSortColumn::Score,
+		};
+		self.run_search(connection)
 	}
 
 	fn yank_current_chunk(&mut self) {
@@ -283,23 +301,22 @@ fn run_app(
 						app.mode = Mode::Browse;
 					}
 					KeyCode::Enter => {
-						if !app.search_results.is_empty() {
+						if app.total_search_chunks > 0 {
 							app.open_search_result(connection)?;
 						}
 					}
 					KeyCode::Up => {
-						if let Some(selected) = app.search_state.selected() {
-							if selected > 0 {
-								app.search_state.select(Some(selected - 1));
-							}
+						if app.search_chunk_index > 0 {
+							app.search_chunk_index -= 1;
 						}
 					}
 					KeyCode::Down => {
-						if let Some(selected) = app.search_state.selected() {
-							if selected < app.search_results.len().saturating_sub(1) {
-								app.search_state.select(Some(selected + 1));
-							}
+						if app.search_chunk_index + 1 < app.total_search_chunks {
+							app.search_chunk_index += 1;
 						}
+					}
+					KeyCode::Tab => {
+						app.toggle_search_sort(connection)?;
 					}
 					KeyCode::Char(c) => {
 						app.search_query.push(c);
@@ -500,74 +517,100 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
-	let chunks = Layout::default()
+	let layout = Layout::default()
 		.direction(Direction::Vertical)
 		.constraints([Constraint::Length(3), Constraint::Min(1)])
 		.split(area);
 
+	let sort_indicator = match app.search_sort_column {
+		SearchSortColumn::Score => "sort: Score ▼",
+		SearchSortColumn::Date => "sort: Date ▼",
+	};
+
 	let input = Paragraph::new(app.search_query.as_str())
 		.block(
 			Block::default()
-				.title(" Search ")
+				.title(format!(" Search ({}) [Tab] {} ", app.total_search_chunks, sort_indicator))
 				.borders(Borders::ALL),
 		);
-	frame.render_widget(input, chunks[0]);
+	frame.render_widget(input, layout[0]);
 
-	let items: Vec<ListItem> = app
-		.search_results
-		.iter()
-		.map(|result| {
-			let mut lines = vec![Line::from(vec![
-				Span::styled(
-					truncate_str(&result.source_title, 50),
-					Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-				),
-				Span::raw("  "),
-				Span::styled(
-					format!("[{} matches]", result.chunks.len()),
-					Style::default().fg(Color::Yellow),
-				),
-			])];
-			for chunk in result.chunks.iter().take(2) {
-				let preview = truncate_string(expand_tabs(&chunk.chunk_body).replace('\n', " "), 60);
-				lines.push(Line::from(vec![
-					Span::raw("  │ "),
-					Span::styled(preview, Style::default().fg(Color::DarkGray)),
-				]));
-			}
-			if result.chunks.len() > 2 {
-				lines.push(Line::from(Span::styled(
-					format!("  │ ... and {} more", result.chunks.len() - 2),
-					Style::default().fg(Color::DarkGray),
-				)));
-			}
-			ListItem::new(lines)
-		})
-		.collect();
+	let mut lines: Vec<Line> = Vec::new();
+	let mut chunk_counter = 0usize;
 
-	let results_title = if app.search_results.is_empty() && !app.search_query.is_empty() {
-		" No results ".to_string()
-	} else {
-		format!(" Results ({}) ", app.search_results.len())
+	for result in &app.search_results {
+		let score_str = format!("{:.2}", -result.best_rank);
+		let date_str = &result.clip_date[..10.min(result.clip_date.len())];
+		lines.push(Line::from(vec![
+			Span::styled(
+				format!("▸ {} ", truncate_str(&result.source_title, 50)),
+				Style::default().add_modifier(Modifier::BOLD),
+			),
+			Span::raw(format!("  score: {}  date: {}  ", score_str, date_str)),
+			Span::styled(
+				format!("[{} chunks]", result.chunks.len()),
+				Style::default().fg(Color::DarkGray),
+			),
+		]));
+
+		for chunk in &result.chunks {
+			let is_current = chunk_counter == app.search_chunk_index;
+			let preview = truncate_string(expand_tabs(&chunk.chunk_body).replace('\n', " "), 70);
+			let style = if is_current {
+				Style::default().bg(Color::DarkGray)
+			} else {
+				Style::default()
+			};
+			let prefix = if is_current { "> " } else { "  " };
+			lines.push(Line::from(Span::styled(
+				format!("{}│ {}", prefix, preview),
+				style,
+			)));
+			chunk_counter += 1;
+		}
+		lines.push(Line::from(""));
+	}
+
+	let current_line = {
+		let mut counter = 0usize;
+		let mut line_index = 0usize;
+		for result in &app.search_results {
+			line_index += 1;
+			for _ in &result.chunks {
+				if counter == app.search_chunk_index {
+					break;
+				}
+				counter += 1;
+				line_index += 1;
+			}
+			if counter == app.search_chunk_index {
+				break;
+			}
+			line_index += 1;
+		}
+		line_index
 	};
 
-	let list = List::new(items)
-		.block(Block::default().title(results_title).borders(Borders::ALL))
-		.highlight_style(
-			Style::default()
-				.bg(Color::DarkGray)
-				.add_modifier(Modifier::BOLD),
-		)
-		.highlight_symbol("> ");
+	let view_height = layout[1].height.saturating_sub(2) as usize;
+	let scroll = current_line.saturating_sub(view_height / 3);
 
-	frame.render_stateful_widget(list, chunks[1], &mut app.search_state.clone());
+	let visible_lines: Vec<Line> = lines
+		.into_iter()
+		.skip(scroll)
+		.take(view_height)
+		.collect();
+
+	let paragraph = Paragraph::new(Text::from(visible_lines))
+		.block(Block::default().borders(Borders::ALL));
+
+	frame.render_widget(paragraph, layout[1]);
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let help_text = match app.mode {
 		Mode::Browse => "[↑↓] move  [Enter] open  [/] search  [s] sort  [S] direction  [q] quit",
 		Mode::Read => "[↑↓] chunk  [PgUp/PgDn] jump  [y] yank  [b] back  [/] search  [q] quit",
-		Mode::Search => "[↑↓] move  [Enter] open  [Esc] cancel",
+		Mode::Search => "[↑↓] chunk  [Enter] open  [Tab] sort  [Esc] back",
 	};
 
 	let status = if let Some(ref msg) = app.status_message {

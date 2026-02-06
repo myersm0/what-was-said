@@ -6,7 +6,7 @@ use cathedrals::config::{self, Parser};
 use cathedrals::ingest::{self, OllamaClient, SegmentationOptions};
 use cathedrals::markdown;
 use cathedrals::minhash;
-use cathedrals::storage;
+use cathedrals::storage::{self, SearchSortColumn};
 use cathedrals::tui;
 use cathedrals::types::*;
 
@@ -263,7 +263,7 @@ fn main() -> Result<()> {
 			if query.is_empty() {
 				anyhow::bail!("search requires a query");
 			}
-			let results = storage::search(&connection, &query)?;
+			let results = storage::search(&connection, &query, SearchSortColumn::Score)?;
 			if results.is_empty() {
 				println!("no results");
 			} else {
