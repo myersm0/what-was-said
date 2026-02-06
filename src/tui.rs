@@ -481,7 +481,8 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 
 		if entry.chunks.is_empty() {
 			let is_current = chunk_counter == app.current_chunk_index;
-			for body_line in entry.body.lines() {
+			let aligned_body = align_markdown_tables(&entry.body);
+			for body_line in aligned_body.lines() {
 				let (line, new_in_code_block) = render_markdown_line(body_line, in_code_block);
 				in_code_block = new_in_code_block;
 				all_lines.push((line, is_current));
@@ -490,7 +491,8 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 		} else {
 			for chunk in &entry.chunks {
 				let is_current = chunk_counter == app.current_chunk_index;
-				for body_line in chunk.body.lines() {
+				let aligned_body = align_markdown_tables(&chunk.body);
+				for body_line in aligned_body.lines() {
 					let (line, new_in_code_block) = render_markdown_line(body_line, in_code_block);
 					in_code_block = new_in_code_block;
 					all_lines.push((line, is_current));
@@ -683,6 +685,92 @@ fn truncate_string(s: String, max_len: usize) -> String {
 
 fn expand_tabs(s: &str) -> String {
 	s.replace('\t', "    ")
+}
+
+fn align_markdown_tables(text: &str) -> String {
+	let lines: Vec<&str> = text.lines().collect();
+	let mut result: Vec<String> = Vec::new();
+	let mut i = 0;
+
+	while i < lines.len() {
+		if is_table_row(lines[i]) {
+			let table_start = i;
+			while i < lines.len() && is_table_row(lines[i]) {
+				i += 1;
+			}
+			let table_lines = &lines[table_start..i];
+			result.extend(align_table(table_lines));
+		} else {
+			result.push(lines[i].to_string());
+			i += 1;
+		}
+	}
+
+	result.join("\n")
+}
+
+fn is_table_row(line: &str) -> bool {
+	let trimmed = line.trim();
+	trimmed.starts_with('|') || (trimmed.contains('|') && is_separator_row(trimmed))
+}
+
+fn is_separator_row(line: &str) -> bool {
+	let trimmed = line.trim().trim_matches('|');
+	!trimmed.is_empty() && trimmed.chars().all(|c| c == '-' || c == ':' || c == '|' || c == ' ')
+}
+
+fn align_table(rows: &[&str]) -> Vec<String> {
+	let parsed: Vec<Vec<String>> = rows
+		.iter()
+		.map(|row| parse_table_row(row))
+		.collect();
+
+	if parsed.is_empty() {
+		return Vec::new();
+	}
+
+	let column_count = parsed.iter().map(|r| r.len()).max().unwrap_or(0);
+	if column_count == 0 {
+		return rows.iter().map(|s| s.to_string()).collect();
+	}
+
+	let mut widths: Vec<usize> = vec![0; column_count];
+	for row in &parsed {
+		for (col_index, cell) in row.iter().enumerate() {
+			if col_index < widths.len() {
+				widths[col_index] = widths[col_index].max(cell.trim().chars().count());
+			}
+		}
+	}
+
+	parsed
+		.iter()
+		.zip(rows.iter())
+		.map(|(cells, original)| {
+			if is_separator_row(original) {
+				let sep_cells: Vec<String> = widths
+					.iter()
+					.map(|w| "-".repeat(*w))
+					.collect();
+				format!("| {} |", sep_cells.join(" | "))
+			} else {
+				let padded: Vec<String> = (0..column_count)
+					.map(|col_index| {
+						let cell = cells.get(col_index).map(|s| s.trim()).unwrap_or("");
+						let width = widths.get(col_index).copied().unwrap_or(0);
+						format!("{:width$}", cell, width = width)
+					})
+					.collect();
+				format!("| {} |", padded.join(" | "))
+			}
+		})
+		.collect()
+}
+
+fn parse_table_row(row: &str) -> Vec<String> {
+	let trimmed = row.trim();
+	let inner = trimmed.trim_start_matches('|').trim_end_matches('|');
+	inner.split('|').map(|s| s.to_string()).collect()
 }
 
 fn render_markdown_line(line: &str, in_code_block: bool) -> (Line<'static>, bool) {
