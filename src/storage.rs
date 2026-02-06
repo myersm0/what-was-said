@@ -189,6 +189,7 @@ pub struct ChunkSearchResult {
 	pub entry_id: i64,
 	pub document_id: i64,
 	pub chunk_body: String,
+	pub snippet: String,
 	pub chunk_index: u32,
 	pub entry_position: u32,
 	pub author: Option<String>,
@@ -211,6 +212,7 @@ pub struct ChunkHit {
 	pub entry_position: u32,
 	pub chunk_index: u32,
 	pub chunk_body: String,
+	pub snippet: String,
 	pub author: Option<String>,
 	pub heading_title: Option<String>,
 	pub rank: f64,
@@ -227,9 +229,16 @@ pub fn search(
 	query: &str,
 	sort_by: SearchSortColumn,
 ) -> Result<Vec<GroupedSearchResult>> {
+	let prefix_query: String = query
+		.split_whitespace()
+		.map(|word| format!("{}*", word))
+		.collect::<Vec<_>>()
+		.join(" ");
+
 	let mut statement = connection.prepare(
 		"SELECT c.id, c.entry_id, e.document_id, c.body, c.chunk_index, e.position,
-		        e.author, e.source_title, e.clip_date, e.heading_title, f.rank
+		        e.author, e.source_title, e.clip_date, e.heading_title, f.rank,
+		        snippet(chunks_fts, 0, '>>>', '<<<', '...', 12)
 		 FROM chunks_fts f
 		 JOIN chunks c ON c.id = f.rowid
 		 JOIN entries e ON e.id = c.entry_id
@@ -238,7 +247,7 @@ pub fn search(
 		 LIMIT 100",
 	)?;
 	let rows: Vec<ChunkSearchResult> = statement
-		.query_map(params![query], |row| {
+		.query_map(params![prefix_query], |row| {
 			Ok(ChunkSearchResult {
 				chunk_id: row.get(0)?,
 				entry_id: row.get(1)?,
@@ -251,6 +260,7 @@ pub fn search(
 				clip_date: row.get(8)?,
 				heading_title: row.get(9)?,
 				rank: row.get(10)?,
+				snippet: row.get(11)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -263,6 +273,7 @@ pub fn search(
 			entry_position: row.entry_position,
 			chunk_index: row.chunk_index,
 			chunk_body: row.chunk_body,
+			snippet: row.snippet,
 			author: row.author,
 			heading_title: row.heading_title,
 			rank: row.rank,

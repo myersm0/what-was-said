@@ -111,27 +111,44 @@ impl App {
 	}
 
 	fn open_search_result(&mut self, connection: &Connection) -> Result<()> {
-		let doc_id = self.get_search_chunk_document_id();
-		if let Some(document_id) = doc_id {
+		let chunk_info = self.get_selected_search_chunk();
+		if let Some((document_id, entry_position, chunk_index)) = chunk_info {
 			self.current_document = storage::get_document(connection, document_id)?;
 			self.scroll_offset = 0;
-			self.current_chunk_index = 0;
 			self.total_chunks = self.current_document.as_ref()
 				.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
 				.unwrap_or(0);
+
+			self.current_chunk_index = self.current_document.as_ref()
+				.map(|doc| {
+					let mut flat_index = 0usize;
+					for entry in &doc.entries {
+						if entry.position < entry_position {
+							flat_index += entry.chunks.len().max(1);
+						} else if entry.position == entry_position {
+							flat_index += chunk_index as usize;
+							break;
+						}
+					}
+					flat_index
+				})
+				.unwrap_or(0);
+
 			self.previous_mode = Mode::Search;
 			self.mode = Mode::Read;
 		}
 		Ok(())
 	}
 
-	fn get_search_chunk_document_id(&self) -> Option<i64> {
+	fn get_selected_search_chunk(&self) -> Option<(i64, u32, u32)> {
 		let mut chunk_counter = 0usize;
 		for result in &self.search_results {
-			if chunk_counter + result.chunks.len() > self.search_chunk_index {
-				return Some(result.document_id);
+			for chunk in &result.chunks {
+				if chunk_counter == self.search_chunk_index {
+					return Some((result.document_id, chunk.entry_position, chunk.chunk_index));
+				}
+				chunk_counter += 1;
 			}
-			chunk_counter += result.chunks.len();
 		}
 		None
 	}
@@ -555,7 +572,7 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 
 		for chunk in &result.chunks {
 			let is_current = chunk_counter == app.search_chunk_index;
-			let preview = truncate_string(expand_tabs(&chunk.chunk_body).replace('\n', " "), 70);
+			let preview = truncate_string(expand_tabs(&chunk.snippet).replace('\n', " "), 70);
 			let style = if is_current {
 				Style::default().bg(Color::DarkGray)
 			} else {
