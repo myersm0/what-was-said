@@ -243,6 +243,35 @@ impl App {
 		}
 	}
 
+	fn yank_full_document(&mut self) {
+		if let Some(ref doc) = self.current_document {
+			let full_text: String = doc.entries.iter()
+				.map(|entry| {
+					let mut parts = Vec::new();
+					if let Some(ref heading) = entry.heading_title {
+						let level = entry.heading_level.unwrap_or(1);
+						let prefix = "#".repeat(level as usize);
+						parts.push(format!("{} {}", prefix, heading));
+					}
+					if !entry.body.trim().is_empty() {
+						parts.push(entry.body.clone());
+					}
+					parts.join("\n\n")
+				})
+				.filter(|s| !s.is_empty())
+				.collect::<Vec<_>>()
+				.join("\n\n");
+
+			if let Ok(mut clipboard) = arboard::Clipboard::new() {
+				if clipboard.set_text(&full_text).is_ok() {
+					self.status_message = Some("Copied full document to clipboard".to_string());
+				} else {
+					self.status_message = Some("Failed to copy".to_string());
+				}
+			}
+		}
+	}
+
 	fn cycle_sort(&mut self) {
 		self.sort_column = match self.sort_column {
 			SortColumn::Source => SortColumn::Doctype,
@@ -353,6 +382,9 @@ fn run_app(
 					}
 					KeyCode::Char('y') => {
 						app.yank_current_chunk();
+					}
+					KeyCode::Char('Y') => {
+						app.yank_full_document();
 					}
 					KeyCode::Char('/') => {
 						app.mode = Mode::Search;
@@ -712,9 +744,9 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let read_help = if app.group_docs.len() > 1 {
-		"[↑↓] chunk  [◀▶] group  [PgUp/Dn] jump  [y] yank  [b] back  [q] quit"
+		"[↑↓] chunk  [◀▶] group  [y/Y] yank/all  [b] back  [q] quit"
 	} else {
-		"[↑↓] chunk  [PgUp/PgDn] jump  [y] yank  [b] back  [/] search  [q] quit"
+		"[↑↓] chunk  [PgUp/Dn] jump  [y/Y] yank/all  [b] back  [/] search  [q] quit"
 	};
 
 	let help_text = match app.mode {
