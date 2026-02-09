@@ -29,6 +29,8 @@ struct DoctypeToml {
 	cleanup_patterns: Vec<String>,
 	#[serde(default)]
 	merge_consecutive_same_author: bool,
+	#[serde(default)]
+	preprocessor: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +43,7 @@ pub struct Doctype {
 	pub prompt: Option<String>,
 	pub cleanup_patterns: Vec<Regex>,
 	pub merge_consecutive_same_author: bool,
+	pub preprocessor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +65,7 @@ pub struct DoctypeMatch {
 	pub prompt: Option<String>,
 	pub cleanup_patterns: Vec<Regex>,
 	pub merge_consecutive_same_author: bool,
+	pub preprocessor: Option<String>,
 }
 
 fn parse_parser(value: &str) -> Result<Parser> {
@@ -82,6 +86,15 @@ fn parse_merge_strategy(value: &str) -> Result<MergeStrategy> {
 		"timestamped" => Ok(MergeStrategy::Timestamped),
 		other => anyhow::bail!("unknown merge_strategy: {}", other),
 	}
+}
+
+fn expand_tilde(path: &str) -> String {
+	if path.starts_with("~/") {
+		if let Some(home) = dirs::home_dir() {
+			return home.join(&path[2..]).to_string_lossy().to_string();
+		}
+	}
+	path.to_string()
 }
 
 impl Config {
@@ -119,6 +132,7 @@ impl Config {
 				prompt: entry.prompt,
 				cleanup_patterns,
 				merge_consecutive_same_author: entry.merge_consecutive_same_author,
+				preprocessor: entry.preprocessor.map(|p| expand_tilde(&p)),
 			});
 		}
 		Ok(Config { doctypes })
@@ -141,6 +155,7 @@ impl Config {
 					prompt: doctype.prompt.clone(),
 					cleanup_patterns: doctype.cleanup_patterns.clone(),
 					merge_consecutive_same_author: doctype.merge_consecutive_same_author,
+					preprocessor: doctype.preprocessor.clone(),
 				});
 			}
 		}
@@ -162,6 +177,7 @@ impl Config {
 						prompt: doctype.prompt.clone(),
 						cleanup_patterns: doctype.cleanup_patterns.clone(),
 						merge_consecutive_same_author: doctype.merge_consecutive_same_author,
+						preprocessor: doctype.preprocessor.clone(),
 					});
 				}
 			}
@@ -172,6 +188,7 @@ impl Config {
 				prompt: None,
 				cleanup_patterns: vec![],
 				merge_consecutive_same_author: false,
+				preprocessor: None,
 			});
 		}
 
@@ -185,6 +202,7 @@ impl Config {
 						prompt: doctype.prompt.clone(),
 						cleanup_patterns: doctype.cleanup_patterns.clone(),
 						merge_consecutive_same_author: doctype.merge_consecutive_same_author,
+						preprocessor: doctype.preprocessor.clone(),
 					});
 				}
 			}
@@ -195,6 +213,7 @@ impl Config {
 				prompt: None,
 				cleanup_patterns: vec![],
 				merge_consecutive_same_author: false,
+				preprocessor: None,
 			});
 		}
 

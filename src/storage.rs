@@ -791,3 +791,71 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 		dot / (mag_a * mag_b)
 	}
 }
+
+#[derive(Debug, Clone)]
+pub struct ExistingEntry {
+	pub id: i64,
+	pub body: String,
+	pub author: Option<String>,
+	pub position: i64,
+}
+
+pub fn find_documents_by_merge_key<F>(
+	connection: &Connection,
+	merge_key_fn: F,
+	target_key: &str,
+	merge_strategy: &str,
+) -> Result<Vec<i64>>
+where
+	F: Fn(&str) -> String,
+{
+	let mut stmt = connection.prepare(
+		"SELECT id, source_title FROM documents WHERE merge_strategy = ?1"
+	)?;
+	let ids: Vec<i64> = stmt
+		.query_map(params![merge_strategy], |row| {
+			Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+		})?
+		.filter_map(|r| r.ok())
+		.filter(|(_, source_title)| merge_key_fn(source_title) == target_key)
+		.map(|(id, _)| id)
+		.collect();
+	Ok(ids)
+}
+
+pub fn get_entries_for_document(connection: &Connection, document_id: i64) -> Result<Vec<ExistingEntry>> {
+	let mut stmt = connection.prepare(
+		"SELECT id, body, author, position FROM entries WHERE document_id = ?1 ORDER BY position"
+	)?;
+	let entries = stmt
+		.query_map(params![document_id], |row| {
+			Ok(ExistingEntry {
+				id: row.get(0)?,
+				body: row.get(1)?,
+				author: row.get(2)?,
+				position: row.get(3)?,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(entries)
+}
+
+pub fn get_max_entry_position(connection: &Connection, document_id: i64) -> Result<i64> {
+	let max_pos: Option<i64> = connection
+		.query_row(
+			"SELECT MAX(position) FROM entries WHERE document_id = ?1",
+			params![document_id],
+			|row| row.get(0),
+		)
+		.optional()?
+		.flatten();
+	Ok(max_pos.unwrap_or(0))
+}
+
+pub fn update_document_clip_date(connection: &Connection, document_id: i64, clip_date: &str) -> Result<()> {
+	connection.execute(
+		"UPDATE documents SET clip_date = ?1 WHERE id = ?2",
+		params![clip_date, document_id],
+	)?;
+	Ok(())
+}

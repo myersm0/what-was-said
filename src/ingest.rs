@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::process::Command;
 
 use crate::types::{SegmentedEntry, SegmentationResult};
 
@@ -28,6 +29,61 @@ struct OllamaEmbeddingRequest {
 #[derive(Deserialize)]
 struct OllamaEmbeddingResponse {
 	embedding: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+struct PreprocessorOutput {
+	entries: Vec<PreprocessorEntry>,
+}
+
+#[derive(Deserialize)]
+struct PreprocessorEntry {
+	body: String,
+	#[serde(default)]
+	author: Option<String>,
+	#[serde(default)]
+	timestamp: Option<String>,
+	#[serde(default)]
+	heading_title: Option<String>,
+	#[serde(default)]
+	heading_level: Option<u8>,
+}
+
+pub fn run_preprocessor(script_path: &str, file_path: &Path) -> Result<SegmentationResult> {
+	let output = Command::new("python3")
+		.arg(script_path)
+		.arg(file_path)
+		.output()
+		.with_context(|| format!("failed to run preprocessor: {}", script_path))?;
+
+	if !output.status.success() {
+		let stderr = String::from_utf8_lossy(&output.stderr);
+		anyhow::bail!("preprocessor failed: {}", stderr);
+	}
+
+	let stdout = String::from_utf8(output.stdout)
+		.context("preprocessor output is not valid UTF-8")?;
+
+	let parsed: PreprocessorOutput = serde_json::from_str(&stdout)
+		.with_context(|| format!("failed to parse preprocessor JSON: {}", &stdout[..stdout.len().min(200)]))?;
+
+	let entries: Vec<SegmentedEntry> = parsed.entries
+		.into_iter()
+		.enumerate()
+		.filter(|(_, e)| !e.body.trim().is_empty())
+		.map(|(i, e)| SegmentedEntry {
+			start_line: i + 1,
+			end_line: i + 1,
+			body: e.body,
+			author: e.author,
+			timestamp: e.timestamp,
+			heading_title: e.heading_title,
+			heading_level: e.heading_level,
+			is_quote: false,
+		})
+		.collect();
+
+	Ok(SegmentationResult { entries })
 }
 
 #[derive(Deserialize)]

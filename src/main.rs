@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use cathedrals::chunking;
 use cathedrals::config::{self, Parser};
-use cathedrals::ingest::{self, OllamaClient, SegmentationOptions};
+use cathedrals::ingest::{self, OllamaClient, SegmentationOptions, run_preprocessor};
 use cathedrals::markdown;
 use cathedrals::minhash;
 use cathedrals::storage::{self, SearchSortColumn};
@@ -45,6 +45,75 @@ fn normalize_to_ascii(s: &str) -> String {
 		.split_whitespace()
 		.collect::<Vec<_>>()
 		.join(" ")
+}
+
+fn extract_merge_key(source_title: &str) -> String {
+	let browsers = [" - Brave", " - Chrome", " - Firefox", " - Safari", " - Edge", " - Arc"];
+	let mut s = source_title.to_string();
+
+	for browser in &browsers {
+		if let Some(pos) = s.rfind(browser) {
+			s = s[..pos].to_string();
+			break;
+		}
+	}
+
+	if let Some(url_start) = s.rfind(" - https://") {
+		s = s[..url_start].to_string();
+	}
+	if let Some(url_start) = s.rfind(" - http://") {
+		s = s[..url_start].to_string();
+	}
+
+	s.trim().to_string()
+}
+
+const MERGE_MIN_CHARS: usize = 150;
+
+fn find_overlap(
+	existing: &[storage::ExistingEntry],
+	new_entries: &[SegmentedEntry],
+) -> Option<(usize, usize)> {
+	if existing.is_empty() || new_entries.is_empty() {
+		return None;
+	}
+
+	fn entries_match(existing: &storage::ExistingEntry, new: &SegmentedEntry) -> bool {
+		existing.body.trim() == new.body.trim() && existing.author == new.author
+	}
+
+	let mut best_run_start: Option<usize> = None;
+	let mut best_run_len = 0usize;
+	let mut best_run_chars = 0usize;
+
+	for new_start in 0..new_entries.len() {
+		for exist_start in 0..existing.len() {
+			if entries_match(&existing[exist_start], &new_entries[new_start]) {
+				let mut run_len = 1;
+				let mut run_chars = new_entries[new_start].body.len();
+
+				while exist_start + run_len < existing.len()
+					&& new_start + run_len < new_entries.len()
+					&& entries_match(&existing[exist_start + run_len], &new_entries[new_start + run_len])
+				{
+					run_chars += new_entries[new_start + run_len].body.len();
+					run_len += 1;
+				}
+
+				if run_chars > best_run_chars {
+					best_run_start = Some(new_start);
+					best_run_len = run_len;
+					best_run_chars = run_chars;
+				}
+			}
+		}
+	}
+
+	if best_run_chars >= MERGE_MIN_CHARS {
+		best_run_start.map(|start| (start, best_run_len))
+	} else {
+		None
+	}
 }
 
 fn ingest_file(
@@ -106,28 +175,36 @@ fn ingest_file(
 		})
 		.unwrap_or_default();
 
-	let segmented = match parser {
-		Parser::Markdown => markdown::parse_markdown_sections(&body),
-		Parser::CopilotEmail => ingest::parse_copilot_email_summary(&body),
-		Parser::Ollama => {
-			let result = ollama.segment(&source_title, &body, &segmentation_options)?;
-			result.entries
-		}
-		Parser::Whisper => {
-			eprintln!("  whisper parser not yet implemented, skipping");
-			return Ok(false);
-		}
-		Parser::Whole => {
-			vec![SegmentedEntry {
-				start_line: 1,
-				end_line: body.lines().count(),
-				author: None,
-				timestamp: None,
-				body: body.clone(),
-				is_quote: false,
-				heading_level: None,
-				heading_title: None,
-			}]
+	let preprocessor = doctype_match.as_ref()
+		.and_then(|m| m.preprocessor.clone());
+
+	let segmented = if let Some(ref script) = preprocessor {
+		let result = run_preprocessor(script, file_path)?;
+		result.entries
+	} else {
+		match parser {
+			Parser::Markdown => markdown::parse_markdown_sections(&body),
+			Parser::CopilotEmail => ingest::parse_copilot_email_summary(&body),
+			Parser::Ollama => {
+				let result = ollama.segment(&source_title, &body, &segmentation_options)?;
+				result.entries
+			}
+			Parser::Whisper => {
+				eprintln!("  whisper parser not yet implemented, skipping");
+				return Ok(false);
+			}
+			Parser::Whole => {
+				vec![SegmentedEntry {
+					start_line: 1,
+					end_line: body.lines().count(),
+					author: None,
+					timestamp: None,
+					body: body.clone(),
+					is_quote: false,
+					heading_level: None,
+					heading_title: None,
+				}]
+			}
 		}
 	};
 
@@ -142,8 +219,68 @@ fn ingest_file(
 		.map(|t| normalize_to_ascii(&t));
 
 	let source_title = normalize_to_ascii(&source_title);
+	let merge_key = extract_merge_key(&source_title);
 
 	let doctype_name = doctype_match.as_ref().map(|m| m.name.as_str());
+
+	if merge_strategy == MergeStrategy::Positional {
+		let existing_docs = storage::find_documents_by_merge_key(
+			connection,
+			extract_merge_key,
+			&merge_key,
+			"positional",
+		)?;
+
+		if let Some(&existing_doc_id) = existing_docs.first() {
+			let existing_entries = storage::get_entries_for_document(connection, existing_doc_id)?;
+
+			if let Some((overlap_start, overlap_len)) = find_overlap(&existing_entries, &segmented) {
+				let new_entries_start = overlap_start + overlap_len;
+				let entries_to_add = &segmented[new_entries_start..];
+
+				if entries_to_add.is_empty() {
+					eprintln!("  all entries already exist in doc {}, skipping", existing_doc_id);
+					return Ok(false);
+				}
+
+				let transaction = connection.unchecked_transaction()?;
+
+				let max_pos = storage::get_max_entry_position(&transaction, existing_doc_id)?;
+				let mut total_chunks = 0usize;
+
+				for (i, entry) in entries_to_add.iter().enumerate() {
+					let position = (max_pos + 1 + i as i64) as u32;
+					let hash = minhash::minhash(&entry.body);
+					let entry_id = storage::insert_entry(
+						&transaction,
+						DocumentId(existing_doc_id),
+						entry,
+						position,
+						&source_title,
+						&clip_date_str,
+						&file_path_str,
+						&hash,
+					)?;
+
+					let chunks = chunking::chunk_text(&entry.body);
+					storage::insert_chunks(&transaction, entry_id, &chunks)?;
+					total_chunks += chunks.len();
+				}
+
+				storage::update_document_clip_date(&transaction, existing_doc_id, &clip_date_str)?;
+				transaction.commit()?;
+
+				eprintln!(
+					"  merged {} entries ({} chunks) into doc {} (overlap: {} entries)",
+					entries_to_add.len(),
+					total_chunks,
+					existing_doc_id,
+					overlap_len,
+				);
+				return Ok(true);
+			}
+		}
+	}
 
 	let transaction = connection.unchecked_transaction()?;
 
