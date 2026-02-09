@@ -26,6 +26,27 @@ fn open_db(path: &Path) -> Result<rusqlite::Connection> {
 	Ok(connection)
 }
 
+fn normalize_to_ascii(s: &str) -> String {
+	s.chars()
+		.map(|c| {
+			if c.is_ascii() {
+				c
+			} else {
+				match c {
+					'—' | '–' => '-',
+					'\'' | '\'' => '\'',
+					'"' | '"' => '"',
+					'…' => '.',
+					_ => ' ',
+				}
+			}
+		})
+		.collect::<String>()
+		.split_whitespace()
+		.collect::<Vec<_>>()
+		.join(" ")
+}
+
 fn ingest_file(
 	connection: &rusqlite::Connection,
 	ollama: &OllamaClient,
@@ -117,7 +138,10 @@ fn ingest_file(
 
 	let title = segmented.iter()
 		.find(|e| e.heading_title.is_some())
-		.and_then(|e| e.heading_title.clone());
+		.and_then(|e| e.heading_title.clone())
+		.map(|t| normalize_to_ascii(&t));
+
+	let source_title = normalize_to_ascii(&source_title);
 
 	let doctype_name = doctype_match.as_ref().map(|m| m.name.as_str());
 

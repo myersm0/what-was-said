@@ -449,6 +449,13 @@ fn run_app(
 						app.browse_state.select(Some(0));
 						app.status_message = Some("Filter cleared".to_string());
 					}
+					KeyCode::Char('g') => {
+						app.browse_state.select(Some(0));
+					}
+					KeyCode::Char('G') => {
+						let max_idx = app.filtered_documents().len().saturating_sub(1);
+						app.browse_state.select(Some(max_idx));
+					}
 					_ => {}
 				},
 				Mode::Read => match key.code {
@@ -491,6 +498,12 @@ fn run_app(
 					KeyCode::Char('t') => {
 						app.tag_input.clear();
 						app.mode = Mode::TagEdit;
+					}
+					KeyCode::Char('g') => {
+						app.current_chunk_index = 0;
+					}
+					KeyCode::Char('G') => {
+						app.current_chunk_index = app.total_chunks.saturating_sub(1);
 					}
 					_ => {}
 				},
@@ -561,6 +574,12 @@ fn run_app(
 						if app.tag_filter_index + 1 < app.all_tags.len() {
 							app.tag_filter_index += 1;
 						}
+					}
+					KeyCode::Char('g') => {
+						app.tag_filter_index = 0;
+					}
+					KeyCode::Char('G') => {
+						app.tag_filter_index = app.all_tags.len().saturating_sub(1);
 					}
 					KeyCode::Char('c') => {
 						app.clear_tag_filter();
@@ -922,17 +941,17 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let read_help = if app.group_docs.len() > 1 {
-		"[↑↓] chunk  [◀▶] group  [y/Y] yank/all  [t] tags  [b] back  [q] quit"
+		"[↑↓/gG] chunk  [◀▶] group  [y/Y] yank  [t] tags  [b] back  [q] quit"
 	} else {
-		"[↑↓] chunk  [PgUp/Dn] jump  [y/Y] yank/all  [t] tags  [b] back  [q] quit"
+		"[↑↓/gG] chunk  [PgUp/Dn] jump  [y/Y] yank  [t] tags  [b] back  [q] quit"
 	};
 
 	let help_text = match app.mode {
-		Mode::Browse => "[↑↓] move  [Enter] open  [/] search  [f] filter  [F] clear  [s] sort  [q] quit",
+		Mode::Browse => "[↑↓/gG] move  [Enter] open  [/] search  [f] filter  [s] sort  [q] quit",
 		Mode::Read => read_help,
 		Mode::Search => "[↑↓] chunk  [Enter] open  [Tab] sort  [Esc] back",
 		Mode::TagEdit => "[type] add tag  [Enter] save  [Esc] cancel",
-		Mode::TagFilter => "[↑↓] select  [Enter] apply  [c] clear  [Esc] cancel",
+		Mode::TagFilter => "[↑↓/gG] select  [Enter] apply  [c] clear  [Esc] cancel",
 	};
 
 	let status = if let Some(ref msg) = app.status_message {
