@@ -757,7 +757,7 @@ pub fn get_embedding(connection: &Connection, chunk_id: i64) -> Result<Option<Ve
 	}))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SimilarChunk {
 	pub chunk_id: i64,
 	pub document_id: i64,
@@ -766,6 +766,8 @@ pub struct SimilarChunk {
 	pub body: String,
 	pub similarity: f32,
 	pub author: Option<String>,
+	pub entry_position: u32,
+	pub chunk_index: u32,
 }
 
 pub fn find_similar_chunks(
@@ -785,7 +787,7 @@ pub fn find_similar_chunks_filtered(
 	date_to: Option<&str>,
 ) -> Result<Vec<SimilarChunk>> {
 	let mut stmt = connection.prepare(
-		"SELECT ce.chunk_id, ce.embedding, c.body, e.document_id, e.source_title, e.clip_date, e.author
+		"SELECT ce.chunk_id, ce.embedding, c.body, e.document_id, e.source_title, e.clip_date, e.author, e.position, c.chunk_index
 		 FROM chunk_embeddings ce
 		 JOIN chunks c ON c.id = ce.chunk_id
 		 JOIN entries e ON e.id = c.entry_id"
@@ -800,6 +802,8 @@ pub fn find_similar_chunks_filtered(
 			let source_title: String = row.get(4)?;
 			let clip_date: String = row.get(5)?;
 			let author: Option<String> = row.get(6)?;
+			let entry_position: u32 = row.get(7)?;
+			let chunk_index: u32 = row.get(8)?;
 
 			let embedding: Vec<f32> = embedding_bytes
 				.chunks_exact(4)
@@ -816,6 +820,8 @@ pub fn find_similar_chunks_filtered(
 				body,
 				similarity,
 				author,
+				entry_position,
+				chunk_index,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;

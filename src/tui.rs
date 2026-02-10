@@ -66,7 +66,6 @@ struct App {
 	author_filter: String,
 	date_from: String,
 	date_to: String,
-	semantic_results: Vec<storage::SimilarChunk>,
 	should_quit: bool,
 	status_message: Option<String>,
 	group_docs: Vec<i64>,
@@ -106,7 +105,6 @@ impl App {
 			author_filter: String::new(),
 			date_from: String::new(),
 			date_to: String::new(),
-			semantic_results: Vec::new(),
 			should_quit: false,
 			status_message: None,
 			group_docs: Vec::new(),
@@ -197,7 +195,6 @@ impl App {
 	fn run_search(&mut self, connection: &Connection, search_config: &SearchConfig) -> Result<()> {
 		if self.search_query.is_empty() {
 			self.search_results.clear();
-			self.semantic_results.clear();
 			self.total_search_chunks = 0;
 			return Ok(());
 		}
@@ -226,7 +223,6 @@ impl App {
 					.filter(|r| allowed_doc_ids.contains(&r.document_id))
 					.collect();
 
-				self.semantic_results.clear();
 				self.total_search_chunks = self.search_results.iter().map(|r| r.chunks.len()).sum();
 			}
 			SearchMode::Semantic => {
@@ -237,7 +233,13 @@ impl App {
 				}
 
 				let client = OllamaClient::new(&search_config.ollama_url, "");
-				let query_embedding = client.embed(&self.search_query, &search_config.embed_model)?;
+				let query_embedding = match client.embed(&self.search_query, &search_config.embed_model) {
+					Ok(emb) => emb,
+					Err(e) => {
+						self.status_message = Some(format!("Embed error: {}", e));
+						return Ok(());
+					}
+				};
 
 				let all_results = storage::find_similar_chunks_filtered(
 					connection,
@@ -248,13 +250,48 @@ impl App {
 					date_to,
 				)?;
 
-				self.semantic_results = all_results.into_iter()
+				let filtered: Vec<_> = all_results.into_iter()
 					.filter(|r| allowed_doc_ids.contains(&r.document_id))
-					.take(20)
+					.take(30)
 					.collect();
 
-				self.search_results.clear();
-				self.total_search_chunks = self.semantic_results.len();
+				let mut grouped: Vec<GroupedSearchResult> = Vec::new();
+				for chunk in filtered {
+					let rank = -(chunk.similarity as f64);
+					let hit = storage::ChunkHit {
+						entry_id: 0,
+						entry_position: chunk.entry_position,
+						chunk_index: chunk.chunk_index,
+						chunk_body: chunk.body.clone(),
+						snippet: chunk.body.chars().take(150).collect(),
+						author: chunk.author,
+						heading_title: None,
+						rank,
+					};
+
+					if let Some(doc) = grouped.iter_mut().find(|d| d.document_id == chunk.document_id) {
+						if rank < doc.best_rank {
+							doc.best_rank = rank;
+						}
+						doc.chunks.push(hit);
+					} else {
+						grouped.push(GroupedSearchResult {
+							document_id: chunk.document_id,
+							source_title: chunk.source_title,
+							clip_date: chunk.clip_date,
+							best_rank: rank,
+							chunks: vec![hit],
+						});
+					}
+				}
+
+				for doc in &mut grouped {
+					doc.chunks.sort_by(|a, b| a.rank.partial_cmp(&b.rank).unwrap_or(std::cmp::Ordering::Equal));
+				}
+				grouped.sort_by(|a, b| a.best_rank.partial_cmp(&b.best_rank).unwrap_or(std::cmp::Ordering::Equal));
+
+				self.search_results = grouped;
+				self.total_search_chunks = self.search_results.iter().map(|r| r.chunks.len()).sum();
 			}
 		}
 
@@ -263,47 +300,31 @@ impl App {
 	}
 
 	fn open_search_result(&mut self, connection: &Connection) -> Result<()> {
-		match self.search_mode {
-			SearchMode::Fts5 => {
-				let chunk_info = self.get_selected_fts5_chunk();
-				if let Some((document_id, entry_position, chunk_index)) = chunk_info {
-					self.current_document = storage::get_document(connection, document_id)?;
-					self.scroll_offset = 0;
-					self.total_chunks = self.current_document.as_ref()
-						.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
-						.unwrap_or(0);
+		let chunk_info = self.get_selected_fts5_chunk();
+		if let Some((document_id, entry_position, chunk_index)) = chunk_info {
+			self.current_document = storage::get_document(connection, document_id)?;
+			self.scroll_offset = 0;
+			self.total_chunks = self.current_document.as_ref()
+				.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+				.unwrap_or(0);
 
-					self.current_chunk_index = self.current_document.as_ref()
-						.map(|doc| {
-							let mut flat_index = 0usize;
-							for entry in &doc.entries {
-								if entry.position < entry_position {
-									flat_index += entry.chunks.len().max(1);
-								} else if entry.position == entry_position {
-									flat_index += chunk_index as usize;
-									break;
-								}
-							}
-							flat_index
-						})
-						.unwrap_or(0);
+			self.current_chunk_index = self.current_document.as_ref()
+				.map(|doc| {
+					let mut flat_index = 0usize;
+					for entry in &doc.entries {
+						if entry.position < entry_position {
+							flat_index += entry.chunks.len().max(1);
+						} else if entry.position == entry_position {
+							flat_index += chunk_index as usize;
+							break;
+						}
+					}
+					flat_index
+				})
+				.unwrap_or(0);
 
-					self.previous_mode = Mode::Search;
-					self.mode = Mode::Read;
-				}
-			}
-			SearchMode::Semantic => {
-				if let Some(result) = self.semantic_results.get(self.search_chunk_index) {
-					self.current_document = storage::get_document(connection, result.document_id)?;
-					self.scroll_offset = 0;
-					self.total_chunks = self.current_document.as_ref()
-						.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
-						.unwrap_or(0);
-					self.current_chunk_index = 0;
-					self.previous_mode = Mode::Search;
-					self.mode = Mode::Read;
-				}
-			}
+			self.previous_mode = Mode::Search;
+			self.mode = Mode::Read;
 		}
 		Ok(())
 	}
@@ -1105,108 +1126,57 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 	let mut lines: Vec<Line> = Vec::new();
 	let mut chunk_counter = 0usize;
 
-	match app.search_mode {
-		SearchMode::Fts5 => {
-			for result in &app.search_results {
-				let score_str = format!("{:.2}", -result.best_rank);
-				let date_str = &result.clip_date[..10.min(result.clip_date.len())];
-				lines.push(Line::from(vec![
-					Span::styled(
-						format!("▸ {} ", truncate_str(&result.source_title, 50)),
-						Style::default().add_modifier(Modifier::BOLD),
-					),
-					Span::raw(format!("  score: {}  date: {}  ", score_str, date_str)),
-					Span::styled(
-						format!("[{} chunks]", result.chunks.len()),
-						Style::default().fg(Color::DarkGray),
-					),
-				]));
+	for result in &app.search_results {
+		let score_str = format!("{:.2}", -result.best_rank);
+		let date_str = &result.clip_date[..10.min(result.clip_date.len())];
+		lines.push(Line::from(vec![
+			Span::styled(
+				format!("▸ {} ", truncate_str(&result.source_title, 50)),
+				Style::default().add_modifier(Modifier::BOLD),
+			),
+			Span::raw(format!("  score: {}  date: {}  ", score_str, date_str)),
+			Span::styled(
+				format!("[{} chunks]", result.chunks.len()),
+				Style::default().fg(Color::DarkGray),
+			),
+		]));
 
-				for chunk in &result.chunks {
-					let is_current = chunk_counter == app.search_chunk_index;
-					let base_style = if is_current {
-						Style::default().bg(Color::DarkGray)
-					} else {
-						Style::default()
-					};
-					let prefix = if is_current { "> " } else { "  " };
+		for chunk in &result.chunks {
+			let is_current = chunk_counter == app.search_chunk_index;
+			let base_style = if is_current {
+				Style::default().bg(Color::DarkGray)
+			} else {
+				Style::default()
+			};
+			let prefix = if is_current { "> " } else { "  " };
 
-					let mut spans = vec![Span::styled(format!("{}│ ", prefix), base_style)];
-					spans.extend(parse_snippet(&chunk.snippet, base_style));
+			let mut spans = vec![Span::styled(format!("{}│ ", prefix), base_style)];
+			spans.extend(parse_snippet(&chunk.snippet, base_style));
 
-					lines.push(Line::from(spans));
-					chunk_counter += 1;
-				}
-				lines.push(Line::from(""));
-			}
+			lines.push(Line::from(spans));
+			chunk_counter += 1;
 		}
-		SearchMode::Semantic => {
-			for (i, result) in app.semantic_results.iter().enumerate() {
-				let is_current = i == app.search_chunk_index;
-				let base_style = if is_current {
-					Style::default().bg(Color::DarkGray)
-				} else {
-					Style::default()
-				};
-				let prefix = if is_current { "> " } else { "  " };
-
-				let date_str = &result.clip_date[..10.min(result.clip_date.len())];
-				let author_str = result.author.as_deref().unwrap_or("");
-				let similarity_str = format!("{:.2}", result.similarity);
-
-				lines.push(Line::from(vec![
-					Span::styled(prefix, base_style),
-					Span::styled(
-						format!("[{}] ", similarity_str),
-						base_style.fg(Color::Cyan),
-					),
-					Span::styled(
-						truncate_str(&result.source_title, 30),
-						base_style.add_modifier(Modifier::BOLD),
-					),
-					Span::styled(
-						format!("  {}  ", date_str),
-						base_style.fg(Color::DarkGray),
-					),
-					Span::styled(
-						author_str,
-						base_style.fg(Color::Blue),
-					),
-				]));
-
-				let preview: String = result.body.lines().next().unwrap_or("").chars().take(80).collect();
-				lines.push(Line::from(vec![
-					Span::styled("    ", base_style),
-					Span::styled(preview, base_style),
-				]));
-				lines.push(Line::from(""));
-			}
-		}
+		lines.push(Line::from(""));
 	}
 
-	let current_line = match app.search_mode {
-		SearchMode::Fts5 => {
-			let mut counter = 0usize;
-			let mut line_index = 0usize;
-			for result in &app.search_results {
-				line_index += 1;
-				for _ in &result.chunks {
-					if counter == app.search_chunk_index {
-						break;
-					}
-					counter += 1;
-					line_index += 1;
-				}
+	let current_line = {
+		let mut counter = 0usize;
+		let mut line_index = 0usize;
+		for result in &app.search_results {
+			line_index += 1;
+			for _ in &result.chunks {
 				if counter == app.search_chunk_index {
 					break;
 				}
+				counter += 1;
 				line_index += 1;
 			}
-			line_index
+			if counter == app.search_chunk_index {
+				break;
+			}
+			line_index += 1;
 		}
-		SearchMode::Semantic => {
-			app.search_chunk_index * 3
-		}
+		line_index
 	};
 
 	let view_height = layout[1].height.saturating_sub(2) as usize;
