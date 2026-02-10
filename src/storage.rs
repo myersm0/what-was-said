@@ -242,6 +242,17 @@ pub fn search(
 	query: &str,
 	sort_by: SearchSortColumn,
 ) -> Result<Vec<GroupedSearchResult>> {
+	search_filtered(connection, query, sort_by, None, None, None)
+}
+
+pub fn search_filtered(
+	connection: &Connection,
+	query: &str,
+	sort_by: SearchSortColumn,
+	author_like: Option<&str>,
+	date_from: Option<&str>,
+	date_to: Option<&str>,
+) -> Result<Vec<GroupedSearchResult>> {
 	let prefix_query: String = query
 		.split_whitespace()
 		.map(|word| format!("{}*", word))
@@ -278,8 +289,30 @@ pub fn search(
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 
+	let author_pattern = author_like.map(|s| s.to_lowercase());
+	let filtered_rows: Vec<ChunkSearchResult> = rows.into_iter()
+		.filter(|row| {
+			if let Some(ref pattern) = author_pattern {
+				if !row.author.as_ref().map(|a| a.to_lowercase().contains(pattern)).unwrap_or(false) {
+					return false;
+				}
+			}
+			if let Some(from) = date_from {
+				if row.clip_date.as_str() < from {
+					return false;
+				}
+			}
+			if let Some(to) = date_to {
+				if row.clip_date.as_str() > to {
+					return false;
+				}
+			}
+			true
+		})
+		.collect();
+
 	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
-	for row in rows {
+	for row in filtered_rows {
 		let doc = grouped.iter_mut().find(|d| d.document_id == row.document_id);
 		let hit = ChunkHit {
 			entry_id: row.entry_id,
@@ -732,6 +765,7 @@ pub struct SimilarChunk {
 	pub clip_date: String,
 	pub body: String,
 	pub similarity: f32,
+	pub author: Option<String>,
 }
 
 pub fn find_similar_chunks(
@@ -739,8 +773,19 @@ pub fn find_similar_chunks(
 	query_embedding: &[f32],
 	limit: usize,
 ) -> Result<Vec<SimilarChunk>> {
+	find_similar_chunks_filtered(connection, query_embedding, limit, None, None, None)
+}
+
+pub fn find_similar_chunks_filtered(
+	connection: &Connection,
+	query_embedding: &[f32],
+	limit: usize,
+	author_like: Option<&str>,
+	date_from: Option<&str>,
+	date_to: Option<&str>,
+) -> Result<Vec<SimilarChunk>> {
 	let mut stmt = connection.prepare(
-		"SELECT ce.chunk_id, ce.embedding, c.body, e.document_id, e.source_title, e.clip_date
+		"SELECT ce.chunk_id, ce.embedding, c.body, e.document_id, e.source_title, e.clip_date, e.author
 		 FROM chunk_embeddings ce
 		 JOIN chunks c ON c.id = ce.chunk_id
 		 JOIN entries e ON e.id = c.entry_id"
@@ -754,6 +799,7 @@ pub fn find_similar_chunks(
 			let document_id: i64 = row.get(3)?;
 			let source_title: String = row.get(4)?;
 			let clip_date: String = row.get(5)?;
+			let author: Option<String> = row.get(6)?;
 
 			let embedding: Vec<f32> = embedding_bytes
 				.chunks_exact(4)
@@ -769,9 +815,27 @@ pub fn find_similar_chunks(
 				clip_date,
 				body,
 				similarity,
+				author,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
+
+	if let Some(author_pattern) = author_like {
+		let pattern_lower = author_pattern.to_lowercase();
+		results.retain(|r| {
+			r.author.as_ref()
+				.map(|a| a.to_lowercase().contains(&pattern_lower))
+				.unwrap_or(false)
+		});
+	}
+
+	if let Some(from) = date_from {
+		results.retain(|r| r.clip_date.as_str() >= from);
+	}
+
+	if let Some(to) = date_to {
+		results.retain(|r| r.clip_date.as_str() <= to);
+	}
 
 	results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
 	results.truncate(limit);

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-	event::{self, Event, KeyCode, KeyEventKind},
+	event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
 	execute,
 	terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -16,6 +16,7 @@ use rusqlite::Connection;
 use std::io;
 
 use crate::config::TagConfig;
+use crate::ingest::OllamaClient;
 use crate::storage::{
 	self, DocumentContent, DocumentSummary,
 	GroupedSearchResult, SearchSortColumn, SortColumn, SortDirection,
@@ -28,6 +29,20 @@ enum Mode {
 	Search,
 	TagEdit,
 	TagFilter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchMode {
+	Fts5,
+	Semantic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchField {
+	Query,
+	Author,
+	DateFrom,
+	DateTo,
 }
 
 struct App {
@@ -46,6 +61,12 @@ struct App {
 	search_sort_column: SearchSortColumn,
 	search_chunk_index: usize,
 	total_search_chunks: usize,
+	search_mode: SearchMode,
+	search_field: SearchField,
+	author_filter: String,
+	date_from: String,
+	date_to: String,
+	semantic_results: Vec<storage::SimilarChunk>,
 	should_quit: bool,
 	status_message: Option<String>,
 	group_docs: Vec<i64>,
@@ -80,6 +101,12 @@ impl App {
 			search_sort_column: SearchSortColumn::Score,
 			search_chunk_index: 0,
 			total_search_chunks: 0,
+			search_mode: SearchMode::Fts5,
+			search_field: SearchField::Query,
+			author_filter: String::new(),
+			date_from: String::new(),
+			date_to: String::new(),
+			semantic_results: Vec::new(),
 			should_quit: false,
 			status_message: None,
 			group_docs: Vec::new(),
@@ -167,59 +194,121 @@ impl App {
 		Ok(())
 	}
 
-	fn run_search(&mut self, connection: &Connection) -> Result<()> {
+	fn run_search(&mut self, connection: &Connection, search_config: &SearchConfig) -> Result<()> {
 		if self.search_query.is_empty() {
 			self.search_results.clear();
+			self.semantic_results.clear();
 			self.total_search_chunks = 0;
 			return Ok(());
 		}
-		let all_results = storage::search(connection, &self.search_query, self.search_sort_column)?;
+
+		let author_filter = if self.author_filter.is_empty() { None } else { Some(self.author_filter.as_str()) };
+		let date_from = if self.date_from.is_empty() { None } else { Some(self.date_from.as_str()) };
+		let date_to = if self.date_to.is_empty() { None } else { Some(self.date_to.as_str()) };
 
 		let allowed_doc_ids: std::collections::HashSet<i64> = self.documents.iter()
 			.filter(|d| self.passes_global_filter(d))
 			.map(|d| d.id)
 			.collect();
 
-		self.search_results = all_results.into_iter()
-			.filter(|r| allowed_doc_ids.contains(&r.document_id))
-			.collect();
+		match self.search_mode {
+			SearchMode::Fts5 => {
+				let all_results = storage::search_filtered(
+					connection,
+					&self.search_query,
+					self.search_sort_column,
+					author_filter,
+					date_from,
+					date_to,
+				)?;
 
-		self.total_search_chunks = self.search_results.iter().map(|r| r.chunks.len()).sum();
+				self.search_results = all_results.into_iter()
+					.filter(|r| allowed_doc_ids.contains(&r.document_id))
+					.collect();
+
+				self.semantic_results.clear();
+				self.total_search_chunks = self.search_results.iter().map(|r| r.chunks.len()).sum();
+			}
+			SearchMode::Semantic => {
+				let embeddings_exist = storage::count_chunks_with_embeddings(connection)? > 0;
+				if !embeddings_exist {
+					self.status_message = Some("No embeddings - run 'cathedrals embed' first".to_string());
+					return Ok(());
+				}
+
+				let client = OllamaClient::new(&search_config.ollama_url, "");
+				let query_embedding = client.embed(&self.search_query, &search_config.embed_model)?;
+
+				let all_results = storage::find_similar_chunks_filtered(
+					connection,
+					&query_embedding,
+					50,
+					author_filter,
+					date_from,
+					date_to,
+				)?;
+
+				self.semantic_results = all_results.into_iter()
+					.filter(|r| allowed_doc_ids.contains(&r.document_id))
+					.take(20)
+					.collect();
+
+				self.search_results.clear();
+				self.total_search_chunks = self.semantic_results.len();
+			}
+		}
+
 		self.search_chunk_index = 0;
 		Ok(())
 	}
 
 	fn open_search_result(&mut self, connection: &Connection) -> Result<()> {
-		let chunk_info = self.get_selected_search_chunk();
-		if let Some((document_id, entry_position, chunk_index)) = chunk_info {
-			self.current_document = storage::get_document(connection, document_id)?;
-			self.scroll_offset = 0;
-			self.total_chunks = self.current_document.as_ref()
-				.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
-				.unwrap_or(0);
+		match self.search_mode {
+			SearchMode::Fts5 => {
+				let chunk_info = self.get_selected_fts5_chunk();
+				if let Some((document_id, entry_position, chunk_index)) = chunk_info {
+					self.current_document = storage::get_document(connection, document_id)?;
+					self.scroll_offset = 0;
+					self.total_chunks = self.current_document.as_ref()
+						.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+						.unwrap_or(0);
 
-			self.current_chunk_index = self.current_document.as_ref()
-				.map(|doc| {
-					let mut flat_index = 0usize;
-					for entry in &doc.entries {
-						if entry.position < entry_position {
-							flat_index += entry.chunks.len().max(1);
-						} else if entry.position == entry_position {
-							flat_index += chunk_index as usize;
-							break;
-						}
-					}
-					flat_index
-				})
-				.unwrap_or(0);
+					self.current_chunk_index = self.current_document.as_ref()
+						.map(|doc| {
+							let mut flat_index = 0usize;
+							for entry in &doc.entries {
+								if entry.position < entry_position {
+									flat_index += entry.chunks.len().max(1);
+								} else if entry.position == entry_position {
+									flat_index += chunk_index as usize;
+									break;
+								}
+							}
+							flat_index
+						})
+						.unwrap_or(0);
 
-			self.previous_mode = Mode::Search;
-			self.mode = Mode::Read;
+					self.previous_mode = Mode::Search;
+					self.mode = Mode::Read;
+				}
+			}
+			SearchMode::Semantic => {
+				if let Some(result) = self.semantic_results.get(self.search_chunk_index) {
+					self.current_document = storage::get_document(connection, result.document_id)?;
+					self.scroll_offset = 0;
+					self.total_chunks = self.current_document.as_ref()
+						.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+						.unwrap_or(0);
+					self.current_chunk_index = 0;
+					self.previous_mode = Mode::Search;
+					self.mode = Mode::Read;
+				}
+			}
 		}
 		Ok(())
 	}
 
-	fn get_selected_search_chunk(&self) -> Option<(i64, u32, u32)> {
+	fn get_selected_fts5_chunk(&self) -> Option<(i64, u32, u32)> {
 		let mut chunk_counter = 0usize;
 		for result in &self.search_results {
 			for chunk in &result.chunks {
@@ -230,14 +319,6 @@ impl App {
 			}
 		}
 		None
-	}
-
-	fn toggle_search_sort(&mut self, connection: &Connection) -> Result<()> {
-		self.search_sort_column = match self.search_sort_column {
-			SearchSortColumn::Score => SearchSortColumn::Date,
-			SearchSortColumn::Date => SearchSortColumn::Score,
-		};
-		self.run_search(connection)
 	}
 
 	fn yank_current_chunk(&mut self) {
@@ -406,7 +487,21 @@ pub struct GlobalFilter {
 	pub include_all: bool,
 }
 
-pub fn run(connection: &Connection, filter: GlobalFilter) -> Result<()> {
+pub struct SearchConfig {
+	pub ollama_url: String,
+	pub embed_model: String,
+}
+
+impl Default for SearchConfig {
+	fn default() -> Self {
+		SearchConfig {
+			ollama_url: "http://localhost:11434".to_string(),
+			embed_model: "nomic-embed-text".to_string(),
+		}
+	}
+}
+
+pub fn run(connection: &Connection, filter: GlobalFilter, search_config: SearchConfig) -> Result<()> {
 	enable_raw_mode()?;
 	let mut stdout = io::stdout();
 	execute!(stdout, EnterAlternateScreen)?;
@@ -429,7 +524,7 @@ pub fn run(connection: &Connection, filter: GlobalFilter) -> Result<()> {
 	app.load_documents(connection)?;
 	app.load_all_tags(connection)?;
 
-	let result = run_app(&mut terminal, &mut app, connection);
+	let result = run_app(&mut terminal, &mut app, connection, &search_config);
 
 	disable_raw_mode()?;
 	execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -442,6 +537,7 @@ fn run_app(
 	terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 	app: &mut App,
 	connection: &Connection,
+	search_config: &SearchConfig,
 ) -> Result<()> {
 	loop {
 		terminal.draw(|frame| draw(frame, app))?;
@@ -559,37 +655,70 @@ fn run_app(
 					}
 					_ => {}
 				},
-				Mode::Search => match key.code {
-					KeyCode::Esc => {
-						app.mode = Mode::Browse;
-					}
-					KeyCode::Enter => {
-						if app.total_search_chunks > 0 {
-							app.open_search_result(connection)?;
+				Mode::Search => {
+					if key.modifiers.contains(KeyModifiers::COMMAND) && key.code == KeyCode::Char('e') {
+						app.search_mode = match app.search_mode {
+							SearchMode::Fts5 => SearchMode::Semantic,
+							SearchMode::Semantic => SearchMode::Fts5,
+						};
+						app.run_search(connection, search_config)?;
+					} else {
+						match key.code {
+							KeyCode::Esc => {
+								app.mode = Mode::Browse;
+							}
+							KeyCode::Enter => {
+								if app.total_search_chunks > 0 {
+									app.open_search_result(connection)?;
+								}
+							}
+							KeyCode::Up => {
+								if app.search_chunk_index > 0 {
+									app.search_chunk_index -= 1;
+								}
+							}
+							KeyCode::Down => {
+								if app.search_chunk_index + 1 < app.total_search_chunks {
+									app.search_chunk_index += 1;
+								}
+							}
+							KeyCode::Tab => {
+								app.search_field = match app.search_field {
+									SearchField::Query => SearchField::Author,
+									SearchField::Author => SearchField::DateFrom,
+									SearchField::DateFrom => SearchField::DateTo,
+									SearchField::DateTo => SearchField::Query,
+								};
+							}
+							KeyCode::BackTab => {
+								app.search_field = match app.search_field {
+									SearchField::Query => SearchField::DateTo,
+									SearchField::Author => SearchField::Query,
+									SearchField::DateFrom => SearchField::Author,
+									SearchField::DateTo => SearchField::DateFrom,
+								};
+							}
+							KeyCode::Char(c) => {
+								match app.search_field {
+									SearchField::Query => app.search_query.push(c),
+									SearchField::Author => app.author_filter.push(c),
+									SearchField::DateFrom => app.date_from.push(c),
+									SearchField::DateTo => app.date_to.push(c),
+								}
+								app.run_search(connection, search_config)?;
+							}
+							KeyCode::Backspace => {
+								match app.search_field {
+									SearchField::Query => { app.search_query.pop(); }
+									SearchField::Author => { app.author_filter.pop(); }
+									SearchField::DateFrom => { app.date_from.pop(); }
+									SearchField::DateTo => { app.date_to.pop(); }
+								}
+								app.run_search(connection, search_config)?;
+							}
+							_ => {}
 						}
 					}
-					KeyCode::Up => {
-						if app.search_chunk_index > 0 {
-							app.search_chunk_index -= 1;
-						}
-					}
-					KeyCode::Down => {
-						if app.search_chunk_index + 1 < app.total_search_chunks {
-							app.search_chunk_index += 1;
-						}
-					}
-					KeyCode::Tab => {
-						app.toggle_search_sort(connection)?;
-					}
-					KeyCode::Char(c) => {
-						app.search_query.push(c);
-						app.run_search(connection)?;
-					}
-					KeyCode::Backspace => {
-						app.search_query.pop();
-						app.run_search(connection)?;
-					}
-					_ => {}
 				},
 				Mode::TagEdit => match key.code {
 					KeyCode::Esc => {
@@ -915,76 +1044,170 @@ fn draw_read(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 	let layout = Layout::default()
 		.direction(Direction::Vertical)
-		.constraints([Constraint::Length(3), Constraint::Min(1)])
+		.constraints([Constraint::Length(5), Constraint::Min(1)])
 		.split(area);
 
-	let sort_indicator = match app.search_sort_column {
-		SearchSortColumn::Score => "sort: Score ▼",
-		SearchSortColumn::Date => "sort: Date ▼",
+	let mode_str = match app.search_mode {
+		SearchMode::Fts5 => "FTS5",
+		SearchMode::Semantic => "Semantic",
 	};
 
-	let input = Paragraph::new(app.search_query.as_str())
-		.block(
-			Block::default()
-				.title(format!(" Search ({}) [Tab] {} ", app.total_search_chunks, sort_indicator))
-				.borders(Borders::ALL),
-		);
-	frame.render_widget(input, layout[0]);
+	let input_layout = Layout::default()
+		.direction(Direction::Vertical)
+		.constraints([Constraint::Length(3), Constraint::Length(1)])
+		.split(layout[0]);
+
+	let filter_layout = Layout::default()
+		.direction(Direction::Horizontal)
+		.constraints([
+			Constraint::Length(20),
+			Constraint::Length(15),
+			Constraint::Length(15),
+			Constraint::Min(1),
+		])
+		.split(input_layout[1]);
+
+	let query_style = if app.search_field == SearchField::Query {
+		Style::default().fg(Color::Yellow)
+	} else {
+		Style::default()
+	};
+	let query_block = Block::default()
+		.title(format!(" Search [{}] ({}) [Ctrl+E: toggle mode] ", mode_str, app.total_search_chunks))
+		.borders(Borders::ALL)
+		.border_style(query_style);
+	let query_input = Paragraph::new(app.search_query.as_str()).block(query_block);
+	frame.render_widget(query_input, input_layout[0]);
+
+	let author_style = if app.search_field == SearchField::Author {
+		Style::default().fg(Color::Yellow)
+	} else {
+		Style::default().fg(Color::DarkGray)
+	};
+	let author_text = format!(" Author: {} ", app.author_filter);
+	frame.render_widget(Paragraph::new(author_text).style(author_style), filter_layout[0]);
+
+	let date_from_style = if app.search_field == SearchField::DateFrom {
+		Style::default().fg(Color::Yellow)
+	} else {
+		Style::default().fg(Color::DarkGray)
+	};
+	let date_from_text = format!(" From: {} ", app.date_from);
+	frame.render_widget(Paragraph::new(date_from_text).style(date_from_style), filter_layout[1]);
+
+	let date_to_style = if app.search_field == SearchField::DateTo {
+		Style::default().fg(Color::Yellow)
+	} else {
+		Style::default().fg(Color::DarkGray)
+	};
+	let date_to_text = format!(" To: {} ", app.date_to);
+	frame.render_widget(Paragraph::new(date_to_text).style(date_to_style), filter_layout[2]);
 
 	let mut lines: Vec<Line> = Vec::new();
 	let mut chunk_counter = 0usize;
 
-	for result in &app.search_results {
-		let score_str = format!("{:.2}", -result.best_rank);
-		let date_str = &result.clip_date[..10.min(result.clip_date.len())];
-		lines.push(Line::from(vec![
-			Span::styled(
-				format!("▸ {} ", truncate_str(&result.source_title, 50)),
-				Style::default().add_modifier(Modifier::BOLD),
-			),
-			Span::raw(format!("  score: {}  date: {}  ", score_str, date_str)),
-			Span::styled(
-				format!("[{} chunks]", result.chunks.len()),
-				Style::default().fg(Color::DarkGray),
-			),
-		]));
+	match app.search_mode {
+		SearchMode::Fts5 => {
+			for result in &app.search_results {
+				let score_str = format!("{:.2}", -result.best_rank);
+				let date_str = &result.clip_date[..10.min(result.clip_date.len())];
+				lines.push(Line::from(vec![
+					Span::styled(
+						format!("▸ {} ", truncate_str(&result.source_title, 50)),
+						Style::default().add_modifier(Modifier::BOLD),
+					),
+					Span::raw(format!("  score: {}  date: {}  ", score_str, date_str)),
+					Span::styled(
+						format!("[{} chunks]", result.chunks.len()),
+						Style::default().fg(Color::DarkGray),
+					),
+				]));
 
-		for chunk in &result.chunks {
-			let is_current = chunk_counter == app.search_chunk_index;
-			let base_style = if is_current {
-				Style::default().bg(Color::DarkGray)
-			} else {
-				Style::default()
-			};
-			let prefix = if is_current { "> " } else { "  " };
+				for chunk in &result.chunks {
+					let is_current = chunk_counter == app.search_chunk_index;
+					let base_style = if is_current {
+						Style::default().bg(Color::DarkGray)
+					} else {
+						Style::default()
+					};
+					let prefix = if is_current { "> " } else { "  " };
 
-			let mut spans = vec![Span::styled(format!("{}│ ", prefix), base_style)];
-			spans.extend(parse_snippet(&chunk.snippet, base_style));
+					let mut spans = vec![Span::styled(format!("{}│ ", prefix), base_style)];
+					spans.extend(parse_snippet(&chunk.snippet, base_style));
 
-			lines.push(Line::from(spans));
-			chunk_counter += 1;
+					lines.push(Line::from(spans));
+					chunk_counter += 1;
+				}
+				lines.push(Line::from(""));
+			}
 		}
-		lines.push(Line::from(""));
+		SearchMode::Semantic => {
+			for (i, result) in app.semantic_results.iter().enumerate() {
+				let is_current = i == app.search_chunk_index;
+				let base_style = if is_current {
+					Style::default().bg(Color::DarkGray)
+				} else {
+					Style::default()
+				};
+				let prefix = if is_current { "> " } else { "  " };
+
+				let date_str = &result.clip_date[..10.min(result.clip_date.len())];
+				let author_str = result.author.as_deref().unwrap_or("");
+				let similarity_str = format!("{:.2}", result.similarity);
+
+				lines.push(Line::from(vec![
+					Span::styled(prefix, base_style),
+					Span::styled(
+						format!("[{}] ", similarity_str),
+						base_style.fg(Color::Cyan),
+					),
+					Span::styled(
+						truncate_str(&result.source_title, 30),
+						base_style.add_modifier(Modifier::BOLD),
+					),
+					Span::styled(
+						format!("  {}  ", date_str),
+						base_style.fg(Color::DarkGray),
+					),
+					Span::styled(
+						author_str,
+						base_style.fg(Color::Blue),
+					),
+				]));
+
+				let preview: String = result.body.lines().next().unwrap_or("").chars().take(80).collect();
+				lines.push(Line::from(vec![
+					Span::styled("    ", base_style),
+					Span::styled(preview, base_style),
+				]));
+				lines.push(Line::from(""));
+			}
+		}
 	}
 
-	let current_line = {
-		let mut counter = 0usize;
-		let mut line_index = 0usize;
-		for result in &app.search_results {
-			line_index += 1;
-			for _ in &result.chunks {
+	let current_line = match app.search_mode {
+		SearchMode::Fts5 => {
+			let mut counter = 0usize;
+			let mut line_index = 0usize;
+			for result in &app.search_results {
+				line_index += 1;
+				for _ in &result.chunks {
+					if counter == app.search_chunk_index {
+						break;
+					}
+					counter += 1;
+					line_index += 1;
+				}
 				if counter == app.search_chunk_index {
 					break;
 				}
-				counter += 1;
 				line_index += 1;
 			}
-			if counter == app.search_chunk_index {
-				break;
-			}
-			line_index += 1;
+			line_index
 		}
-		line_index
+		SearchMode::Semantic => {
+			app.search_chunk_index * 3
+		}
 	};
 
 	let view_height = layout[1].height.saturating_sub(2) as usize;
@@ -1012,7 +1235,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let help_text = match app.mode {
 		Mode::Browse => "[↑↓/gG] move  [Enter] open  [/] search  [f] filter  [s] sort  [q] quit",
 		Mode::Read => read_help,
-		Mode::Search => "[↑↓] chunk  [Enter] open  [Tab] sort  [Esc] back",
+		Mode::Search => "[↑↓] move  [Tab] field  [Ctrl+E] mode  [Enter] open  [Esc] back",
 		Mode::TagEdit => "[type] add tag  [Enter] save  [Esc] cancel",
 		Mode::TagFilter => "[↑↓/gG] select  [Enter] apply  [c] clear  [Esc] cancel",
 	};

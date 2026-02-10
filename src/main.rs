@@ -159,6 +159,13 @@ fn ingest_file(
 
 	let doctype_match = config.detect_with_content(&source_title, file_extension, &body);
 
+	if let Some(ref m) = doctype_match {
+		if m.skip {
+			eprintln!("  skipping (doctype '{}' marked skip)", m.name);
+			return Ok(false);
+		}
+	}
+
 	let parser = doctype_match.as_ref()
 		.map(|m| m.parser)
 		.unwrap_or(Parser::Whole);
@@ -606,7 +613,11 @@ fn main() -> Result<()> {
 				exclude: tags_exclude,
 				include_all,
 			};
-			tui::run(&connection, filter)?;
+			let search_config = tui::SearchConfig {
+				ollama_url: ollama_url.clone(),
+				embed_model: embed_model.clone(),
+			};
+			tui::run(&connection, filter, search_config)?;
 		}
 		_ => {
 			print_usage();

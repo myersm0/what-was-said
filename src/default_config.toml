@@ -25,7 +25,9 @@ name = "meeting_transcript"
 source_pattern = "(Zoom|Teams Meeting|Google Meet)"
 parser = "whole"
 merge_strategy = "none"
-# Uncomment to use external preprocessor:
+skip = true
+# Uncomment when preprocessor is ready:
+# skip = false
 # preprocessor = "~/.config/cathedrals/parsers/transcript_parser.py"
 
 [[doctype]]

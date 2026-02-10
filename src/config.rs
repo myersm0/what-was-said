@@ -31,6 +31,8 @@ struct DoctypeToml {
 	merge_consecutive_same_author: bool,
 	#[serde(default)]
 	preprocessor: Option<String>,
+	#[serde(default)]
+	skip: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +46,7 @@ pub struct Doctype {
 	pub cleanup_patterns: Vec<Regex>,
 	pub merge_consecutive_same_author: bool,
 	pub preprocessor: Option<String>,
+	pub skip: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +69,7 @@ pub struct DoctypeMatch {
 	pub cleanup_patterns: Vec<Regex>,
 	pub merge_consecutive_same_author: bool,
 	pub preprocessor: Option<String>,
+	pub skip: bool,
 }
 
 fn parse_parser(value: &str) -> Result<Parser> {
@@ -133,6 +137,7 @@ impl Config {
 				cleanup_patterns,
 				merge_consecutive_same_author: entry.merge_consecutive_same_author,
 				preprocessor: entry.preprocessor.map(|p| expand_tilde(&p)),
+				skip: entry.skip,
 			});
 		}
 		Ok(Config { doctypes })
@@ -156,6 +161,7 @@ impl Config {
 					cleanup_patterns: doctype.cleanup_patterns.clone(),
 					merge_consecutive_same_author: doctype.merge_consecutive_same_author,
 					preprocessor: doctype.preprocessor.clone(),
+					skip: doctype.skip,
 				});
 			}
 		}
@@ -178,6 +184,7 @@ impl Config {
 						cleanup_patterns: doctype.cleanup_patterns.clone(),
 						merge_consecutive_same_author: doctype.merge_consecutive_same_author,
 						preprocessor: doctype.preprocessor.clone(),
+						skip: doctype.skip,
 					});
 				}
 			}
@@ -189,6 +196,7 @@ impl Config {
 				cleanup_patterns: vec![],
 				merge_consecutive_same_author: false,
 				preprocessor: None,
+				skip: false,
 			});
 		}
 
@@ -203,6 +211,7 @@ impl Config {
 						cleanup_patterns: doctype.cleanup_patterns.clone(),
 						merge_consecutive_same_author: doctype.merge_consecutive_same_author,
 						preprocessor: doctype.preprocessor.clone(),
+						skip: doctype.skip,
 					});
 				}
 			}
@@ -214,6 +223,7 @@ impl Config {
 				cleanup_patterns: vec![],
 				merge_consecutive_same_author: false,
 				preprocessor: None,
+				skip: false,
 			});
 		}
 
