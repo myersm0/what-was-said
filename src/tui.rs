@@ -70,6 +70,7 @@ struct App {
 	status_message: Option<String>,
 	group_docs: Vec<i64>,
 	group_index: usize,
+	marked_docs: Vec<i64>,
 	current_doc_tags: Vec<String>,
 	tag_input: String,
 	all_tags: Vec<(String, i64)>,
@@ -109,6 +110,7 @@ impl App {
 			status_message: None,
 			group_docs: Vec::new(),
 			group_index: 0,
+			marked_docs: Vec::new(),
 			current_doc_tags: Vec::new(),
 			tag_input: String::new(),
 			all_tags: Vec::new(),
@@ -149,7 +151,12 @@ impl App {
 			.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
 			.unwrap_or(0);
 
-		if let Some(ref doc) = self.current_document {
+		if self.marked_docs.len() > 1 && self.marked_docs.contains(&doc_id) {
+			self.group_docs = self.marked_docs.clone();
+			self.group_index = self.group_docs.iter()
+				.position(|&id| id == doc_id)
+				.unwrap_or(0);
+		} else if let Some(ref doc) = self.current_document {
 			let group_key = extract_group_key(&doc.source_title);
 			if let Some(ref key) = group_key {
 				self.group_docs = self.documents.iter()
@@ -190,6 +197,18 @@ impl App {
 				.unwrap_or(0);
 		}
 		Ok(())
+	}
+
+	fn toggle_mark(&mut self, doc_id: i64) {
+		if let Some(pos) = self.marked_docs.iter().position(|&id| id == doc_id) {
+			self.marked_docs.remove(pos);
+		} else {
+			self.marked_docs.push(doc_id);
+		}
+	}
+
+	fn clear_marks(&mut self) {
+		self.marked_docs.clear();
 	}
 
 	fn run_search(&mut self, connection: &Connection, search_config: &SearchConfig) -> Result<()> {
@@ -625,6 +644,21 @@ fn run_app(
 						let max_idx = app.filtered_documents().len().saturating_sub(1);
 						app.browse_state.select(Some(max_idx));
 					}
+					KeyCode::Char('m') => {
+						if let Some(selected) = app.browse_state.selected() {
+							let filtered = app.filtered_documents();
+							if let Some(doc) = filtered.get(selected) {
+								let doc_id = doc.id;
+								app.toggle_mark(doc_id);
+								let mark_count = app.marked_docs.len();
+								app.status_message = Some(format!("{} docs marked", mark_count));
+							}
+						}
+					}
+					KeyCode::Char('M') => {
+						app.clear_marks();
+						app.status_message = Some("Marks cleared".to_string());
+					}
 					_ => {}
 				},
 				Mode::Read => match key.code {
@@ -893,7 +927,8 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 	let items: Vec<ListItem> = filtered
 		.iter()
 		.map(|doc| {
-			let source = truncate_str(&doc.source_title, 43);
+			let mark_indicator = if app.marked_docs.contains(&doc.id) { "* " } else { "  " };
+			let source = truncate_str(&doc.source_title, 41);
 			let doctype = doc.doctype_name.as_deref().unwrap_or("-");
 			let date = &doc.clip_date[..10.min(doc.clip_date.len())];
 
@@ -910,8 +945,15 @@ fn draw_browse(frame: &mut Frame, app: &App, area: Rect) {
 
 			let preview = format!("{}{}", tags_str, first_line);
 
+			let mark_style = if app.marked_docs.contains(&doc.id) {
+				Style::default().fg(Color::Yellow)
+			} else {
+				Style::default()
+			};
+
 			ListItem::new(Line::from(vec![
-				Span::raw(format!("{:<45}", source)),
+				Span::styled(mark_indicator, mark_style),
+				Span::raw(format!("{:<43}", source)),
 				Span::raw("│ "),
 				Span::raw(format!("{:<10}", truncate_str(doctype, 8))),
 				Span::raw("│ "),
@@ -1202,7 +1244,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	};
 
 	let help_text = match app.mode {
-		Mode::Browse => "[↑↓/gG] move  [Enter] open  [/] search  [f] filter  [s] sort  [q] quit",
+		Mode::Browse => "[↑↓/gG] move  [m] mark  [M] clear  [Enter] open  [/] search  [f] filter  [s] sort  [q] quit",
 		Mode::Read => read_help,
 		Mode::Search => "[↑↓] move  [Tab] field  [F2] mode  [Enter] open  [Esc] back",
 		Mode::TagEdit => "[type] add tag  [Enter] save  [Esc] cancel",
@@ -1258,16 +1300,35 @@ fn draw_tag_edit_popup(frame: &mut Frame, app: &App) {
 }
 
 fn draw_tag_filter_popup(frame: &mut Frame, app: &App) {
-	let height = (app.all_tags.len() + 4).min(15) as u16;
-	let area = centered_rect(40, height, frame.area());
+	let max_height = (frame.area().height * 70 / 100).max(10);
+	let height = (app.all_tags.len() as u16 + 4).min(max_height);
+	let area = centered_rect(50, height, frame.area());
 	frame.render_widget(Clear, area);
 
+	let inner_height = height.saturating_sub(4) as usize;
+	let scroll_offset = if app.all_tags.len() <= inner_height {
+		0
+	} else {
+		let half = inner_height / 2;
+		if app.tag_filter_index < half {
+			0
+		} else if app.tag_filter_index >= app.all_tags.len() - half {
+			app.all_tags.len() - inner_height
+		} else {
+			app.tag_filter_index - half
+		}
+	};
+
 	let mut lines: Vec<Line> = vec![
-		Line::from("Select tag to filter by:"),
+		Line::from(format!(
+			"Select tag ({}/{}):",
+			app.tag_filter_index + 1,
+			app.all_tags.len()
+		)),
 		Line::from(""),
 	];
 
-	for (i, (tag, count)) in app.all_tags.iter().enumerate() {
+	for (i, (tag, count)) in app.all_tags.iter().enumerate().skip(scroll_offset).take(inner_height) {
 		let style = if i == app.tag_filter_index {
 			Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
 		} else {
