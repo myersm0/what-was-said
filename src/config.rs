@@ -364,3 +364,108 @@ pub fn load_tag_config(path: Option<&Path>) -> TagConfig {
 		TagConfig::default()
 	}
 }
+
+#[derive(Debug, Deserialize)]
+struct DeriveConfigToml {
+	#[serde(default = "default_detailed_model")]
+	detailed_model: String,
+	#[serde(default = "default_brief_model")]
+	brief_model: String,
+	#[serde(default = "default_prompt_version")]
+	prompt_version: String,
+	#[serde(default)]
+	prompts: std::collections::HashMap<String, String>,
+}
+
+fn default_detailed_model() -> String { "phi4:14b".to_string() }
+fn default_brief_model() -> String { "phi4:14b".to_string() }
+fn default_prompt_version() -> String { "v1".to_string() }
+
+#[derive(Debug, Clone)]
+pub struct DeriveConfig {
+	pub detailed_model: String,
+	pub brief_model: String,
+	pub prompt_version: String,
+	pub prompts: std::collections::HashMap<String, String>,
+}
+
+impl Default for DeriveConfig {
+	fn default() -> Self {
+		DeriveConfig {
+			detailed_model: default_detailed_model(),
+			brief_model: default_brief_model(),
+			prompt_version: default_prompt_version(),
+			prompts: std::collections::HashMap::new(),
+		}
+	}
+}
+
+impl DeriveConfig {
+	pub fn load(path: &Path) -> Result<Self> {
+		let derive_path = path.parent()
+			.unwrap_or(Path::new("."))
+			.join("derive.toml");
+
+		if !derive_path.exists() {
+			return Ok(DeriveConfig::default());
+		}
+
+		let text = std::fs::read_to_string(&derive_path)
+			.with_context(|| format!("reading derive config from {}", derive_path.display()))?;
+
+		let raw: DeriveConfigToml = toml::from_str(&text)
+			.context("parsing derive.toml")?;
+
+		let prompts: std::collections::HashMap<String, String> = raw.prompts.into_iter()
+			.map(|(k, v)| (k, expand_tilde(&v)))
+			.collect();
+
+		Ok(DeriveConfig {
+			detailed_model: raw.detailed_model,
+			brief_model: raw.brief_model,
+			prompt_version: raw.prompt_version,
+			prompts,
+		})
+	}
+
+	pub fn get_prompt_for_doctype(&self, doctype: Option<&str>) -> String {
+		if let Some(dt) = doctype {
+			if let Some(path) = self.prompts.get(dt) {
+				if let Ok(text) = std::fs::read_to_string(path) {
+					return text;
+				}
+			}
+		}
+		if let Some(path) = self.prompts.get("default") {
+			if let Ok(text) = std::fs::read_to_string(path) {
+				return text;
+			}
+		}
+		DEFAULT_DETAILED_PROMPT.to_string()
+	}
+
+	pub fn get_brief_prompt(&self) -> String {
+		if let Some(path) = self.prompts.get("brief") {
+			if let Ok(text) = std::fs::read_to_string(path) {
+				return text;
+			}
+		}
+		DEFAULT_BRIEF_PROMPT.to_string()
+	}
+}
+
+pub const DEFAULT_DETAILED_PROMPT: &str = r#"Summarize the following document in detail. Include:
+- Main topic and purpose
+- Key points, findings, or arguments
+- Important details, names, or dates mentioned
+- Any conclusions, decisions, or action items
+
+Be thorough but concise. Write in plain prose, not bullet points.
+
+Document:
+"#;
+
+pub const DEFAULT_BRIEF_PROMPT: &str = r#"Compress the following summary into 1-3 sentences that capture the essential what/who/why. Be extremely concise.
+
+Summary:
+"#;

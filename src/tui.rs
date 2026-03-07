@@ -29,6 +29,7 @@ enum Mode {
 	Search,
 	TagEdit,
 	TagFilter,
+	SummaryView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,12 @@ enum SearchField {
 	Author,
 	DateFrom,
 	DateTo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryType {
+	Brief,
+	Detailed,
 }
 
 struct App {
@@ -79,6 +86,10 @@ struct App {
 	tag_config: TagConfig,
 	global_include: Option<Vec<String>>,
 	global_exclude: Vec<String>,
+	summary_content: Option<String>,
+	summary_type: SummaryType,
+	summary_doc_id: Option<i64>,
+	summary_scroll: usize,
 }
 
 impl App {
@@ -119,6 +130,10 @@ impl App {
 			tag_config: TagConfig::default(),
 			global_include: None,
 			global_exclude: Vec::new(),
+			summary_content: None,
+			summary_type: SummaryType::Brief,
+			summary_doc_id: None,
+			summary_scroll: 0,
 		}
 	}
 
@@ -659,6 +674,24 @@ fn run_app(
 						app.clear_marks();
 						app.status_message = Some("Marks cleared".to_string());
 					}
+					KeyCode::Char('d') => {
+						if let Some(selected) = app.browse_state.selected() {
+							let filtered = app.filtered_documents();
+							if let Some(doc) = filtered.get(selected) {
+								let doc_id = doc.id;
+								if let Ok(Some(brief)) = storage::get_derived_content(connection, doc_id, "brief") {
+									app.summary_content = Some(brief.body);
+									app.summary_type = SummaryType::Brief;
+									app.summary_doc_id = Some(doc_id);
+									app.summary_scroll = 0;
+									app.previous_mode = Mode::Browse;
+									app.mode = Mode::SummaryView;
+								} else {
+									app.status_message = Some("No summary - run 'cathedrals derive'".to_string());
+								}
+							}
+						}
+					}
 					_ => {}
 				},
 				Mode::Read => match key.code {
@@ -707,6 +740,21 @@ fn run_app(
 					}
 					KeyCode::Char('G') => {
 						app.current_chunk_index = app.total_chunks.saturating_sub(1);
+					}
+					KeyCode::Char('d') => {
+						if let Some(ref doc) = app.current_document {
+							let doc_id = doc.id;
+							if let Ok(Some(detailed)) = storage::get_derived_content(connection, doc_id, "detailed") {
+								app.summary_content = Some(detailed.body);
+								app.summary_type = SummaryType::Detailed;
+								app.summary_doc_id = Some(doc_id);
+								app.summary_scroll = 0;
+								app.previous_mode = Mode::Read;
+								app.mode = Mode::SummaryView;
+							} else {
+								app.status_message = Some("No summary - run 'cathedrals derive'".to_string());
+							}
+						}
 					}
 					_ => {}
 				},
@@ -824,6 +872,58 @@ fn run_app(
 					}
 					_ => {}
 				},
+				Mode::SummaryView => match key.code {
+					KeyCode::Esc | KeyCode::Char('q') => {
+						app.mode = app.previous_mode;
+						app.summary_content = None;
+					}
+					KeyCode::Up => {
+						app.summary_scroll = app.summary_scroll.saturating_sub(1);
+					}
+					KeyCode::Down => {
+						app.summary_scroll += 1;
+					}
+					KeyCode::Char('d') => {
+						if let Some(doc_id) = app.summary_doc_id {
+							let new_type = match app.summary_type {
+								SummaryType::Brief => SummaryType::Detailed,
+								SummaryType::Detailed => SummaryType::Brief,
+							};
+							let content_type = match new_type {
+								SummaryType::Brief => "brief",
+								SummaryType::Detailed => "detailed",
+							};
+							if let Ok(Some(content)) = storage::get_derived_content(connection, doc_id, content_type) {
+								app.summary_content = Some(content.body);
+								app.summary_type = new_type;
+								app.summary_scroll = 0;
+							}
+						}
+					}
+					KeyCode::Char('y') => {
+						if let Some(ref content) = app.summary_content {
+							if let Ok(mut clipboard) = arboard::Clipboard::new() {
+								let _ = clipboard.set_text(content.clone());
+								app.status_message = Some("Summary copied".to_string());
+							}
+						}
+					}
+					KeyCode::Char('x') => {
+						if let Some(doc_id) = app.summary_doc_id {
+							let content_type = match app.summary_type {
+								SummaryType::Brief => "brief",
+								SummaryType::Detailed => "detailed",
+							};
+							if let Ok(Some(content)) = storage::get_derived_content(connection, doc_id, content_type) {
+								let _ = storage::set_derived_quality(connection, content.id, "bad");
+								app.status_message = Some("Marked as bad".to_string());
+								app.mode = app.previous_mode;
+								app.summary_content = None;
+							}
+						}
+					}
+					_ => {}
+				},
 			}
 		}
 
@@ -846,7 +946,7 @@ fn draw(frame: &mut Frame, app: &App) {
 
 	match app.mode {
 		Mode::Browse | Mode::TagFilter => draw_browse(frame, app, chunks[0]),
-		Mode::Read | Mode::TagEdit => draw_read(frame, app, chunks[0]),
+		Mode::Read | Mode::TagEdit | Mode::SummaryView => draw_read(frame, app, chunks[0]),
 		Mode::Search => draw_search(frame, app, chunks[0]),
 	}
 
@@ -856,6 +956,10 @@ fn draw(frame: &mut Frame, app: &App) {
 
 	if app.mode == Mode::TagEdit {
 		draw_tag_edit_popup(frame, app);
+	}
+
+	if app.mode == Mode::SummaryView {
+		draw_summary_popup(frame, app);
 	}
 
 	draw_status_bar(frame, app, chunks[1]);
@@ -1238,17 +1342,18 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let read_help = if app.group_docs.len() > 1 {
-		"[↑↓/gG] chunk  [◀▶] group  [y/Y] yank  [t] tags  [b] back  [q] quit"
+		"[↑↓/gG] chunk  [◀▶] group  [d] summary  [y/Y] yank  [t] tags  [b] back  [q] quit"
 	} else {
-		"[↑↓/gG] chunk  [PgUp/Dn] jump  [y/Y] yank  [t] tags  [b] back  [q] quit"
+		"[↑↓/gG] chunk  [PgUp/Dn] jump  [d] summary  [y/Y] yank  [t] tags  [b] back  [q] quit"
 	};
 
 	let help_text = match app.mode {
-		Mode::Browse => "[↑↓/gG] move  [m] mark  [M] clear  [Enter] open  [/] search  [f] filter  [s] sort  [q] quit",
+		Mode::Browse => "[↑↓/gG] move  [m] mark  [d] summary  [Enter] open  [/] search  [f] filter  [s] sort  [q] quit",
 		Mode::Read => read_help,
 		Mode::Search => "[↑↓] move  [Tab] field  [F2] mode  [Enter] open  [Esc] back",
 		Mode::TagEdit => "[type] add tag  [Enter] save  [Esc] cancel",
 		Mode::TagFilter => "[↑↓/gG] select  [Enter] apply  [c] clear  [Esc] cancel",
+		Mode::SummaryView => "[↑↓] scroll  [d] toggle  [y] copy  [x] mark bad  [Esc] close",
 	};
 
 	let status = if let Some(ref msg) = app.status_message {
@@ -1348,6 +1453,42 @@ fn draw_tag_filter_popup(frame: &mut Frame, app: &App) {
 				.borders(Borders::ALL)
 				.border_style(Style::default().fg(Color::Cyan)),
 		);
+
+	frame.render_widget(popup, area);
+}
+
+fn draw_summary_popup(frame: &mut Frame, app: &App) {
+	let height = (frame.area().height * 70 / 100).max(10);
+	let width = (frame.area().width * 80 / 100).max(40);
+	let area = Rect::new(
+		(frame.area().width.saturating_sub(width)) / 2,
+		(frame.area().height.saturating_sub(height)) / 2,
+		width,
+		height,
+	);
+	frame.render_widget(Clear, area);
+
+	let type_str = match app.summary_type {
+		SummaryType::Brief => "Brief",
+		SummaryType::Detailed => "Detailed",
+	};
+
+	let content = app.summary_content.as_deref().unwrap_or("(no content)");
+	let lines: Vec<Line> = content
+		.lines()
+		.skip(app.summary_scroll)
+		.take(height.saturating_sub(2) as usize)
+		.map(|line| Line::from(line))
+		.collect();
+
+	let popup = Paragraph::new(Text::from(lines))
+		.block(
+			Block::default()
+				.title(format!(" {} Summary [d: toggle] [y: copy] [x: mark bad] ", type_str))
+				.borders(Borders::ALL)
+				.border_style(Style::default().fg(Color::Cyan)),
+		)
+		.wrap(Wrap { trim: false });
 
 	frame.render_widget(popup, area);
 }

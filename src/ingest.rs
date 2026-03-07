@@ -232,6 +232,26 @@ impl OllamaClient {
 
 		Ok(response.embedding)
 	}
+
+	pub fn chat(&self, prompt: &str, model: &str) -> Result<String> {
+		let request = serde_json::json!({
+			"model": model,
+			"prompt": prompt,
+			"stream": false
+		});
+
+		let response: serde_json::Value = self
+			.client
+			.post(format!("{}/api/generate", self.base_url))
+			.json(&request)
+			.send()?
+			.json()?;
+
+		response["response"]
+			.as_str()
+			.map(|s| s.to_string())
+			.ok_or_else(|| anyhow::anyhow!("no response field in ollama output"))
+	}
 }
 
 fn extract_body(lines: &[&str], start_line: usize, end_line: usize) -> String {

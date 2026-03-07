@@ -47,6 +47,14 @@ fn normalize_to_ascii(s: &str) -> String {
 		.join(" ")
 }
 
+fn truncate_string(s: &str, max_len: usize) -> String {
+	if s.len() <= max_len {
+		s.to_string()
+	} else {
+		format!("{}...", &s[..max_len.saturating_sub(3)])
+	}
+}
+
 fn extract_merge_key(source_title: &str) -> String {
 	let browsers = [" - Brave", " - Chrome", " - Firefox", " - Safari", " - Edge", " - Arc"];
 	let mut s = source_title.to_string();
@@ -373,10 +381,19 @@ fn print_usage() {
   cathedrals browse                    interactive TUI (default)
   cathedrals ingest <directory>        ingest new files from directory
   cathedrals embed                     compute embeddings for chunks
+  cathedrals derive [options]          generate LLM summaries
   cathedrals similar <query>           semantic search using embeddings
   cathedrals search <query>            keyword search chunks
   cathedrals dump [filter]             dump documents
   cathedrals stats                     show database statistics
+
+derive options:
+  --missing              generate for docs without summaries (default)
+  --stale                regenerate where source content changed
+  --bad-detailed         regenerate detailed summaries marked bad
+  --bad-brief            regenerate brief summaries marked bad
+  --force                regenerate all summaries
+  --status               show derivation status only
 
 options:
   --db <path>          database path (default: $XDG_DATA_HOME/cathedrals/cathedrals.db)
@@ -385,7 +402,7 @@ options:
   --model <n>          ollama model for segmentation (default: mistral-nemo)
   --embed-model <n>    ollama model for embeddings (default: nomic-embed-text)
   --force              re-ingest files even if already in database
-  --limit <n>          limit number of chunks to embed
+  --limit <n>          limit number of items to process
 
 tag filtering (browse mode):
   --tags <t1,t2,...>   only show docs matching these tags
@@ -407,6 +424,11 @@ fn main() -> Result<()> {
 	let mut tags_exclude: Vec<String> = Vec::new();
 	let mut include_all = false;
 	let mut limit: Option<usize> = None;
+	let mut derive_missing = false;
+	let mut derive_stale = false;
+	let mut derive_bad_detailed = false;
+	let mut derive_bad_brief = false;
+	let mut derive_status_only = false;
 
 	let mut positional = Vec::new();
 	let mut index = 1;
@@ -451,6 +473,21 @@ fn main() -> Result<()> {
 			}
 			"--include-all" => {
 				include_all = true;
+			}
+			"--missing" => {
+				derive_missing = true;
+			}
+			"--stale" => {
+				derive_stale = true;
+			}
+			"--bad-detailed" => {
+				derive_bad_detailed = true;
+			}
+			"--bad-brief" => {
+				derive_bad_brief = true;
+			}
+			"--status" => {
+				derive_status_only = true;
 			}
 			"--help" | "-h" => {
 				print_usage();
@@ -606,6 +643,151 @@ fn main() -> Result<()> {
 					println!();
 				}
 			}
+		}
+		Some("derive") => {
+			let derive_config = config::DeriveConfig::load(
+				config_path.as_ref().map(|p| p.as_path()).unwrap_or(Path::new(""))
+			)?;
+
+			if derive_status_only {
+				let status = storage::get_derive_status(&connection)?;
+				println!("Derivation status:");
+				println!("  total documents: {}", status.total_docs);
+				println!("  with detailed:   {}", status.with_detailed);
+				println!("  with brief:      {}", status.with_brief);
+				println!("  detailed bad:    {}", status.detailed_bad);
+				println!("  brief bad:       {}", status.brief_bad);
+				println!("  missing:         {}", status.total_docs - status.with_detailed);
+				return Ok(());
+			}
+
+			let do_missing = derive_missing || (!derive_stale && !derive_bad_detailed && !derive_bad_brief && !force);
+			let doc_ids: Vec<i64> = if force {
+				let mut stmt = connection.prepare("SELECT id FROM documents")?;
+				let ids: Vec<i64> = stmt.query_map([], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
+				ids
+			} else {
+				storage::get_documents_needing_derivation(
+					&connection,
+					do_missing,
+					derive_stale,
+					derive_bad_detailed,
+					derive_bad_brief,
+				)?
+			};
+
+			if doc_ids.is_empty() {
+				println!("no documents need derivation");
+				return Ok(());
+			}
+
+			let doc_ids: Vec<i64> = if let Some(lim) = limit {
+				doc_ids.into_iter().take(lim).collect()
+			} else {
+				doc_ids
+			};
+
+			println!("deriving summaries for {} documents...", doc_ids.len());
+			println!("  detailed model: {}", derive_config.detailed_model);
+			println!("  brief model: {}", derive_config.brief_model);
+
+			let ollama = OllamaClient::new(&ollama_url, &model_name);
+
+			for (i, doc_id) in doc_ids.iter().enumerate() {
+				let doc_info: (String, Option<String>) = connection.query_row(
+					"SELECT source_title, doctype_name FROM documents WHERE id = ?1",
+					[doc_id],
+					|row| Ok((row.get(0)?, row.get(1)?)),
+				)?;
+				let (source_title, doctype_name) = doc_info;
+
+				eprint!("\r  [{}/{}] {}...", i + 1, doc_ids.len(), truncate_string(&source_title, 40));
+
+				let existing_detailed = storage::get_derived_content(&connection, *doc_id, "detailed")?;
+				let need_detailed = force
+					|| existing_detailed.is_none()
+					|| existing_detailed.as_ref().map(|d| d.quality == "bad").unwrap_or(false)
+					|| (derive_stale && {
+						let current_hash = storage::compute_document_source_hash(&connection, *doc_id)?;
+						existing_detailed.as_ref()
+							.and_then(|d| d.source_hash.as_ref())
+							.map(|h| h != &current_hash)
+							.unwrap_or(true)
+					});
+
+				let detailed_body = if need_detailed {
+					let full_text = storage::get_document_full_text(&connection, *doc_id)?;
+					let prompt = derive_config.get_prompt_for_doctype(doctype_name.as_deref());
+					let full_prompt = format!("{}\n{}", prompt, full_text);
+
+					let response = ollama.chat(&full_prompt, &derive_config.detailed_model)?;
+					let source_hash = storage::compute_document_source_hash(&connection, *doc_id)?;
+
+					if let Some(existing) = existing_detailed {
+						storage::update_derived_content(
+							&connection,
+							existing.id,
+							&response,
+							&derive_config.detailed_model,
+							&derive_config.prompt_version,
+							Some(&source_hash),
+						)?;
+					} else {
+						storage::insert_derived_content(
+							&connection,
+							*doc_id,
+							"detailed",
+							&response,
+							&derive_config.detailed_model,
+							&derive_config.prompt_version,
+							Some(&source_hash),
+							None,
+						)?;
+					}
+					response
+				} else {
+					existing_detailed.map(|d| d.body).unwrap_or_default()
+				};
+
+				let existing_brief = storage::get_derived_content(&connection, *doc_id, "brief")?;
+				let need_brief = need_detailed
+					|| existing_brief.is_none()
+					|| existing_brief.as_ref().map(|b| b.quality == "bad").unwrap_or(false);
+
+				if need_brief && !detailed_body.is_empty() {
+					let brief_prompt = derive_config.get_brief_prompt();
+					let full_prompt = format!("{}\n{}", brief_prompt, detailed_body);
+
+					let response = ollama.chat(&full_prompt, &derive_config.brief_model)?;
+
+					let detailed_row = storage::get_derived_content(&connection, *doc_id, "detailed")?;
+					let parent_id = detailed_row.map(|d| d.id);
+
+					if let Some(existing) = existing_brief {
+						storage::update_derived_content(
+							&connection,
+							existing.id,
+							&response,
+							&derive_config.brief_model,
+							&derive_config.prompt_version,
+							None,
+						)?;
+					} else {
+						storage::insert_derived_content(
+							&connection,
+							*doc_id,
+							"brief",
+							&response,
+							&derive_config.brief_model,
+							&derive_config.prompt_version,
+							None,
+							parent_id,
+						)?;
+					}
+				}
+			}
+			eprintln!();
+			println!("done");
 		}
 		Some("browse") | None => {
 			let filter = tui::GlobalFilter {
