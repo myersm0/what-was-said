@@ -393,29 +393,3 @@ pub fn parse_copilot_email_summary(text: &str) -> Vec<SegmentedEntry> {
 
 	entries
 }
-
-pub fn normalize_email_subject(subject: &str) -> String {
-	let mut s = subject.to_lowercase();
-	loop {
-		let trimmed = s.trim();
-		if let Some(rest) = trimmed.strip_prefix("re:") {
-			s = rest.to_string();
-		} else if let Some(rest) = trimmed.strip_prefix("fwd:") {
-			s = rest.to_string();
-		} else if let Some(rest) = trimmed.strip_prefix("fw:") {
-			s = rest.to_string();
-		} else {
-			break;
-		}
-	}
-	s.trim().to_string()
-}
-
-pub fn email_entry_key(entry: &SegmentedEntry) -> Option<(String, String, String)> {
-	let from = entry.author.as_ref()?;
-	let date = entry.timestamp.as_ref()?;
-	let subject = entry.heading_title.as_ref()
-		.map(|s| normalize_email_subject(s))
-		.unwrap_or_default();
-	Some((from.to_lowercase(), date.clone(), subject))
-}

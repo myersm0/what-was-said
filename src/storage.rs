@@ -43,21 +43,6 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 
 		CREATE INDEX IF NOT EXISTS chunks_entry_id ON chunks(entry_id);
 
-		CREATE TABLE IF NOT EXISTS media (
-			id INTEGER PRIMARY KEY,
-			file_path TEXT NOT NULL,
-			media_type TEXT NOT NULL CHECK (media_type IN ('screenshot', 'audio', 'transcript_segment')),
-			timestamp TEXT NOT NULL,
-			duration_seconds REAL,
-			document_id INTEGER REFERENCES documents(id)
-		);
-
-		CREATE TABLE IF NOT EXISTS timeline_links (
-			media_id INTEGER NOT NULL REFERENCES media(id),
-			entry_id INTEGER NOT NULL REFERENCES entries(id),
-			PRIMARY KEY (media_id, entry_id)
-		);
-
 		CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 			body,
 			content=chunks,
@@ -275,19 +260,39 @@ pub fn search_filtered(
 		.collect::<Vec<_>>()
 		.join(" ");
 
-	let mut statement = connection.prepare(
+	let mut conditions = vec!["chunks_fts MATCH ?1".to_string()];
+	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(prefix_query)];
+
+	if let Some(author) = author_like {
+		conditions.push(format!("LOWER(e.author) LIKE ?{}", param_values.len() + 1));
+		param_values.push(Box::new(format!("%{}%", author.to_lowercase())));
+	}
+	if let Some(from) = date_from {
+		conditions.push(format!("e.clip_date >= ?{}", param_values.len() + 1));
+		param_values.push(Box::new(from.to_string()));
+	}
+	if let Some(to) = date_to {
+		conditions.push(format!("e.clip_date <= ?{}", param_values.len() + 1));
+		param_values.push(Box::new(to.to_string()));
+	}
+
+	let sql = format!(
 		"SELECT c.id, c.entry_id, e.document_id, c.body, c.chunk_index, e.position,
 		        e.author, e.source_title, e.clip_date, e.heading_title, f.rank,
 		        snippet(chunks_fts, 0, '\x02', '\x03', '\x01', 12)
 		 FROM chunks_fts f
 		 JOIN chunks c ON c.id = f.rowid
 		 JOIN entries e ON e.id = c.entry_id
-		 WHERE chunks_fts MATCH ?1
+		 WHERE {}
 		 ORDER BY f.rank
-		 LIMIT 100",
-	)?;
+		 LIMIT 200",
+		conditions.join(" AND "),
+	);
+
+	let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+	let mut statement = connection.prepare(&sql)?;
 	let rows: Vec<ChunkSearchResult> = statement
-		.query_map(params![prefix_query], |row| {
+		.query_map(param_refs.as_slice(), |row| {
 			Ok(ChunkSearchResult {
 				chunk_id: row.get(0)?,
 				entry_id: row.get(1)?,
@@ -305,30 +310,8 @@ pub fn search_filtered(
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 
-	let author_pattern = author_like.map(|s| s.to_lowercase());
-	let filtered_rows: Vec<ChunkSearchResult> = rows.into_iter()
-		.filter(|row| {
-			if let Some(ref pattern) = author_pattern {
-				if !row.author.as_ref().map(|a| a.to_lowercase().contains(pattern)).unwrap_or(false) {
-					return false;
-				}
-			}
-			if let Some(from) = date_from {
-				if row.clip_date.as_str() < from {
-					return false;
-				}
-			}
-			if let Some(to) = date_to {
-				if row.clip_date.as_str() > to {
-					return false;
-				}
-			}
-			true
-		})
-		.collect();
-
 	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
-	for row in filtered_rows {
+	for row in rows {
 		let doc = grouped.iter_mut().find(|d| d.document_id == row.document_id);
 		let hit = ChunkHit {
 			entry_id: row.entry_id,

@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 
 use cathedrals::chunking;
 use cathedrals::config::{self, Parser};
+use cathedrals::derive::{self, DeriveOptions};
 use cathedrals::ingest::{self, OllamaClient, SegmentationOptions, run_preprocessor};
 use cathedrals::markdown;
 use cathedrals::minhash;
 use cathedrals::storage::{self, SearchSortColumn};
 use cathedrals::tui;
 use cathedrals::types::*;
+use cathedrals::util;
 
 fn default_db_path() -> PathBuf {
 	dirs::data_dir()
@@ -24,56 +26,6 @@ fn open_db(path: &Path) -> Result<rusqlite::Connection> {
 	let connection = rusqlite::Connection::open(path)?;
 	storage::initialize(&connection)?;
 	Ok(connection)
-}
-
-fn normalize_to_ascii(s: &str) -> String {
-	s.chars()
-		.map(|c| {
-			if c.is_ascii() {
-				c
-			} else {
-				match c {
-					'\u{2014}' | '\u{2013}' => '-',  // em-dash, en-dash
-					'\u{2018}' | '\u{2019}' => '\'', // curly single quotes
-					'\u{201C}' | '\u{201D}' => '"',  // curly double quotes
-					'\u{2026}' => '.',               // ellipsis
-					_ => ' ',
-				}
-			}
-		})
-		.collect::<String>()
-		.split_whitespace()
-		.collect::<Vec<_>>()
-		.join(" ")
-}
-
-fn truncate_string(s: &str, max_len: usize) -> String {
-	if s.len() <= max_len {
-		s.to_string()
-	} else {
-		format!("{}...", &s[..max_len.saturating_sub(3)])
-	}
-}
-
-fn extract_merge_key(source_title: &str) -> String {
-	let browsers = [" - Brave", " - Chrome", " - Firefox", " - Safari", " - Edge", " - Arc"];
-	let mut s = source_title.to_string();
-
-	for browser in &browsers {
-		if let Some(pos) = s.rfind(browser) {
-			s = s[..pos].to_string();
-			break;
-		}
-	}
-
-	if let Some(url_start) = s.rfind(" - https://") {
-		s = s[..url_start].to_string();
-	}
-	if let Some(url_start) = s.rfind(" - http://") {
-		s = s[..url_start].to_string();
-	}
-
-	s.trim().to_string()
 }
 
 const MERGE_MIN_CHARS: usize = 150;
@@ -231,17 +183,17 @@ fn ingest_file(
 	let title = segmented.iter()
 		.find(|e| e.heading_title.is_some())
 		.and_then(|e| e.heading_title.clone())
-		.map(|t| normalize_to_ascii(&t));
+		.map(|t| util::normalize_to_ascii(&t));
 
-	let source_title = normalize_to_ascii(&source_title);
-	let merge_key = extract_merge_key(&source_title);
+	let source_title = util::normalize_to_ascii(&source_title);
+	let merge_key = util::strip_source_suffix(&source_title);
 
 	let doctype_name = doctype_match.as_ref().map(|m| m.name.as_str());
 
 	if merge_strategy == MergeStrategy::Positional {
 		let existing_docs = storage::find_documents_by_merge_key(
 			connection,
-			extract_merge_key,
+			util::strip_source_suffix,
 			&merge_key,
 			"positional",
 		)?;
@@ -363,12 +315,8 @@ fn ingest_directory(
 
 	for path in &paths {
 		match ingest_file(connection, ollama, path, config, force) {
-			Ok(true) => {
-				ingested += 1;
-			}
-			Ok(false) => {
-				skipped += 1;
-			}
+			Ok(true) => ingested += 1,
+			Ok(false) => skipped += 1,
 			Err(error) => eprintln!("error ingesting {}: {:#}", path.display(), error),
 		}
 	}
@@ -454,9 +402,7 @@ fn main() -> Result<()> {
 				index += 1;
 				embed_model = args[index].clone();
 			}
-			"--force" => {
-				force = true;
-			}
+			"--force" => force = true,
 			"--limit" => {
 				index += 1;
 				limit = Some(args[index].parse().context("--limit requires a number")?);
@@ -471,24 +417,12 @@ fn main() -> Result<()> {
 				index += 1;
 				tags_exclude = args[index].split(',').map(|s| s.trim().to_lowercase()).collect();
 			}
-			"--include-all" => {
-				include_all = true;
-			}
-			"--missing" => {
-				derive_missing = true;
-			}
-			"--stale" => {
-				derive_stale = true;
-			}
-			"--bad-detailed" => {
-				derive_bad_detailed = true;
-			}
-			"--bad-brief" => {
-				derive_bad_brief = true;
-			}
-			"--status" => {
-				derive_status_only = true;
-			}
+			"--include-all" => include_all = true,
+			"--missing" => derive_missing = true,
+			"--stale" => derive_stale = true,
+			"--bad-detailed" => derive_bad_detailed = true,
+			"--bad-brief" => derive_bad_brief = true,
+			"--status" => derive_status_only = true,
 			"--help" | "-h" => {
 				print_usage();
 				return Ok(());
@@ -509,11 +443,7 @@ fn main() -> Result<()> {
 				.context("ingest requires a directory argument")?;
 			let ollama = OllamaClient::new(&ollama_url, &model_name);
 			let (ingested, skipped) = ingest_directory(
-				&connection,
-				&ollama,
-				Path::new(directory),
-				&config,
-				force,
+				&connection, &ollama, Path::new(directory), &config, force,
 			)?;
 			if skipped > 0 {
 				eprintln!("ingested {} files, skipped {} (already in db)", ingested, skipped);
@@ -563,7 +493,8 @@ fn main() -> Result<()> {
 		}
 		Some("dump") => {
 			let query = positional[1..].join(" ");
-			let results = storage::dump_document(&connection, if query.is_empty() { None } else { Some(&query) })?;
+			let filter = if query.is_empty() { None } else { Some(query.as_str()) };
+			let results = storage::dump_document(&connection, filter)?;
 			for doc in &results {
 				println!("=== [{}] {} (id={}) ===", doc.merge_strategy, doc.source_title, doc.document_id);
 				for entry in &doc.entries {
@@ -633,7 +564,12 @@ fn main() -> Result<()> {
 				println!("no results");
 			} else {
 				for result in &results {
-					println!("--- [{:.3}] {} | {} ---", result.similarity, result.source_title, &result.clip_date[..10.min(result.clip_date.len())]);
+					println!(
+						"--- [{:.3}] {} | {} ---",
+						result.similarity,
+						result.source_title,
+						util::truncate_str(&result.clip_date, 10),
+					);
 					for line in result.body.lines().take(5) {
 						println!("  {}", line);
 					}
@@ -650,143 +586,19 @@ fn main() -> Result<()> {
 			)?;
 
 			if derive_status_only {
-				let status = storage::get_derive_status(&connection)?;
-				println!("Derivation status:");
-				println!("  total documents: {}", status.total_docs);
-				println!("  with detailed:   {}", status.with_detailed);
-				println!("  with brief:      {}", status.with_brief);
-				println!("  detailed bad:    {}", status.detailed_bad);
-				println!("  brief bad:       {}", status.brief_bad);
-				println!("  missing:         {}", status.total_docs - status.with_detailed);
+				derive::run_status(&connection)?;
 				return Ok(());
 			}
-
-			let do_missing = derive_missing || (!derive_stale && !derive_bad_detailed && !derive_bad_brief && !force);
-			let doc_ids: Vec<i64> = if force {
-				let mut stmt = connection.prepare("SELECT id FROM documents")?;
-				let ids: Vec<i64> = stmt.query_map([], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
-				ids
-			} else {
-				storage::get_documents_needing_derivation(
-					&connection,
-					do_missing,
-					derive_stale,
-					derive_bad_detailed,
-					derive_bad_brief,
-				)?
-			};
-
-			if doc_ids.is_empty() {
-				println!("no documents need derivation");
-				return Ok(());
-			}
-
-			let doc_ids: Vec<i64> = if let Some(lim) = limit {
-				doc_ids.into_iter().take(lim).collect()
-			} else {
-				doc_ids
-			};
-
-			println!("deriving summaries for {} documents...", doc_ids.len());
-			println!("  detailed model: {}", derive_config.detailed_model);
-			println!("  brief model: {}", derive_config.brief_model);
 
 			let ollama = OllamaClient::new(&ollama_url, &model_name);
-
-			for (i, doc_id) in doc_ids.iter().enumerate() {
-				let source_title: String = connection.query_row(
-					"SELECT source_title FROM documents WHERE id = ?1",
-					[doc_id],
-					|row| row.get(0),
-				)?;
-
-				eprint!("\r  [{}/{}] {}...", i + 1, doc_ids.len(), truncate_string(&source_title, 40));
-
-				let existing_detailed = storage::get_derived_content(&connection, *doc_id, "detailed")?;
-				let need_detailed = force
-					|| existing_detailed.is_none()
-					|| existing_detailed.as_ref().map(|d| d.quality == "bad").unwrap_or(false)
-					|| (derive_stale && {
-						let current_hash = storage::compute_document_source_hash(&connection, *doc_id)?;
-						existing_detailed.as_ref()
-							.and_then(|d| d.source_hash.as_ref())
-							.map(|h| h != &current_hash)
-							.unwrap_or(true)
-					});
-
-				let detailed_body = if need_detailed {
-					let full_text = storage::get_document_full_text(&connection, *doc_id)?;
-					let prompt = derive_config.get_detailed_prompt(full_text.len());
-					let full_prompt = format!("{}\n{}", prompt, full_text);
-
-					let response = ollama.chat(&full_prompt, &derive_config.detailed_model)?;
-					let source_hash = storage::compute_document_source_hash(&connection, *doc_id)?;
-
-					if let Some(existing) = existing_detailed {
-						storage::update_derived_content(
-							&connection,
-							existing.id,
-							&response,
-							&derive_config.detailed_model,
-							&derive_config.prompt_version,
-							Some(&source_hash),
-						)?;
-					} else {
-						storage::insert_derived_content(
-							&connection,
-							*doc_id,
-							"detailed",
-							&response,
-							&derive_config.detailed_model,
-							&derive_config.prompt_version,
-							Some(&source_hash),
-							None,
-						)?;
-					}
-					response
-				} else {
-					existing_detailed.map(|d| d.body).unwrap_or_default()
-				};
-
-				let existing_brief = storage::get_derived_content(&connection, *doc_id, "brief")?;
-				let need_brief = need_detailed
-					|| existing_brief.is_none()
-					|| existing_brief.as_ref().map(|b| b.quality == "bad").unwrap_or(false);
-
-				if need_brief && !detailed_body.is_empty() {
-					let brief_prompt = derive_config.get_brief_prompt();
-					let full_prompt = format!("{}\n{}", brief_prompt, detailed_body);
-
-					let response = ollama.chat(&full_prompt, &derive_config.brief_model)?;
-
-					let detailed_row = storage::get_derived_content(&connection, *doc_id, "detailed")?;
-					let parent_id = detailed_row.map(|d| d.id);
-
-					if let Some(existing) = existing_brief {
-						storage::update_derived_content(
-							&connection,
-							existing.id,
-							&response,
-							&derive_config.brief_model,
-							&derive_config.prompt_version,
-							None,
-						)?;
-					} else {
-						storage::insert_derived_content(
-							&connection,
-							*doc_id,
-							"brief",
-							&response,
-							&derive_config.brief_model,
-							&derive_config.prompt_version,
-							None,
-							parent_id,
-						)?;
-					}
-				}
-			}
-			eprintln!();
-			println!("done");
+			derive::run(&connection, &ollama, &derive_config, &DeriveOptions {
+				force,
+				missing: derive_missing,
+				stale: derive_stale,
+				bad_detailed: derive_bad_detailed,
+				bad_brief: derive_bad_brief,
+				limit,
+			})?;
 		}
 		Some("browse") | None => {
 			let filter = tui::GlobalFilter {
@@ -795,8 +607,8 @@ fn main() -> Result<()> {
 				include_all,
 			};
 			let search_config = tui::SearchConfig {
-				ollama_url: ollama_url.clone(),
-				embed_model: embed_model.clone(),
+				ollama_url,
+				embed_model,
 			};
 			tui::run(&connection, filter, search_config)?;
 		}

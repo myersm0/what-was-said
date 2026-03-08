@@ -21,6 +21,7 @@ use crate::storage::{
 	self, DocumentContent, DocumentSummary,
 	GroupedSearchResult, SearchSortColumn, SortColumn, SortDirection,
 };
+use crate::util::truncate_str;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -490,10 +491,6 @@ impl App {
 			self.tag_input.clear();
 			self.load_documents(connection)?;
 		}
-		Ok(())
-	}
-
-	fn remove_tag_at_cursor(&mut self, _connection: &Connection) -> Result<()> {
 		Ok(())
 	}
 
@@ -1519,30 +1516,6 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
 	)
 }
 
-fn truncate_str(s: &str, max_len: usize) -> &str {
-	if s.len() <= max_len {
-		s
-	} else {
-		let mut end = max_len;
-		while end > 0 && !s.is_char_boundary(end) {
-			end -= 1;
-		}
-		&s[..end]
-	}
-}
-
-fn truncate_string(s: String, max_len: usize) -> String {
-	if s.len() <= max_len {
-		s
-	} else {
-		let mut end = max_len;
-		while end > 0 && !s.is_char_boundary(end) {
-			end -= 1;
-		}
-		s[..end].to_string()
-	}
-}
-
 fn expand_tabs(s: &str) -> String {
 	s.replace('\t', "    ")
 }
@@ -1830,50 +1803,17 @@ fn parse_snippet<'a>(snippet: &str, base_style: Style) -> Vec<Span<'a>> {
 }
 
 fn extract_group_key(source_title: &str) -> Option<String> {
-	let suffixes = [
-		" - Claude - Brave",
-		" - Claude",
-		" — Claude - Brave", 
-		" — Claude",
-		" - Brave",
-		" - Firefox",
-		" - Chrome",
-		" - Safari",
-	];
+	let key = crate::util::strip_source_suffix(source_title);
 
-	let mut key = source_title.to_string();
-	for suffix in suffixes {
-		if let Some(stripped) = key.strip_suffix(suffix) {
-			key = stripped.to_string();
-			break;
-		}
-	}
-
-	let key = key.trim();
-
-	if key.is_empty() {
+	if key.is_empty() || key.len() < 3 {
 		return None;
 	}
 
 	let lower = key.to_lowercase();
-	let generic = [
-		"untitled",
-		"new tab",
-		"bash",
-		"zsh",
-		"terminal",
-		"new document",
-	];
-
-	for pattern in generic {
-		if lower.contains(pattern) {
-			return None;
-		}
-	}
-
-	if key.len() < 3 {
+	let generic = ["untitled", "new tab", "bash", "zsh", "terminal", "new document"];
+	if generic.iter().any(|pattern| lower.contains(pattern)) {
 		return None;
 	}
 
-	Some(key.to_string())
+	Some(key)
 }

@@ -1,10 +1,11 @@
 pub mod chunking;
 pub mod config;
+pub mod derive;
 pub mod types;
 pub mod minhash;
-pub mod merge;
 pub mod markdown;
 pub mod storage;
 pub mod ingest;
+pub mod util;
 pub mod whisper;
 pub mod tui;

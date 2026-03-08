@@ -1,7 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use crate::types::{minhash_size, MinHashSignature};
+use crate::types::{MINHASH_SIZE, MinHashSignature};
 
 fn hash_with_seed(seed: usize, token: &str) -> u64 {
 	let mut hasher = DefaultHasher::new();
@@ -24,9 +24,9 @@ fn tokenize(text: &str) -> Vec<String> {
 
 pub fn minhash(text: &str) -> MinHashSignature {
 	let tokens = tokenize(text);
-	let mut signature = [u64::MAX; minhash_size];
+	let mut signature = [u64::MAX; MINHASH_SIZE];
 	for token in &tokens {
-		for i in 0..minhash_size {
+		for i in 0..MINHASH_SIZE {
 			let hash = hash_with_seed(i, token);
 			if hash < signature[i] {
 				signature[i] = hash;
@@ -56,7 +56,7 @@ pub fn minhash_with_context(
 
 pub fn jaccard(a: &MinHashSignature, b: &MinHashSignature) -> f64 {
 	let matches = a.iter().zip(b.iter()).filter(|(x, y)| x == y).count();
-	matches as f64 / minhash_size as f64
+	matches as f64 / MINHASH_SIZE as f64
 }
 
 pub fn is_short_entry(text: &str) -> bool {
