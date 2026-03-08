@@ -1,6 +1,6 @@
 # Cathedrals
 
-Personal knowledge base for clipped documents. Stores web clips, notes, transcripts, papers in SQLite with full-text and semantic search.
+My personal knowledge base for notes and documents. Stores web clips, notes, whisper-transcribed voice memos, emails, papers, etc, in SQLite with full-text and semantic search.
 
 ## Installation
 After ensuring the prerequisites (see section below) are met:
