@@ -140,9 +140,9 @@ fn open_db(path: &Path) -> Result<rusqlite::Connection> {
 	Ok(connection)
 }
 
-fn create_backend(cli: &Cli) -> Result<Box<dyn LlmBackend>> {
-	match cli.backend.as_str() {
-		"ollama" => Ok(Box::new(OllamaClient::new(&cli.ollama))),
+fn create_backend(backend_name: &str, ollama_url: &str) -> Result<Box<dyn LlmBackend>> {
+	match backend_name {
+		"ollama" => Ok(Box::new(OllamaClient::new(ollama_url))),
 		"openai" => Ok(Box::new(OpenAiClient::from_env()?)),
 		other => anyhow::bail!("unknown backend: {}", other),
 	}
@@ -155,12 +155,17 @@ fn main() -> Result<()> {
 	let config = config::load_or_default(cli.config.as_deref())?;
 	let connection = open_db(&db_path)?;
 	let json_output = cli.json;
+	let backend_name = cli.backend.clone();
+	let ollama_url = cli.ollama.clone();
+	let model = cli.model.clone();
+	let embed_model = cli.embed_model.clone();
+	let config_path = cli.config.clone();
 
 	match cli.command {
 		Some(Command::Ingest { directory, force }) => {
-			let backend = create_backend(&cli)?;
+			let backend = create_backend(&backend_name, &ollama_url)?;
 			let (ingested, skipped) = ingest::ingest_directory(
-				&connection, backend.as_ref(), &cli.model, &directory, &config, force,
+				&connection, backend.as_ref(), &model, &directory, &config, force,
 			)?;
 			if skipped > 0 {
 				eprintln!("ingested {} files, skipped {} (already in db)", ingested, skipped);
@@ -261,7 +266,7 @@ fn main() -> Result<()> {
 			}
 		}
 		Some(Command::Embed { limit }) => {
-			let backend = create_backend(&cli)?;
+			let backend = create_backend(&backend_name, &ollama_url)?;
 			let pending = storage::count_chunks_without_embeddings(&connection)?;
 			let existing = storage::count_chunks_with_embeddings(&connection)?;
 			println!("embeddings: {} existing, {} pending", existing, pending);
@@ -273,10 +278,10 @@ fn main() -> Result<()> {
 
 			let chunks = storage::get_chunks_without_embeddings(&connection, limit)?;
 			let total = chunks.len();
-			println!("computing embeddings for {} chunks using {}...", total, cli.embed_model);
+			println!("computing embeddings for {} chunks using {}...", total, embed_model);
 
 			for (i, chunk) in chunks.iter().enumerate() {
-				let embedding = backend.embed(&chunk.body, &cli.embed_model)?;
+				let embedding = backend.embed(&chunk.body, &embed_model)?;
 				if i == 0 {
 					storage::ensure_vec_table(&connection, embedding.len())?;
 				}
@@ -298,8 +303,8 @@ fn main() -> Result<()> {
 				anyhow::bail!("no embeddings yet - run 'cathedrals embed' first");
 			}
 
-			let backend = create_backend(&cli)?;
-			let query_embedding = backend.embed(&query, &cli.embed_model)?;
+			let backend = create_backend(&backend_name, &ollama_url)?;
+			let query_embedding = backend.embed(&query, &embed_model)?;
 			let results = storage::find_similar_chunks(&connection, &query_embedding, 10)?;
 
 			if json_output {
@@ -326,7 +331,7 @@ fn main() -> Result<()> {
 		}
 		Some(Command::Derive { missing, stale, bad_detailed, bad_brief, force, status, limit }) => {
 			let derive_config = config::DeriveConfig::load(
-				cli.config.as_ref().map(|p| p.as_path()).unwrap_or(Path::new(""))
+				config_path.as_deref().unwrap_or(Path::new(""))
 			)?;
 
 			if status {
@@ -339,7 +344,7 @@ fn main() -> Result<()> {
 				return Ok(());
 			}
 
-			let backend = create_backend(&cli)?;
+			let backend = create_backend(&backend_name, &ollama_url)?;
 			derive::run(&connection, backend.as_ref(), &derive_config, &DeriveOptions {
 				force,
 				missing,
@@ -381,27 +386,27 @@ fn main() -> Result<()> {
 			}
 		}
 		Some(Command::Browse { tags, exclude, include_all }) => {
-			let backend = create_backend(&cli)?;
+			let backend = create_backend(&backend_name, &ollama_url)?;
 			let filter = tui::GlobalFilter {
 				include: tags,
 				exclude,
 				include_all,
 			};
 			let search_config = tui::SearchConfig {
-				embed_model: cli.embed_model,
+				embed_model: embed_model.clone(),
 				backend: backend.as_ref(),
 			};
 			tui::run(&connection, filter, search_config)?;
 		}
 		None => {
-			let backend = create_backend(&cli)?;
+			let backend = create_backend(&backend_name, &ollama_url)?;
 			let filter = tui::GlobalFilter {
 				include: None,
 				exclude: Vec::new(),
 				include_all: false,
 			};
 			let search_config = tui::SearchConfig {
-				embed_model: cli.embed_model,
+				embed_model: embed_model.clone(),
 				backend: backend.as_ref(),
 			};
 			tui::run(&connection, filter, search_config)?;
