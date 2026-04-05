@@ -16,6 +16,7 @@ use rusqlite::Connection;
 use crate::types::MergeStrategy;
 
 pub fn initialize(connection: &Connection) -> Result<()> {
+	connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 	connection.execute_batch("PRAGMA journal_mode=WAL;")?;
 	connection.execute_batch(
 		"
@@ -31,7 +32,7 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 
 		CREATE TABLE IF NOT EXISTS entries (
 			id INTEGER PRIMARY KEY,
-			document_id INTEGER NOT NULL REFERENCES documents(id),
+			document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
 			body TEXT NOT NULL,
 			author TEXT,
 			timestamp TEXT,
@@ -109,6 +110,60 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 		CREATE UNIQUE INDEX IF NOT EXISTS derived_content_doc_type ON derived_content(document_id, content_type);
 		",
 	)?;
+	migrate(connection)?;
+	Ok(())
+}
+
+fn migrate(connection: &Connection) -> Result<()> {
+	let entries_sql: String = connection.query_row(
+		"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+		[],
+		|row| row.get(0),
+	)?;
+	if !entries_sql.contains("ON DELETE CASCADE") {
+		eprintln!("migrating entries table to add ON DELETE CASCADE");
+		connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+		connection.execute_batch(
+			"
+			ALTER TABLE entries RENAME TO entries_old;
+			CREATE TABLE entries (
+				id INTEGER PRIMARY KEY,
+				document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+				body TEXT NOT NULL,
+				author TEXT,
+				timestamp TEXT,
+				source_title TEXT NOT NULL,
+				clip_date TEXT NOT NULL,
+				file_path TEXT NOT NULL,
+				position INTEGER NOT NULL,
+				heading_level INTEGER,
+				heading_title TEXT,
+				is_quote INTEGER NOT NULL DEFAULT 0,
+				minhash BLOB NOT NULL
+			);
+			INSERT INTO entries SELECT * FROM entries_old;
+			DROP TABLE entries_old;
+			",
+		)?;
+		connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+	}
+	let orphaned_entries: i64 = connection.query_row(
+		"SELECT COUNT(*) FROM entries WHERE document_id NOT IN (SELECT id FROM documents)",
+		[],
+		|row| row.get(0),
+	)?;
+	if orphaned_entries > 0 {
+		eprintln!("cleaning up {} orphaned entries", orphaned_entries);
+		connection.execute(
+			"DELETE FROM entries WHERE document_id NOT IN (SELECT id FROM documents)",
+			[],
+		)?;
+		connection.execute(
+			"DELETE FROM chunks WHERE entry_id NOT IN (SELECT id FROM entries)",
+			[],
+		)?;
+		connection.execute_batch("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild');")?;
+	}
 	Ok(())
 }
 
