@@ -1,3 +1,5 @@
 .meta
 Cargo.lock
 target
+backups
+.DS_STORE
