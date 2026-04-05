@@ -363,6 +363,9 @@ pub fn ingest_file(
 	config: &config::Config,
 	force: bool,
 ) -> Result<bool> {
+	let canonical_path = file_path.canonicalize()
+		.unwrap_or_else(|_| file_path.to_path_buf());
+	let file_path = canonical_path.as_path();
 	let file_path_str = file_path.to_string_lossy();
 
 	if !force && storage::document_exists_by_path(connection, &file_path_str)? {
