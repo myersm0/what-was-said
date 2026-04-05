@@ -7,19 +7,26 @@ Personal knowledge base for clipped documents with full-text and semantic search
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                          main.rs                              │
-│                    (CLI, orchestration)                       │
+│                     (CLI, dispatch)                           │
 └──────────────────────────────────────────────────────────────┘
        │              │              │              │
        ▼              ▼              ▼              ▼
 ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
-│  ingest   │  │  storage  │  │   derive  │  │    tui    │
-│ (parsing) │  │ (sqlite)  │  │  (LLM)    │  │ (ratatui) │
-└───────────┘  └───────────┘  └───────────┘  └───────────┘
-       │              │
-       ▼              │
-┌───────────┐         │         ┌───────────┐
-│ chunking  │◄────────┘         │   util    │
-└───────────┘                   └───────────┘
+│  ingest   │  │ storage/  │  │   derive  │  │   tui/    │
+│(parse +   │  │ (sqlite)  │  │  (LLM)    │  │(ratatui)  │
+│orchestrate)│  └───────────┘  └───────────┘  └───────────┘
+└───────────┘        │
+       │             │         ┌───────────┐
+       ▼             │         │   util    │
+┌───────────┐        │         └───────────┘
+│ chunking  │◄───────┘
+└───────────┘
+       ▲
+       │
+┌───────────┐
+│  ollama   │◄──── used by ingest, derive, tui
+│(HTTP client)│
+└───────────┘
 ```
 
 ## Data Model
@@ -63,20 +70,20 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 ## Module Responsibilities
 
 ### main.rs
-CLI parsing and command dispatch. Registers the sqlite-vec extension via `sqlite3_auto_extension`. Orchestrates ingestion flow:
-1. Read file, extract `# source:` header
-2. Match doctype via config
-3. Call appropriate parser/preprocessor
-4. Handle merge logic for positional documents
-5. Store results
+CLI parsing and command dispatch. Registers the sqlite-vec extension via `sqlite3_auto_extension`. Contains `open_db()` for connection setup and `print_usage()`. Each CLI subcommand (ingest, search, embed, similar, derive, browse, stats, dump) is a short block that delegates to library functions.
 
-Key functions:
-- `ingest_file()`: Main ingestion logic
-- `find_overlap()`: Detects overlapping entries for merge
-- `open_db()`: Opens connection with sqlite-vec registered
+### ollama.rs
+HTTP client for the Ollama API. Extracted from ingest.rs to prepare for LLM backend abstraction.
+
+Key methods:
+- `generate()`: Full /api/generate with optional system prompt and format (e.g., JSON mode)
+- `chat()`: Thin wrapper around `generate` without system prompt or format
+- `embed()`: Calls /api/embeddings, returns vector
+
+Used by ingest (segmentation), derive (summary generation), and tui (semantic search).
 
 ### derive.rs
-LLM summary generation. Extracted from main.rs for clarity.
+LLM summary generation. Calls `ollama.chat()` with prompts from derive.toml.
 
 Key functions:
 - `run()`: Iterates documents needing derivation, generates detailed then brief summaries
@@ -99,7 +106,7 @@ Key types:
 - `DeriveConfig`: Model selection, prompt tiers, thresholds
 
 ### ingest.rs
-Text parsing and segmentation.
+Text parsing, segmentation, and ingestion orchestration.
 
 **Parsers**:
 - `Whole`: Entire file as single entry
@@ -113,21 +120,35 @@ Text parsing and segmentation.
 run_preprocessor(script_path, file_path) -> SegmentationResult
 ```
 
-**OllamaClient**: HTTP client for Ollama API (chat completions and embeddings).
+**Orchestration** (moved from main.rs):
+- `ingest_file()`: Main ingestion logic — reads file, detects doctype, parses, handles merge, stores results
+- `ingest_directory()`: Iterates directory, calls ingest_file per file
+- `find_overlap()`: Detects overlapping entries for positional merge
+- `segment()`: Free function that calls `OllamaClient::generate()` with segmentation prompt
 
-### storage.rs
-All SQLite operations. Uses rusqlite directly (no ORM). Integrates sqlite-vec for vector search.
+### storage/
+All SQLite operations. Uses rusqlite directly (no ORM). Integrates sqlite-vec for vector search. Split into submodules, all re-exported from `storage/mod.rs`.
 
-Key functions:
-- `initialize()`: Creates tables, FTS5, indexes
+**mod.rs**: Schema initialization (`initialize()`), re-exports, tests.
+
+**documents.rs**: Document/entry/chunk CRUD, list/get/dump, counts, merge helpers.
 - `insert_document/entry/chunks`: Write path
 - `get_document()`: Read full document with entries and chunks
-- `search()` / `search_filtered()`: FTS5 search with grouping, author/date filters pushed into SQL
+- `list_documents()`: Browse-mode listing with brief summaries and tags
+- `find_documents_by_merge_key()`: Finds candidates for positional merge
+
+**search.rs**: FTS5 search with grouping, author/date filters pushed into SQL.
+- `search()` / `search_filtered()`: FTS5 MATCH with snippet generation
+- Result grouping: chunks grouped by document via `GroupedSearchResult`, deduplicated by snippet similarity
+
+**embed.rs**: sqlite-vec integration.
 - `ensure_vec_table()`: Creates vec0 virtual table with detected embedding dimension
-- `insert_embedding()`: Writes embedding to vec_chunks via zerocopy
+- `insert_embedding()`: Writes embedding via zerocopy
 - `find_similar_chunks_filtered()`: KNN search via sqlite-vec `MATCH` with cosine distance
 
-**Search result grouping**: Both FTS5 and semantic search return `GroupedSearchResult` — chunks grouped by document, sorted by best score.
+**tags.rs**: Tag add/remove/list/get operations.
+
+**derive.rs**: Derived content CRUD, derive status, source hash computation for staleness detection.
 
 ### util.rs
 Shared string utilities.
@@ -141,20 +162,22 @@ Splits entry text into chunks for indexing.
 
 Strategy: Sliding window of ~300 words with 1/3 stride. Snaps boundaries to sentence ends. Falls back to word boundaries for very long sentences. Entries under 400 words are kept as a single chunk.
 
-### tui.rs
-Ratatui-based terminal UI.
+### tui/
+Ratatui-based terminal UI. Split into submodules with a shared `App` struct in `mod.rs`. Each mode has a key handler and draw function; the event loop dispatches based on `app.mode`.
 
-**Modes**:
-- `Browse`: Document list with sorting, filtering, tag color markers, brief summary preview
-- `Read`: View document content, navigate chunks
-- `Search`: FTS5 or semantic search with author/date filters
-- `TagEdit`: Add/remove tags on current document
-- `TagFilter`: Filter document list by tag
-- `SummaryView`: Popup for viewing/toggling brief/detailed summaries
+**mod.rs**: App struct (all state), enums (Mode, SearchMode, SearchField, SummaryType), shared methods (load_documents, filtered_documents, navigate_group, etc.), `run()`/`run_app()` event loop, `draw()` dispatcher.
 
-**Search modes** (toggled with F2):
-- `Fts5`: Keyword search via SQLite FTS5
-- `Semantic`: KNN vector similarity via sqlite-vec
+**browse.rs**: Browse mode — document list with sorting, filtering, tag color markers, brief summary preview.
+
+**read.rs**: Read mode — view document content, navigate chunks, yank to clipboard, group navigation.
+
+**search.rs**: Search mode — FTS5 or semantic search with author/date filters, F2 mode toggle, search execution, semantic result grouping.
+
+**tags.rs**: TagEdit and TagFilter modes — add/remove tags, filter document list by tag.
+
+**summary.rs**: SummaryView mode — popup for viewing/toggling brief/detailed summaries, copy, mark bad.
+
+**render.rs**: Shared rendering — markdown line/inline parsing, table alignment, snippet parsing with match highlighting, color parsing, status bar, `extract_group_key`.
 
 ### types.rs
 Shared type definitions: `DocumentId`, `EntryId`, `MediaId`, `SegmentedEntry`, `SegmentationResult`, `MergeStrategy`, `MediaItem`, `MediaType`, `MinHashSignature`.
@@ -323,6 +346,8 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 
 6. **Short-doc brief optimization**: Documents under the short threshold get their brief summary copied from the detailed output, saving an LLM round-trip on content that's already 1-2 sentences.
 
+7. **Ollama client as separate module**: `ollama.rs` provides the HTTP client used by ingest, derive, and tui. Isolated to prepare for an `LlmBackend` trait with multiple implementations (Ollama, OpenAI/Azure).
+
 ## Adding a New Parser
 
 1. Define doctype in config.toml with `parser = "whole"` and `preprocessor = "path/to/script.py"`
@@ -337,7 +362,7 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 ## Adding a New CLI Command
 
 1. Add case to `match positional.first()` in main.rs
-2. Implement logic (often calling storage functions, or in a new module)
+2. Implement logic in the appropriate module (or a new one)
 3. Update `print_usage()`
 
 ## Common Maintenance Tasks
