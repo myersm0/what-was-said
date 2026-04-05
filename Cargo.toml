@@ -16,6 +16,7 @@ arboard = "3"
 anyhow = "1"
 regex = "1"
 toml = "0.8"
+clap = { version = "4", features = ["derive"] }
 dirs = "5"
 sqlite-vec = "0.1.6"
 zerocopy = { version = "0.8", features = ["derive"] }
