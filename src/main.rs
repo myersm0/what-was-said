@@ -172,6 +172,12 @@ fn main() -> Result<()> {
 			}
 			let results = storage::search(&connection, &query, SearchSortColumn::Score)?;
 			if json_output {
+				let mut results = results;
+				for doc in &mut results {
+					for chunk in &mut doc.chunks {
+						chunk.snippet = util::strip_fts_markers(&chunk.snippet);
+					}
+				}
 				println!("{}", serde_json::to_string_pretty(&results)?);
 			} else if results.is_empty() {
 				println!("no results");

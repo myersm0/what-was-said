@@ -64,6 +64,10 @@ pub fn truncate_str(s: &str, max_len: usize) -> &str {
 	}
 }
 
+pub fn strip_fts_markers(s: &str) -> String {
+	s.replace(['\x01', '\x02', '\x03'], "")
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
