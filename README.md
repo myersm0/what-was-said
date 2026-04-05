@@ -21,9 +21,11 @@ cp target/release/cathedrals ~/.local/bin/
 
 ### Requirements
 
-- [ollama](https://ollama.com) running locally for embeddings and LLM summaries
+- [ollama](https://ollama.com) running locally for embeddings and LLM summaries (default backend)
 - Pull an embedding model: `ollama pull qwen3-embedding:8b`
 - Pull a summarization model: `ollama pull qwen2.5:32b` (or configure your preferred model in `derive.toml`)
+
+Alternatively, use an OpenAI-compatible API by setting `OPENAI_API_KEY` (and optionally `OPENAI_API_BASE`) and passing `--backend openai`.
 
 ## Quick Reference
 
@@ -38,6 +40,9 @@ cathedrals browse
 cathedrals search "keyword query"
 cathedrals similar "semantic query"
 
+# Get a specific document
+cathedrals get 42
+
 # Generate LLM summaries
 cathedrals derive              # missing only
 cathedrals derive --force      # regenerate all
@@ -45,7 +50,37 @@ cathedrals derive --status     # check progress
 
 # Compute embeddings for semantic search
 cathedrals embed
+
+# Start JSON API server
+cathedrals serve               # default port 3030
+cathedrals serve --port 8080
+
+# JSON output for scripting
+cathedrals search "query" --json
+cathedrals similar "query" --json
+cathedrals get 42 --json
+cathedrals stats --json
+cathedrals dump --json
+cathedrals derive --status --json
+
+# Use OpenAI-compatible backend
+cathedrals --backend openai --embed-model text-embedding-3-small similar "query"
 ```
+
+## API Server
+
+`cathedrals serve` starts a localhost JSON API for programmatic access. This is the agent-facing interface — holds the DB connection open and avoids per-call process spawn overhead.
+
+Endpoints:
+
+- `GET /search?q=...&sort=score|date` — FTS5 keyword search, results grouped by document
+- `GET /similar?q=...&limit=N` — semantic search via embeddings (default limit 10)
+- `GET /get/:id` — full document with entries and chunks
+- `GET /entries/:doc_id` — entries for a document
+- `GET /stats` — database statistics
+- `GET /derive/status` — derivation progress
+
+All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP status codes.
 
 ## File Format
 
@@ -143,6 +178,6 @@ See `DEVELOPMENT.md` for architecture details.
 
 ## Database
 
-SQLite at `~/.local/share/cathedrals/cathedrals.db`
+SQLite at `~/.local/share/cathedrals/cathedrals.db` with WAL mode enabled for concurrent read access.
 
 To reset: delete the db file. To re-embed: drop the vec table (`DROP TABLE vec_chunks;`) then `cathedrals embed`.
