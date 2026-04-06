@@ -540,11 +540,24 @@ pub fn ingest_file(
 
 	let candidates = storage::find_dup_candidates(connection, &clip_date_str, dup_window_days)?;
 	let mut superseded_doc: Option<(i64, String, f64)> = None;
+	let mut best_sim: Option<(i64, String, f64)> = None;
 	for candidate in &candidates {
 		let sim = minhash::jaccard(&doc_hash, &candidate.document_minhash);
 		if sim >= dup_jaccard_threshold {
 			superseded_doc = Some((candidate.id, candidate.source_title.clone(), sim));
 			break;
+		}
+		let dominated = best_sim.as_ref().map(|(_, _, s)| sim > *s).unwrap_or(true);
+		if sim >= 0.4 && dominated {
+			best_sim = Some((candidate.id, candidate.source_title.clone(), sim));
+		}
+	}
+	if superseded_doc.is_none() {
+		if let Some((id, ref title, sim)) = best_sim {
+			eprintln!(
+				"  near-match: doc {} \"{}\" (similarity: {:.2}, threshold: {:.2})",
+				id, title, sim, dup_jaccard_threshold,
+			);
 		}
 	}
 
