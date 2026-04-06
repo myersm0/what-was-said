@@ -1,6 +1,7 @@
 const target_words: usize = 300;
 const min_split_threshold: usize = 400;
 const stride_fraction: f64 = 1.0 / 3.0;
+const max_snap_chars: usize = 500;
 
 pub struct Chunk {
 	pub chunk_index: u32,
@@ -62,8 +63,8 @@ pub fn chunk_text(text: &str) -> Vec<Chunk> {
 			word_positions[chunk_end_word].0
 		};
 
-		let start_char = snap_to_sentence_boundary(&sentence_boundaries, raw_start_char, true);
-		let end_char = snap_to_sentence_boundary(&sentence_boundaries, raw_end_char, false);
+		let start_char = snap_to_sentence_boundary(&sentence_boundaries, raw_start_char, true, max_snap_chars);
+		let end_char = snap_to_sentence_boundary(&sentence_boundaries, raw_end_char, false, max_snap_chars);
 
 		let start_char = start_char.min(raw_start_char);
 		let end_char = end_char.max(raw_end_char).min(text.len());
@@ -145,16 +146,19 @@ fn find_sentence_boundaries(text: &str) -> Vec<usize> {
 	boundaries
 }
 
-fn snap_to_sentence_boundary(boundaries: &[usize], position: usize, prefer_earlier: bool) -> usize {
+fn snap_to_sentence_boundary(boundaries: &[usize], position: usize, prefer_earlier: bool, max_distance: usize) -> usize {
 	if boundaries.is_empty() {
 		return position;
 	}
 
-	let mut best = boundaries[0];
-	let mut best_distance = position.abs_diff(best);
+	let mut best = position;
+	let mut best_distance = usize::MAX;
 
 	for &boundary in boundaries {
 		let distance = position.abs_diff(boundary);
+		if distance > max_distance {
+			continue;
+		}
 		let dominated = if prefer_earlier {
 			distance < best_distance || (distance == best_distance && boundary < best)
 		} else {
