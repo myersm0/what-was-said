@@ -49,7 +49,7 @@ pub struct Theme {
 	pub column_header: Color,
 }
 
-pub fn parse_hex_color(s: &str) -> Option<Color> {
+fn parse_hex_color(s: &str) -> Option<Color> {
 	let hex = s.strip_prefix('#')?;
 	if hex.len() != 6 {
 		return None;

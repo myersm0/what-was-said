@@ -196,7 +196,7 @@ fn open_search_result(app: &mut App, connection: &Connection) -> Result<()> {
 		app.current_document = storage::get_document(connection, document_id)?;
 		app.scroll_offset = 0;
 		app.total_chunks = app.current_document.as_ref()
-			.map(|d| d.entries.iter().map(|e| super::entry_chunk_count(e)).sum())
+			.map(super::document_chunk_count)
 			.unwrap_or(0);
 
 		app.current_chunk_index = app.current_document.as_ref()

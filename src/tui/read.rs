@@ -10,10 +10,10 @@ use ratatui::{
 use rusqlite::Connection;
 
 use crate::storage;
-use crate::util::truncate_str;
+use crate::util::{extract_group_key, truncate_str};
 use super::{App, Mode, SummaryType};
 use super::render::{
-	align_markdown_tables, expand_tabs, extract_group_key, render_markdown_line,
+	align_markdown_tables, expand_tabs, render_markdown_line,
 };
 
 pub(super) fn handle_keys(app: &mut App, key_code: KeyCode, connection: &Connection) -> Result<()> {

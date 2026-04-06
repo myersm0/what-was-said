@@ -80,26 +80,6 @@ pub(super) fn expand_tabs(s: &str) -> String {
 	s.replace('\t', "    ")
 }
 
-pub(super) fn parse_color(name: &str) -> Option<Color> {
-	super::theme::parse_color(name)
-}
-
-pub(super) fn extract_group_key(source_title: &str) -> Option<String> {
-	let key = crate::util::strip_source_suffix(source_title);
-
-	if key.is_empty() || key.len() < 3 {
-		return None;
-	}
-
-	let lower = key.to_lowercase();
-	let generic = ["untitled", "new tab", "bash", "zsh", "terminal", "new document"];
-	if generic.iter().any(|pattern| lower.contains(pattern)) {
-		return None;
-	}
-
-	Some(key)
-}
-
 pub(super) fn align_markdown_tables(text: &str) -> String {
 	let lines: Vec<&str> = text.lines().collect();
 	let mut result: Vec<String> = Vec::new();

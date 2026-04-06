@@ -68,6 +68,22 @@ pub fn strip_fts_markers(s: &str) -> String {
 	s.replace(['\x01', '\x02', '\x03'], "")
 }
 
+pub fn extract_group_key(source_title: &str) -> Option<String> {
+	let key = strip_source_suffix(source_title);
+
+	if key.is_empty() || key.len() < 3 {
+		return None;
+	}
+
+	let lower = key.to_lowercase();
+	let generic = ["untitled", "new tab", "bash", "zsh", "terminal", "new document"];
+	if generic.iter().any(|pattern| lower.contains(pattern)) {
+		return None;
+	}
+
+	Some(key)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

@@ -28,8 +28,7 @@ use crate::storage::{
 	self, DocumentContent, DocumentSummary,
 	GroupedSearchResult, SearchSortColumn, SortColumn, SortDirection,
 };
-
-use render::extract_group_key;
+use crate::util::extract_group_key;
 
 pub(super) fn entry_chunk_count(entry: &storage::EntryContent) -> usize {
 	if entry.chunks.is_empty() {
@@ -37,6 +36,10 @@ pub(super) fn entry_chunk_count(entry: &storage::EntryContent) -> usize {
 	} else {
 		entry.chunks.len()
 	}
+}
+
+pub(super) fn document_chunk_count(doc: &DocumentContent) -> usize {
+	doc.entries.iter().map(|e| entry_chunk_count(e)).sum()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,14 +182,19 @@ impl App {
 		Ok(())
 	}
 
-	fn open_document_by_id(&mut self, connection: &Connection, doc_id: i64) -> Result<()> {
+	fn load_document_for_reading(&mut self, connection: &Connection, doc_id: i64) -> Result<()> {
 		self.current_document = storage::get_document(connection, doc_id)?;
 		self.current_doc_tags = storage::get_tags_for_document(connection, doc_id)?;
 		self.scroll_offset = 0;
 		self.current_chunk_index = 0;
 		self.total_chunks = self.current_document.as_ref()
-			.map(|d| d.entries.iter().map(|e| entry_chunk_count(e)).sum())
+			.map(document_chunk_count)
 			.unwrap_or(0);
+		Ok(())
+	}
+
+	fn open_document_by_id(&mut self, connection: &Connection, doc_id: i64) -> Result<()> {
+		self.load_document_for_reading(connection, doc_id)?;
 
 		if self.marked_docs.len() > 1 && self.marked_docs.contains(&doc_id) {
 			self.group_docs = self.marked_docs.clone();
@@ -225,13 +233,7 @@ impl App {
 		};
 		if let Some(&doc_id) = self.group_docs.get(new_index) {
 			self.group_index = new_index;
-			self.current_document = storage::get_document(connection, doc_id)?;
-			self.current_doc_tags = storage::get_tags_for_document(connection, doc_id)?;
-			self.scroll_offset = 0;
-			self.current_chunk_index = 0;
-			self.total_chunks = self.current_document.as_ref()
-				.map(|d| d.entries.iter().map(|e| entry_chunk_count(e)).sum())
-				.unwrap_or(0);
+			self.load_document_for_reading(connection, doc_id)?;
 		}
 		Ok(())
 	}

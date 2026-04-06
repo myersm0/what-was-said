@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use crate::storage::{self, SortColumn, SortDirection};
 use crate::util::truncate_str;
 use super::{App, Mode, SummaryType};
-use super::render::parse_color;
+use super::theme::parse_color;
 
 pub(super) fn handle_keys(app: &mut App, key_code: KeyCode, connection: &Connection) -> Result<()> {
 	match key_code {
