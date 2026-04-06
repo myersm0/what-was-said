@@ -144,7 +144,8 @@ pub(super) fn draw_edit_popup(frame: &mut Frame, app: &App) {
 			Block::default()
 				.title(Span::styled(" Edit Tags ", Style::default().fg(theme.title)))
 				.borders(Borders::ALL)
-				.border_style(Style::default().fg(theme.border_popup)),
+				.border_style(Style::default().fg(theme.border_popup))
+				.style(Style::default().bg(theme.background)),
 		);
 
 	frame.render_widget(popup, area);
@@ -197,7 +198,8 @@ pub(super) fn draw_filter_popup(frame: &mut Frame, app: &App) {
 			Block::default()
 				.title(Span::styled(" Filter by Tag ", Style::default().fg(theme.title)))
 				.borders(Borders::ALL)
-				.border_style(Style::default().fg(theme.border_popup)),
+				.border_style(Style::default().fg(theme.border_popup))
+				.style(Style::default().bg(theme.background)),
 		);
 
 	frame.render_widget(popup, area);

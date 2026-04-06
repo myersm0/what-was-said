@@ -101,7 +101,8 @@ pub(super) fn draw_popup(frame: &mut Frame, app: &App) {
 					Style::default().fg(theme.title),
 				))
 				.borders(Borders::ALL)
-				.border_style(Style::default().fg(theme.border_popup)),
+				.border_style(Style::default().fg(theme.border_popup))
+				.style(Style::default().bg(theme.background)),
 		)
 		.wrap(Wrap { trim: false });
 
