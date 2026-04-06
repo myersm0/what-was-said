@@ -42,7 +42,7 @@ pub(super) fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let help_text = match app.mode {
 		super::Mode::Browse => "[↑↓/gG] move  [m] mark  [d] summary  [Enter] open  [/] search  [f] filter  [s] sort  [q] quit",
 		super::Mode::Read => read_help,
-		super::Mode::Search => "[↑↓] move  [Tab] field  [F2] mode  [Enter] open  [Esc] back",
+		super::Mode::Search => "[↑↓] move  [Tab] field  [`] mode  [Enter] open  [Esc] back",
 		super::Mode::TagEdit => "[type] add tag  [Enter] save  [Esc] cancel",
 		super::Mode::TagFilter => "[↑↓/gG] select  [Enter] apply  [c] clear  [Esc] cancel",
 		super::Mode::SummaryView => "[↑↓] scroll  [d] toggle  [y] copy  [x] mark bad  [Esc] close",

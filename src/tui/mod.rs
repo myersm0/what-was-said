@@ -31,6 +31,14 @@ use crate::storage::{
 
 use render::extract_group_key;
 
+pub(super) fn entry_chunk_count(entry: &storage::EntryContent) -> usize {
+	if entry.chunks.is_empty() {
+		if entry.body.trim().is_empty() { 0 } else { 1 }
+	} else {
+		entry.chunks.len()
+	}
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
 	Browse,
@@ -123,7 +131,7 @@ impl App {
 			search_sort_column: SearchSortColumn::Score,
 			search_chunk_index: 0,
 			total_search_chunks: 0,
-			search_mode: SearchMode::Fts5,
+			search_mode: SearchMode::Semantic,
 			search_field: SearchField::Query,
 			author_filter: String::new(),
 			date_from: String::new(),
@@ -177,7 +185,7 @@ impl App {
 		self.scroll_offset = 0;
 		self.current_chunk_index = 0;
 		self.total_chunks = self.current_document.as_ref()
-			.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+			.map(|d| d.entries.iter().map(|e| entry_chunk_count(e)).sum())
 			.unwrap_or(0);
 
 		if self.marked_docs.len() > 1 && self.marked_docs.contains(&doc_id) {
@@ -222,7 +230,7 @@ impl App {
 			self.scroll_offset = 0;
 			self.current_chunk_index = 0;
 			self.total_chunks = self.current_document.as_ref()
-				.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+				.map(|d| d.entries.iter().map(|e| entry_chunk_count(e)).sum())
 				.unwrap_or(0);
 		}
 		Ok(())

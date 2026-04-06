@@ -240,5 +240,11 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 		)
 		.highlight_symbol("> ");
 
-	frame.render_stateful_widget(list, chunks[1], &mut app.browse_state.clone());
+	let mut state = app.browse_state.clone();
+	if let Some(selected) = state.selected() {
+		let view_height = chunks[1].height.saturating_sub(2) as usize;
+		let offset = selected.saturating_sub(view_height / 2);
+		*state.offset_mut() = offset;
+	}
+	frame.render_stateful_widget(list, chunks[1], &mut state);
 }

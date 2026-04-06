@@ -181,6 +181,9 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 		}
 
 		if entry.chunks.is_empty() {
+			if entry.body.trim().is_empty() {
+				continue;
+			}
 			let is_current = chunk_counter == app.current_chunk_index;
 			let aligned_body = align_markdown_tables(&entry.body);
 			for body_line in aligned_body.lines() {

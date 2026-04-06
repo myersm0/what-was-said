@@ -21,7 +21,7 @@ pub(super) fn handle_keys(
 	search_config: &SearchConfig,
 ) -> Result<()> {
 	match key_code {
-		KeyCode::F(2) => {
+		KeyCode::Char('`') => {
 			app.search_mode = match app.search_mode {
 				SearchMode::Fts5 => SearchMode::Semantic,
 				SearchMode::Semantic => SearchMode::Fts5,
@@ -196,7 +196,7 @@ fn open_search_result(app: &mut App, connection: &Connection) -> Result<()> {
 		app.current_document = storage::get_document(connection, document_id)?;
 		app.scroll_offset = 0;
 		app.total_chunks = app.current_document.as_ref()
-			.map(|d| d.entries.iter().map(|e| e.chunks.len().max(1)).sum())
+			.map(|d| d.entries.iter().map(|e| super::entry_chunk_count(e)).sum())
 			.unwrap_or(0);
 
 		app.current_chunk_index = app.current_document.as_ref()
@@ -204,7 +204,7 @@ fn open_search_result(app: &mut App, connection: &Connection) -> Result<()> {
 				let mut flat_index = 0usize;
 				for entry in &doc.entries {
 					if entry.position < entry_position {
-						flat_index += entry.chunks.len().max(1);
+						flat_index += super::entry_chunk_count(entry);
 					} else if entry.position == entry_position {
 						flat_index += chunk_index as usize;
 						break;
@@ -270,7 +270,7 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 
 	let query_block = Block::default()
 		.title(Span::styled(
-			format!(" Search [{}] ({}) [F2: toggle mode] ", mode_str, app.total_search_chunks),
+			format!(" Search [{}] ({}) [`: toggle mode] ", mode_str, app.total_search_chunks),
 			Style::default().fg(theme.title),
 		))
 		.borders(Borders::ALL)
