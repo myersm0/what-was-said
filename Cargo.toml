@@ -20,5 +20,5 @@ regex = "1"
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
-sqlite-vec = "=0.1.6"
+sqlite-vec = "0.1.9"
 zerocopy = { version = "0.8", features = ["derive"] }
