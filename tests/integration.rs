@@ -31,6 +31,7 @@ fn ingest_text(
 		MergeStrategy::None,
 		Some("/test/file.txt"),
 		"2024-06-15 10:00:00",
+		None,
 	).unwrap();
 
 	for (position, entry) in entries.iter().enumerate() {
@@ -125,7 +126,7 @@ fn copilot_email_ingest_preserves_authors() {
 
 	let doc_id = storage::insert_document(
 		&db, None, "Project Thread", Some("copilot_email"),
-		MergeStrategy::Positional, None, "2024-03-01 00:00:00",
+		MergeStrategy::Positional, None, "2024-03-01 00:00:00", None,
 	).unwrap();
 
 	for (i, entry) in entries.iter().enumerate() {
