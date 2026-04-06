@@ -1,0 +1,22 @@
+# Gruvbox Dark
+# https://github.com/morhetz/gruvbox
+
+background = "#282828"
+border = "#504945"
+border_focused = "#83A598"
+border_popup = "#83A598"
+title = "#EBDBB2"
+status_bar_bg = "#3C3836"
+status_bar_fg = "#A89984"
+text = "#EBDBB2"
+text_muted = "#928374"
+text_accent = "#FABD2F"
+highlight_bg = "#3C3836"
+highlight_fg = "#FBF1C7"
+heading = "#8EC07C"
+code = "#D3869B"
+search_match = "#FE8019"
+mark = "#FABD2F"
+status_message = "#B8BB26"
+key_binding = "#83A598"
+column_header = "#D5C4A1"

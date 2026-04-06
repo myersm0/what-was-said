@@ -407,7 +407,7 @@ fn main() -> Result<()> {
 				embed_model: embed_model.clone(),
 				backend: backend.as_ref(),
 			};
-			tui::run(&connection, filter, search_config)?;
+			tui::run(&connection, filter, search_config, None)?;
 		}
 		None => {
 			let backend = create_backend(&backend_name, &ollama_url)?;
@@ -420,7 +420,7 @@ fn main() -> Result<()> {
 				embed_model: embed_model.clone(),
 				backend: backend.as_ref(),
 			};
-			tui::run(&connection, filter, search_config)?;
+			tui::run(&connection, filter, search_config, None)?;
 		}
 	}
 

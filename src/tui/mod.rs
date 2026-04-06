@@ -4,6 +4,7 @@ mod render;
 mod search;
 mod summary;
 mod tags;
+pub mod theme;
 
 use anyhow::Result;
 use crossterm::{
@@ -14,7 +15,8 @@ use crossterm::{
 use ratatui::{
 	backend::CrosstermBackend,
 	layout::{Constraint, Direction, Layout},
-	widgets::Clear,
+	style::Style,
+	widgets::{Block, Clear},
 	widgets::ListState,
 	Frame, Terminal,
 };
@@ -98,10 +100,11 @@ pub(super) struct App {
 	pub(super) summary_doc_id: Option<i64>,
 	pub(super) summary_scroll: usize,
 	pub(super) summary_return_mode: Mode,
+	pub(super) theme: theme::Theme,
 }
 
 impl App {
-	fn new() -> Self {
+	fn new(theme: theme::Theme) -> Self {
 		let mut browse_state = ListState::default();
 		browse_state.select(Some(0));
 		App {
@@ -143,6 +146,7 @@ impl App {
 			summary_doc_id: None,
 			summary_scroll: 0,
 			summary_return_mode: Mode::Browse,
+			theme,
 		}
 	}
 
@@ -306,7 +310,12 @@ impl Default for SearchConfig<'_> {
 	}
 }
 
-pub fn run(connection: &Connection, filter: GlobalFilter, search_config: SearchConfig) -> Result<()> {
+pub fn run(
+	connection: &Connection,
+	filter: GlobalFilter,
+	search_config: SearchConfig,
+	theme_name: Option<&str>,
+) -> Result<()> {
 	enable_raw_mode()?;
 	let mut stdout = io::stdout();
 	execute!(stdout, EnterAlternateScreen)?;
@@ -314,7 +323,7 @@ pub fn run(connection: &Connection, filter: GlobalFilter, search_config: SearchC
 	let mut terminal = Terminal::new(backend)?;
 	terminal.clear()?;
 
-	let mut app = App::new();
+	let mut app = App::new(theme::load_theme(theme_name));
 	app.tag_config = crate::config::load_tag_config(None);
 
 	app.global_include = filter.include;
@@ -372,6 +381,10 @@ fn run_app(
 
 fn draw(frame: &mut Frame, app: &App) {
 	frame.render_widget(Clear, frame.area());
+	frame.render_widget(
+		Block::default().style(Style::default().bg(app.theme.background).fg(app.theme.text)),
+		frame.area(),
+	);
 
 	let chunks = Layout::default()
 		.direction(Direction::Vertical)

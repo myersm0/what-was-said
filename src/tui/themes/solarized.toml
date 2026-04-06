@@ -1,0 +1,22 @@
+# Solarized Dark
+# https://ethanschoonover.com/solarized/
+
+background = "#002B36"
+border = "#073642"
+border_focused = "#268BD2"
+border_popup = "#2AA198"
+title = "#93A1A1"
+status_bar_bg = "#073642"
+status_bar_fg = "#839496"
+text = "#839496"
+text_muted = "#657B83"
+text_accent = "#B58900"
+highlight_bg = "#073642"
+highlight_fg = "#FDF6E3"
+heading = "#2AA198"
+code = "#D33682"
+search_match = "#CB4B16"
+mark = "#B58900"
+status_message = "#859900"
+key_binding = "#268BD2"
+column_header = "#93A1A1"

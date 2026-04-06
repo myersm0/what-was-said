@@ -1,0 +1,22 @@
+# Nord
+# https://www.nordtheme.com/
+
+background = "#2E3440"
+border = "#4C566A"
+border_focused = "#88C0D0"
+border_popup = "#88C0D0"
+title = "#ECEFF4"
+status_bar_bg = "#3B4252"
+status_bar_fg = "#D8DEE9"
+text = "#E5E9F0"
+text_muted = "#4C566A"
+text_accent = "#EBCB8B"
+highlight_bg = "#3B4252"
+highlight_fg = "#ECEFF4"
+heading = "#88C0D0"
+code = "#B48EAD"
+search_match = "#D08770"
+mark = "#EBCB8B"
+status_message = "#A3BE8C"
+key_binding = "#81A1C1"
+column_header = "#D8DEE9"

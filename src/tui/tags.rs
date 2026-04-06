@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::KeyCode;
 use ratatui::{
 	layout::Rect,
-	style::{Color, Modifier, Style},
+	style::{Modifier, Style},
 	text::{Line, Span, Text},
 	widgets::{Block, Borders, Clear, Paragraph},
 	Frame,
@@ -111,39 +111,47 @@ fn apply_tag_filter(app: &mut App) {
 }
 
 pub(super) fn draw_edit_popup(frame: &mut Frame, app: &App) {
+	let theme = &app.theme;
 	let area = centered_rect(50, 12, frame.area());
 	frame.render_widget(Clear, area);
 
 	let mut lines: Vec<Line> = vec![
-		Line::from("Current tags:"),
+		Line::from(Span::styled("Current tags:", Style::default().fg(theme.text))),
 		Line::from(""),
 	];
 
 	if app.current_doc_tags.is_empty() {
-		lines.push(Line::from(Span::styled("  (none)", Style::default().fg(Color::DarkGray))));
+		lines.push(Line::from(Span::styled("  (none)", Style::default().fg(theme.text_muted))));
 	} else {
 		for (i, tag) in app.current_doc_tags.iter().enumerate() {
-			lines.push(Line::from(format!("  {}. {}", i + 1, tag)));
+			lines.push(Line::from(Span::styled(
+				format!("  {}. {}", i + 1, tag),
+				Style::default().fg(theme.text),
+			)));
 		}
 	}
 
 	lines.push(Line::from(""));
-	lines.push(Line::from("Type tag name + Enter to add"));
-	lines.push(Line::from("Type number + Enter to remove"));
-	lines.push(Line::from(format!("> {}_", app.tag_input)));
+	lines.push(Line::from(Span::styled("Type tag name + Enter to add", Style::default().fg(theme.text_muted))));
+	lines.push(Line::from(Span::styled("Type number + Enter to remove", Style::default().fg(theme.text_muted))));
+	lines.push(Line::from(Span::styled(
+		format!("> {}_", app.tag_input),
+		Style::default().fg(theme.text_accent),
+	)));
 
 	let popup = Paragraph::new(Text::from(lines))
 		.block(
 			Block::default()
-				.title(" Edit Tags ")
+				.title(Span::styled(" Edit Tags ", Style::default().fg(theme.title)))
 				.borders(Borders::ALL)
-				.border_style(Style::default().fg(Color::Cyan)),
+				.border_style(Style::default().fg(theme.border_popup)),
 		);
 
 	frame.render_widget(popup, area);
 }
 
 pub(super) fn draw_filter_popup(frame: &mut Frame, app: &App) {
+	let theme = &app.theme;
 	let max_height = (frame.area().height * 70 / 100).max(10);
 	let height = (app.all_tags.len() as u16 + 4).min(max_height);
 	let area = centered_rect(50, height, frame.area());
@@ -164,19 +172,18 @@ pub(super) fn draw_filter_popup(frame: &mut Frame, app: &App) {
 	};
 
 	let mut lines: Vec<Line> = vec![
-		Line::from(format!(
-			"Select tag ({}/{}):",
-			app.tag_filter_index + 1,
-			app.all_tags.len()
+		Line::from(Span::styled(
+			format!("Select tag ({}/{}):", app.tag_filter_index + 1, app.all_tags.len()),
+			Style::default().fg(theme.text),
 		)),
 		Line::from(""),
 	];
 
 	for (i, (tag, count)) in app.all_tags.iter().enumerate().skip(scroll_offset).take(inner_height) {
 		let style = if i == app.tag_filter_index {
-			Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+			Style::default().bg(theme.highlight_bg).fg(theme.highlight_fg).add_modifier(Modifier::BOLD)
 		} else {
-			Style::default()
+			Style::default().fg(theme.text)
 		};
 		let marker = if i == app.tag_filter_index { "> " } else { "  " };
 		lines.push(Line::from(Span::styled(
@@ -188,9 +195,9 @@ pub(super) fn draw_filter_popup(frame: &mut Frame, app: &App) {
 	let popup = Paragraph::new(Text::from(lines))
 		.block(
 			Block::default()
-				.title(" Filter by Tag ")
+				.title(Span::styled(" Filter by Tag ", Style::default().fg(theme.title)))
 				.borders(Borders::ALL)
-				.border_style(Style::default().fg(Color::Cyan)),
+				.border_style(Style::default().fg(theme.border_popup)),
 		);
 
 	frame.render_widget(popup, area);

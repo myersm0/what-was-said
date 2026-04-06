@@ -1,0 +1,22 @@
+# Light
+# For light terminal backgrounds
+
+background = "#FAFAFA"
+border = "#BCBCBC"
+border_focused = "#0087AF"
+border_popup = "#005FAF"
+title = "#303030"
+status_bar_bg = "#D0D0D0"
+status_bar_fg = "#4A4A4A"
+text = "#303030"
+text_muted = "#949494"
+text_accent = "#AF8700"
+highlight_bg = "#D7D7AF"
+highlight_fg = "#000000"
+heading = "#005FAF"
+code = "#AF00AF"
+search_match = "#D70000"
+mark = "#AF8700"
+status_message = "#008700"
+key_binding = "#0087AF"
+column_header = "#4A4A4A"

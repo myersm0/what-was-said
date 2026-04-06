@@ -7,6 +7,30 @@ use ratatui::{
 };
 
 use super::App;
+use super::theme::Theme;
+
+fn styled_help<'a>(text: &str, theme: &Theme) -> Vec<Span<'a>> {
+	let mut spans = Vec::new();
+	let mut rest = text;
+	while let Some(open) = rest.find('[') {
+		if open > 0 {
+			spans.push(Span::styled(rest[..open].to_string(), Style::default().fg(theme.status_bar_fg)));
+		}
+		if let Some(close) = rest[open..].find(']') {
+			spans.push(Span::styled(
+				rest[open..open + close + 1].to_string(),
+				Style::default().fg(theme.key_binding),
+			));
+			rest = &rest[open + close + 1..];
+		} else {
+			break;
+		}
+	}
+	if !rest.is_empty() {
+		spans.push(Span::styled(rest.to_string(), Style::default().fg(theme.status_bar_fg)));
+	}
+	spans
+}
 
 pub(super) fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	let read_help = if app.group_docs.len() > 1 {
@@ -25,17 +49,18 @@ pub(super) fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
 	};
 
 	let status = if let Some(ref msg) = app.status_message {
-		Line::from(vec![
-			Span::styled(msg, Style::default().fg(Color::Green)),
-			Span::raw("  │  "),
-			Span::raw(help_text),
-		])
+		let mut spans = vec![
+			Span::styled(msg, Style::default().fg(app.theme.status_message)),
+			Span::styled("  │  ", Style::default().fg(app.theme.status_bar_fg)),
+		];
+		spans.extend(styled_help(help_text, &app.theme));
+		Line::from(spans)
 	} else {
-		Line::from(help_text)
+		Line::from(styled_help(help_text, &app.theme))
 	};
 
 	let paragraph = Paragraph::new(status)
-		.style(Style::default().bg(Color::DarkGray));
+		.style(Style::default().bg(app.theme.status_bar_bg));
 	frame.render_widget(paragraph, area);
 }
 
@@ -56,23 +81,7 @@ pub(super) fn expand_tabs(s: &str) -> String {
 }
 
 pub(super) fn parse_color(name: &str) -> Option<Color> {
-	match name.to_lowercase().as_str() {
-		"red" => Some(Color::Red),
-		"green" => Some(Color::Green),
-		"blue" => Some(Color::Blue),
-		"cyan" => Some(Color::Cyan),
-		"magenta" => Some(Color::Magenta),
-		"yellow" => Some(Color::Yellow),
-		"white" => Some(Color::White),
-		"gray" | "grey" => Some(Color::Gray),
-		"light_red" => Some(Color::LightRed),
-		"light_green" => Some(Color::LightGreen),
-		"light_blue" => Some(Color::LightBlue),
-		"light_cyan" => Some(Color::LightCyan),
-		"light_magenta" => Some(Color::LightMagenta),
-		"light_yellow" => Some(Color::LightYellow),
-		_ => None,
-	}
+	super::theme::parse_color(name)
 }
 
 pub(super) fn extract_group_key(source_title: &str) -> Option<String> {
@@ -197,29 +206,29 @@ fn parse_table_row(row: &str) -> Vec<String> {
 	inner.split('|').map(|s| s.to_string()).collect()
 }
 
-pub(super) fn render_markdown_line(line: &str, in_code_block: bool) -> (Line<'static>, bool) {
+pub(super) fn render_markdown_line(line: &str, in_code_block: bool, code_color: Color) -> (Line<'static>, bool) {
 	let expanded = expand_tabs(line);
 
 	if expanded.trim().starts_with("```") {
-		let style = Style::default().fg(Color::DarkGray);
+		let style = Style::default().fg(code_color);
 		return (Line::from(Span::styled(expanded, style)), !in_code_block);
 	}
 
 	if in_code_block {
-		let style = Style::default().fg(Color::DarkGray);
+		let style = Style::default().fg(code_color);
 		return (Line::from(Span::styled(expanded, style)), true);
 	}
 
 	if expanded.trim().starts_with("    ") || expanded.trim().starts_with("\t") {
-		let style = Style::default().fg(Color::DarkGray);
+		let style = Style::default().fg(code_color);
 		return (Line::from(Span::styled(expanded, style)), false);
 	}
 
-	let spans = parse_inline_markdown(&expanded);
+	let spans = parse_inline_markdown(&expanded, code_color);
 	(Line::from(spans), false)
 }
 
-fn parse_inline_markdown(text: &str) -> Vec<Span<'static>> {
+fn parse_inline_markdown(text: &str, code_color: Color) -> Vec<Span<'static>> {
 	let mut spans: Vec<Span<'static>> = Vec::new();
 	let mut current = String::new();
 	let chars: Vec<char> = text.chars().collect();
@@ -273,7 +282,7 @@ fn parse_inline_markdown(text: &str) -> Vec<Span<'static>> {
 				i += 1;
 			}
 			if !code_text.is_empty() {
-				spans.push(Span::styled(code_text, Style::default().fg(Color::DarkGray)));
+				spans.push(Span::styled(code_text, Style::default().fg(code_color)));
 			}
 		} else if chars[i] == '*' && (i == 0 || chars[i - 1] == ' ') {
 			if !current.is_empty() {

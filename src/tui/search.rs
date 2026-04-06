@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::KeyCode;
 use ratatui::{
 	layout::{Constraint, Direction, Layout, Rect},
-	style::{Color, Modifier, Style},
+	style::{Modifier, Style},
 	text::{Line, Span, Text},
 	widgets::{Block, Borders, Paragraph},
 	Frame,
@@ -234,6 +234,7 @@ fn get_selected_chunk(app: &App) -> Option<(i64, u32, u32)> {
 }
 
 pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
+	let theme = &app.theme;
 	let layout = Layout::default()
 		.direction(Direction::Vertical)
 		.constraints([Constraint::Length(5), Constraint::Min(1)])
@@ -259,41 +260,35 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 		])
 		.split(input_layout[1]);
 
-	let query_style = if app.search_field == SearchField::Query {
-		Style::default().fg(Color::Yellow)
-	} else {
-		Style::default()
+	let field_style = |field: SearchField| {
+		if app.search_field == field {
+			Style::default().fg(theme.text_accent)
+		} else {
+			Style::default().fg(theme.text_muted)
+		}
 	};
+
 	let query_block = Block::default()
-		.title(format!(" Search [{}] ({}) [F2: toggle mode] ", mode_str, app.total_search_chunks))
+		.title(Span::styled(
+			format!(" Search [{}] ({}) [F2: toggle mode] ", mode_str, app.total_search_chunks),
+			Style::default().fg(theme.title),
+		))
 		.borders(Borders::ALL)
-		.border_style(query_style);
-	let query_input = Paragraph::new(app.search_query.as_str()).block(query_block);
+		.border_style(field_style(SearchField::Query));
+	let query_input = Paragraph::new(Span::styled(
+		app.search_query.as_str(),
+		Style::default().fg(theme.text),
+	)).block(query_block);
 	frame.render_widget(query_input, input_layout[0]);
 
-	let author_style = if app.search_field == SearchField::Author {
-		Style::default().fg(Color::Yellow)
-	} else {
-		Style::default().fg(Color::DarkGray)
-	};
 	let author_text = format!(" Author: {} ", app.author_filter);
-	frame.render_widget(Paragraph::new(author_text).style(author_style), filter_layout[0]);
+	frame.render_widget(Paragraph::new(author_text).style(field_style(SearchField::Author)), filter_layout[0]);
 
-	let date_from_style = if app.search_field == SearchField::DateFrom {
-		Style::default().fg(Color::Yellow)
-	} else {
-		Style::default().fg(Color::DarkGray)
-	};
 	let date_from_text = format!(" From: {} ", app.date_from);
-	frame.render_widget(Paragraph::new(date_from_text).style(date_from_style), filter_layout[1]);
+	frame.render_widget(Paragraph::new(date_from_text).style(field_style(SearchField::DateFrom)), filter_layout[1]);
 
-	let date_to_style = if app.search_field == SearchField::DateTo {
-		Style::default().fg(Color::Yellow)
-	} else {
-		Style::default().fg(Color::DarkGray)
-	};
 	let date_to_text = format!(" To: {} ", app.date_to);
-	frame.render_widget(Paragraph::new(date_to_text).style(date_to_style), filter_layout[2]);
+	frame.render_widget(Paragraph::new(date_to_text).style(field_style(SearchField::DateTo)), filter_layout[2]);
 
 	let mut lines: Vec<Line> = Vec::new();
 	let mut chunk_counter = 0usize;
@@ -304,21 +299,24 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 		lines.push(Line::from(vec![
 			Span::styled(
 				format!("▸ {} ", truncate_str(&result.source_title, 50)),
-				Style::default().add_modifier(Modifier::BOLD),
+				Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
 			),
-			Span::raw(format!("  score: {}  date: {}  ", score_str, date_str)),
+			Span::styled(
+				format!("  score: {}  date: {}  ", score_str, date_str),
+				Style::default().fg(theme.text_muted),
+			),
 			Span::styled(
 				format!("[{} chunks]", result.chunks.len()),
-				Style::default().fg(Color::DarkGray),
+				Style::default().fg(theme.text_muted),
 			),
 		]));
 
 		for chunk in &result.chunks {
 			let is_current = chunk_counter == app.search_chunk_index;
 			let base_style = if is_current {
-				Style::default().bg(Color::DarkGray)
+				Style::default().bg(theme.highlight_bg).fg(theme.highlight_fg)
 			} else {
-				Style::default()
+				Style::default().fg(theme.text)
 			};
 			let prefix = if is_current { "> " } else { "  " };
 
@@ -361,7 +359,9 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 		.collect();
 
 	let paragraph = Paragraph::new(Text::from(visible_lines))
-		.block(Block::default().borders(Borders::ALL));
+		.block(Block::default()
+			.borders(Borders::ALL)
+			.border_style(Style::default().fg(theme.border)));
 
 	frame.render_widget(paragraph, layout[1]);
 }

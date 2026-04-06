@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::KeyCode;
 use ratatui::{
 	layout::Rect,
-	style::{Color, Modifier, Style},
+	style::{Modifier, Style},
 	text::{Line, Span, Text},
 	widgets::{Block, Borders, Paragraph, Wrap},
 	Frame,
@@ -153,6 +153,7 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 		return;
 	};
 
+	let theme = &app.theme;
 	let mut all_lines: Vec<(Line, bool)> = Vec::new();
 	let mut chunk_counter = 0usize;
 	let mut in_code_block = false;
@@ -163,21 +164,27 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 			let prefix = "#".repeat(level as usize);
 			let heading_line = Line::from(Span::styled(
 				expand_tabs(&format!("{} {}", prefix, heading)),
-				Style::default().add_modifier(Modifier::BOLD),
+				Style::default().fg(theme.heading).add_modifier(Modifier::BOLD),
 			));
 			all_lines.push((heading_line, false));
 			all_lines.push((Line::from(""), false));
 		}
 
 		if let Some(ref author) = entry.author {
-			all_lines.push((Line::from(format!("[{}]", author)), false));
+			all_lines.push((
+				Line::from(Span::styled(
+					format!("[{}]", author),
+					Style::default().fg(theme.text_accent),
+				)),
+				false,
+			));
 		}
 
 		if entry.chunks.is_empty() {
 			let is_current = chunk_counter == app.current_chunk_index;
 			let aligned_body = align_markdown_tables(&entry.body);
 			for body_line in aligned_body.lines() {
-				let (line, new_in_code_block) = render_markdown_line(body_line, in_code_block);
+				let (line, new_in_code_block) = render_markdown_line(body_line, in_code_block, theme.code);
 				in_code_block = new_in_code_block;
 				all_lines.push((line, is_current));
 			}
@@ -187,7 +194,7 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 				let is_current = chunk_counter == app.current_chunk_index;
 				let aligned_body = align_markdown_tables(&chunk.body);
 				for body_line in aligned_body.lines() {
-					let (line, new_in_code_block) = render_markdown_line(body_line, in_code_block);
+					let (line, new_in_code_block) = render_markdown_line(body_line, in_code_block, theme.code);
 					in_code_block = new_in_code_block;
 					all_lines.push((line, is_current));
 				}
@@ -215,7 +222,7 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 				let spans: Vec<Span> = line.spans.into_iter().map(|span| {
 					Span::styled(
 						span.content.to_string(),
-						span.style.bg(Color::DarkGray),
+						span.style.bg(theme.highlight_bg),
 					)
 				}).collect();
 				Line::from(spans)
@@ -249,16 +256,20 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 	let paragraph = Paragraph::new(Text::from(visible_lines))
 		.block(
 			Block::default()
-				.title(format!(
-					" {} | {} | chunk {}/{}{}{}",
-					truncate_str(&display_title, 35),
-					date_str,
-					app.current_chunk_index + 1,
-					app.total_chunks.max(1),
-					tags_info,
-					group_info,
+				.title(Span::styled(
+					format!(
+						" {} | {} | chunk {}/{}{}{}",
+						truncate_str(&display_title, 35),
+						date_str,
+						app.current_chunk_index + 1,
+						app.total_chunks.max(1),
+						tags_info,
+						group_info,
+					),
+					Style::default().fg(theme.title),
 				))
-				.borders(Borders::ALL),
+				.borders(Borders::ALL)
+				.border_style(Style::default().fg(theme.border_focused)),
 		)
 		.wrap(Wrap { trim: false });
 

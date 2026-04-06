@@ -1,0 +1,22 @@
+# Dracula
+# https://draculatheme.com/
+
+background = "#282A36"
+border = "#44475A"
+border_focused = "#BD93F9"
+border_popup = "#BD93F9"
+title = "#F8F8F2"
+status_bar_bg = "#44475A"
+status_bar_fg = "#F8F8F2"
+text = "#F8F8F2"
+text_muted = "#6272A4"
+text_accent = "#FF79C6"
+highlight_bg = "#44475A"
+highlight_fg = "#F8F8F2"
+heading = "#8BE9FD"
+code = "#BD93F9"
+search_match = "#FFB86C"
+mark = "#F1FA8C"
+status_message = "#50FA7B"
+key_binding = "#8BE9FD"
+column_header = "#F8F8F2"

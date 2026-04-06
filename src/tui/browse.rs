@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::KeyCode;
 use ratatui::{
 	layout::{Constraint, Direction, Layout, Rect},
-	style::{Color, Modifier, Style},
+	style::{Modifier, Style},
 	text::{Line, Span},
 	widgets::{Block, Borders, List, ListItem, Paragraph},
 	Frame,
@@ -108,6 +108,7 @@ pub(super) fn handle_keys(app: &mut App, key_code: KeyCode, connection: &Connect
 }
 
 pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
+	let theme = &app.theme;
 	let chunks = Layout::default()
 		.direction(Direction::Vertical)
 		.constraints([Constraint::Length(2), Constraint::Min(1)])
@@ -124,6 +125,8 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 		}
 	};
 
+	let header_style = Style::default().fg(theme.column_header).add_modifier(Modifier::BOLD);
+
 	const max_dots: usize = 4;
 
 	let header = Line::from(vec![
@@ -131,23 +134,20 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 		Span::raw(format!("{:<width$}", "", width = max_dots)),
 		Span::styled(
 			format!("{:<43}", format!("Source{}", sort_indicator(SortColumn::Source))),
-			Style::default().add_modifier(Modifier::BOLD),
+			header_style,
 		),
-		Span::raw("│ "),
+		Span::styled("│ ", Style::default().fg(theme.border)),
 		Span::styled(
 			format!("{:<10}", format!("Type{}", sort_indicator(SortColumn::Doctype))),
-			Style::default().add_modifier(Modifier::BOLD),
+			header_style,
 		),
-		Span::raw("│ "),
+		Span::styled("│ ", Style::default().fg(theme.border)),
 		Span::styled(
 			format!("{:<12}", format!("Date{}", sort_indicator(SortColumn::Date))),
-			Style::default().add_modifier(Modifier::BOLD),
+			header_style,
 		),
-		Span::raw("│ "),
-		Span::styled(
-			"Preview",
-			Style::default().add_modifier(Modifier::BOLD),
-		),
+		Span::styled("│ ", Style::default().fg(theme.border)),
+		Span::styled("Preview", header_style),
 	]);
 
 	let filtered = app.filtered_documents();
@@ -169,8 +169,9 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 
 	let header_para = Paragraph::new(header)
 		.block(Block::default()
-			.title(title)
-			.borders(Borders::TOP | Borders::LEFT | Borders::RIGHT));
+			.title(Span::styled(title, Style::default().fg(theme.title)))
+			.borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+			.border_style(Style::default().fg(theme.border)));
 	frame.render_widget(header_para, chunks[0]);
 
 	let items: Vec<ListItem> = filtered
@@ -181,9 +182,9 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 			let date = &doc.clip_date[..10.min(doc.clip_date.len())];
 
 			let mark_style = if app.marked_docs.contains(&doc.id) {
-				Style::default().fg(Color::Yellow)
+				Style::default().fg(theme.mark)
 			} else {
-				Style::default()
+				Style::default().fg(theme.text)
 			};
 
 			let mut tag_dots: Vec<Span> = Vec::new();
@@ -212,15 +213,15 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 			if padding > 0 {
 				spans.push(Span::raw(format!("{:<width$}", "", width = padding)));
 			}
-			spans.push(Span::raw(format!("{:<43}", source)));
-			spans.push(Span::raw("│ "));
-			spans.push(Span::raw(format!("{:<10}", truncate_str(doctype, 8))));
-			spans.push(Span::raw("│ "));
-			spans.push(Span::raw(format!("{:<12}", date)));
-			spans.push(Span::raw("│ "));
+			spans.push(Span::styled(format!("{:<43}", source), Style::default().fg(theme.text)));
+			spans.push(Span::styled("│ ", Style::default().fg(theme.border)));
+			spans.push(Span::styled(format!("{:<10}", truncate_str(doctype, 8)), Style::default().fg(theme.text_muted)));
+			spans.push(Span::styled("│ ", Style::default().fg(theme.border)));
+			spans.push(Span::styled(format!("{:<12}", date), Style::default().fg(theme.text_muted)));
+			spans.push(Span::styled("│ ", Style::default().fg(theme.border)));
 			spans.push(Span::styled(
 				truncate_str(preview, 60).to_string(),
-				Style::default().fg(Color::DarkGray),
+				Style::default().fg(theme.text_muted),
 			));
 
 			ListItem::new(Line::from(spans))
@@ -228,10 +229,13 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 		.collect();
 
 	let list = List::new(items)
-		.block(Block::default().borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT))
+		.block(Block::default()
+			.borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+			.border_style(Style::default().fg(theme.border)))
 		.highlight_style(
 			Style::default()
-				.bg(Color::DarkGray)
+				.bg(theme.highlight_bg)
+				.fg(theme.highlight_fg)
 				.add_modifier(Modifier::BOLD),
 		)
 		.highlight_symbol("> ");

@@ -2,8 +2,8 @@ use anyhow::Result;
 use crossterm::event::KeyCode;
 use ratatui::{
 	layout::Rect,
-	style::{Color, Style},
-	text::{Line, Text},
+	style::Style,
+	text::{Line, Span, Text},
 	widgets::{Block, Borders, Clear, Paragraph, Wrap},
 	Frame,
 };
@@ -69,6 +69,7 @@ pub(super) fn handle_keys(app: &mut App, key_code: KeyCode, connection: &Connect
 }
 
 pub(super) fn draw_popup(frame: &mut Frame, app: &App) {
+	let theme = &app.theme;
 	let height = (frame.area().height * 70 / 100).max(10);
 	let width = (frame.area().width * 80 / 100).max(40);
 	let area = Rect::new(
@@ -89,15 +90,18 @@ pub(super) fn draw_popup(frame: &mut Frame, app: &App) {
 		.lines()
 		.skip(app.summary_scroll)
 		.take(height.saturating_sub(2) as usize)
-		.map(|line| Line::from(line))
+		.map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(theme.text))))
 		.collect();
 
 	let popup = Paragraph::new(Text::from(lines))
 		.block(
 			Block::default()
-				.title(format!(" {} Summary [d: toggle] [y: copy] [x: mark bad] ", type_str))
+				.title(Span::styled(
+					format!(" {} Summary [d: toggle] [y: copy] [x: mark bad] ", type_str),
+					Style::default().fg(theme.title),
+				))
 				.borders(Borders::ALL)
-				.border_style(Style::default().fg(Color::Cyan)),
+				.border_style(Style::default().fg(theme.border_popup)),
 		)
 		.wrap(Wrap { trim: false });
 
