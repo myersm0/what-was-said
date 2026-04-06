@@ -65,7 +65,7 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 
 **chunks_fts**: FTS5 virtual table for full-text search.
 
-**vec_chunks**: sqlite-vec `vec0` virtual table for semantic search. Stores embeddings with cosine distance metric. Created lazily on first `cathedrals embed` with the dimension detected from the embedding model.
+**vec_chunks**: sqlite-vec `vec0` virtual table for semantic search. Stores embeddings with cosine distance metric. Created lazily on first `commonplace embed` with the dimension detected from the embedding model.
 
 **document_tags**: Many-to-many relationship for tagging.
 
@@ -243,7 +243,7 @@ name = "slack"
 source_pattern = "(Channel|DM).*Slack"
 parser = "whole"
 merge_strategy = "positional"
-preprocessor = "~/.config/cathedrals/parsers/slack_parser.py"
+preprocessor = "~/.config/commonplace/parsers/slack_parser.py"
 skip = false
 merge_consecutive_same_author = true
 cleanup_patterns = ["^\\s*:\\w+:\\s*$"]
@@ -290,8 +290,8 @@ short_threshold = 1200
 medium_threshold = 3500
 
 [prompts]
-default = "~/.config/cathedrals/prompts/detailed.txt"
-brief = "~/.config/cathedrals/prompts/brief.txt"
+default = "~/.config/commonplace/prompts/detailed.txt"
+brief = "~/.config/commonplace/prompts/brief.txt"
 ```
 
 Prompt tier is selected by document content length: short (<1200 chars) gets a terse 1-2 sentence prompt, medium (<3500) gets a proportional summary, long gets structured section-by-section analysis. For short documents, the brief summary is copied directly from the detailed output without an additional LLM call.
@@ -369,9 +369,9 @@ Only `body` is required. Timestamps should be ISO 8601, normalized to UTC.
 
 ## Embeddings
 
-Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance metric. The table is created lazily on the first `cathedrals embed` run, with the embedding dimension detected from the model's response.
+Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance metric. The table is created lazily on the first `commonplace embed` run, with the embedding dimension detected from the model's response.
 
-**Generate**: `cathedrals embed [--limit N] [--embed-model MODEL]`
+**Generate**: `commonplace embed [--limit N] [--embed-model MODEL]`
 
 **Default model**: qwen3-embedding:8b via Ollama
 
@@ -417,9 +417,9 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 
 ## Common Maintenance Tasks
 
-**Reset database**: Delete `~/.local/share/cathedrals/cathedrals.db`
+**Reset database**: Delete `~/.local/share/commonplace/commonplace.db`
 
-**Re-embed everything**: `DROP TABLE vec_chunks;` in sqlite3, then `cathedrals embed`
+**Re-embed everything**: `DROP TABLE vec_chunks;` in sqlite3, then `commonplace embed`
 
 **Debug ingestion**: Run with file directly, check stderr output. Near-dup matches and near-misses are logged to stderr.
 

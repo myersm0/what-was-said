@@ -1,11 +1,11 @@
-# Cathedrals
+# Commonplace
 
-My personal knowledge base for notes and documents. Stores web clips, notes, whisper-transcribed voice memos, emails, papers, etc, in SQLite with full-text and semantic search.
+A personal knowledge base for notes and documents. Stores web clips, notes, whisper-transcribed voice memos, emails, papers, etc, in SQLite with full-text and semantic search.
 
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/myersm0/cathedrals/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/myersm0/commonplace/main/install.sh | sh
 ```
 
 This downloads a prebuilt binary for your platform (Linux x86_64, macOS x86_64, macOS ARM) and installs it to `~/.local/bin/`.
@@ -13,10 +13,10 @@ This downloads a prebuilt binary for your platform (Linux x86_64, macOS x86_64, 
 ### From source
 
 ```bash
-git clone https://github.com/myersm0/cathedrals.git
-cd cathedrals
+git clone https://github.com/myersm0/commonplace.git
+cd commonplace
 cargo build --release
-cp target/release/cathedrals ~/.local/bin/
+cp target/release/commonplace ~/.local/bin/
 ```
 
 ### Requirements
@@ -31,45 +31,45 @@ Alternatively, use an OpenAI-compatible API by setting `OPENAI_API_KEY` (and opt
 
 ```bash
 # Ingest new clips from inbox
-cathedrals ingest ~/inbox/clips/
+commonplace ingest ~/inbox/clips/
 
 # Browse collection
-cathedrals browse
+commonplace browse
 
 # Search from CLI
-cathedrals search "keyword query"
-cathedrals similar "semantic query"
+commonplace search "keyword query"
+commonplace similar "semantic query"
 
 # Get a specific document
-cathedrals get 42
+commonplace get 42
 
 # Generate LLM summaries
-cathedrals derive              # missing only
-cathedrals derive --force      # regenerate all
-cathedrals derive --status     # check progress
+commonplace derive              # missing only
+commonplace derive --force      # regenerate all
+commonplace derive --status     # check progress
 
 # Compute embeddings for semantic search
-cathedrals embed
+commonplace embed
 
 # Start JSON API server
-cathedrals serve               # default port 3030
-cathedrals serve --port 8080
+commonplace serve               # default port 3030
+commonplace serve --port 8080
 
 # JSON output for scripting
-cathedrals search "query" --json
-cathedrals similar "query" --json
-cathedrals get 42 --json
-cathedrals stats --json
-cathedrals dump --json
-cathedrals derive --status --json
+commonplace search "query" --json
+commonplace similar "query" --json
+commonplace get 42 --json
+commonplace stats --json
+commonplace dump --json
+commonplace derive --status --json
 
 # Use OpenAI-compatible backend
-cathedrals --backend openai --embed-model text-embedding-3-small similar "query"
+commonplace --backend openai --embed-model text-embedding-3-small similar "query"
 ```
 
 ## API Server
 
-`cathedrals serve` starts a localhost JSON API for programmatic access. This is the agent-facing interface — holds the DB connection open and avoids per-call process spawn overhead.
+`commonplace serve` starts a localhost JSON API for programmatic access. This is the agent-facing interface — holds the DB connection open and avoids per-call process spawn overhead.
 
 Endpoints:
 
@@ -151,7 +151,7 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 ## Config Files
 
-All in `~/.config/cathedrals/`:
+All in `~/.config/commonplace/`:
 
 - `config.toml` — doctype definitions
 - `tags.toml` — tag hierarchy, default exclusions, tag colors
@@ -180,6 +180,6 @@ See `DEVELOPMENT.md` for architecture details.
 
 ## Database
 
-SQLite at `~/.local/share/cathedrals/cathedrals.db` with WAL mode and foreign key enforcement enabled. All parent-child relationships (documents → entries → chunks) use `ON DELETE CASCADE`.
+SQLite at `~/.local/share/commonplace/commonplace.db` with WAL mode and foreign key enforcement enabled. All parent-child relationships (documents → entries → chunks) use `ON DELETE CASCADE`.
 
-To reset: delete the db file. To re-embed: drop the vec table (`DROP TABLE vec_chunks;`) then `cathedrals embed`.
+To reset: delete the db file. To re-embed: drop the vec table (`DROP TABLE vec_chunks;`) then `commonplace embed`.

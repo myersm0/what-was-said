@@ -67,7 +67,7 @@ async fn similar_handler(
 		.map_err(|e| err_500(e))?;
 	let connection = state.connection.lock().map_err(|e| err_500(e))?;
 	if !storage::vec_table_exists(&connection) {
-		return Err(err_500("no embeddings yet - run 'cathedrals embed' first"));
+		return Err(err_500("no embeddings yet - run 'commonplace embed' first"));
 	}
 	let results = storage::find_similar_chunks(&connection, &query_embedding, limit)
 		.map_err(|e| err_500(e))?;

@@ -97,7 +97,7 @@ pub(super) fn handle_keys(app: &mut App, key_code: KeyCode, connection: &Connect
 						app.summary_return_mode = Mode::Browse;
 						app.mode = Mode::SummaryView;
 					} else {
-						app.status_message = Some("No summary - run 'cathedrals derive'".to_string());
+						app.status_message = Some("No summary - run 'commonplace derive'".to_string());
 					}
 				}
 			}

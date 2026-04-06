@@ -281,7 +281,7 @@ fn looks_like_markdown(content: &str) -> bool {
 pub fn default_config_path() -> PathBuf {
 	dirs::config_dir()
 		.unwrap_or_else(|| PathBuf::from("."))
-		.join("cathedrals")
+		.join("commonplace")
 		.join("config.toml")
 }
 
@@ -356,7 +356,7 @@ impl TagConfig {
 fn default_tags_config_path() -> PathBuf {
 	dirs::data_dir()
 		.unwrap_or_else(|| PathBuf::from("."))
-		.join("cathedrals")
+		.join("commonplace")
 		.join("tags.toml")
 }
 

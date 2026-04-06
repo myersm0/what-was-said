@@ -1,7 +1,7 @@
-# Tag configuration for cathedrals
+# Tag configuration for commonplace
 # Place this file at the same location as the database:
-#   macOS: ~/Library/Application Support/cathedrals/tags.toml
-#   Linux: ~/.local/share/cathedrals/tags.toml
+#   macOS: ~/Library/Application Support/commonplace/tags.toml
+#   Linux: ~/.local/share/commonplace/tags.toml
 
 # Default exclusions - these tags are filtered out unless you use --include-all
 # or explicitly include them with --tags

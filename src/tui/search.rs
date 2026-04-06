@@ -120,7 +120,7 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 		}
 		SearchMode::Semantic => {
 			if !storage::vec_table_exists(connection) {
-				app.status_message = Some("No embeddings - run 'cathedrals embed' first".to_string());
+				app.status_message = Some("No embeddings - run 'commonplace embed' first".to_string());
 				return Ok(());
 			}
 

@@ -3,21 +3,21 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 
-use cathedrals::config;
-use cathedrals::derive::{self, DeriveOptions};
-use cathedrals::ingest;
-use cathedrals::llm::LlmBackend;
-use cathedrals::ollama::OllamaClient;
-use cathedrals::openai::OpenAiClient;
-use cathedrals::storage::{self, SearchSortColumn};
-use cathedrals::serve;
-use cathedrals::tui;
-use cathedrals::util;
+use commonplace::config;
+use commonplace::derive::{self, DeriveOptions};
+use commonplace::ingest;
+use commonplace::llm::LlmBackend;
+use commonplace::ollama::OllamaClient;
+use commonplace::openai::OpenAiClient;
+use commonplace::storage::{self, SearchSortColumn};
+use commonplace::serve;
+use commonplace::tui;
+use commonplace::util;
 
 static VEC_INIT: Once = Once::new();
 
 #[derive(Parser)]
-#[command(name = "cathedrals", about = "Personal knowledge base with full-text and semantic search")]
+#[command(name = "commonplace", about = "Personal knowledge base with full-text and semantic search")]
 struct Cli {
 	#[arg(long, global = true, value_name = "PATH", help = "Database path")]
 	db: Option<PathBuf>,
@@ -129,8 +129,8 @@ enum Command {
 fn default_db_path() -> PathBuf {
 	dirs::data_dir()
 		.unwrap_or_else(|| PathBuf::from("."))
-		.join("cathedrals")
-		.join("cathedrals.db")
+		.join("commonplace")
+		.join("commonplace.db")
 }
 
 fn open_db(path: &Path) -> Result<rusqlite::Connection> {
@@ -307,7 +307,7 @@ fn main() -> Result<()> {
 			}
 
 			if !storage::vec_table_exists(&connection) {
-				anyhow::bail!("no embeddings yet - run 'cathedrals embed' first");
+				anyhow::bail!("no embeddings yet - run 'commonplace embed' first");
 			}
 
 			let backend = create_backend(&backend_name, &ollama_url)?;
