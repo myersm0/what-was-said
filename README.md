@@ -2,7 +2,7 @@
 
 A personal knowledge base for notes and documents. Stores web clips, notes, whisper-transcribed voice memos, emails, papers, etc, in SQLite with full-text and semantic search.
 
-***Commonplace*** refers to the long tradition of the [commonplace book](https://en.wikipedia.org/wiki/Commonplace_book): a personal notebook used from the Renaissance through the nineteenth century to collect excerpts, observations, quotations, and ideas. This project follows in that tradition, but with a 21st-century twist to enable new capabilities like information extraction and temporal reasoning.
+***Commonplace*** refers to the long tradition of the [commonplace book](https://en.wikipedia.org/wiki/Commonplace_book): a personal notebook used from the Renaissance through the nineteenth century to collect excerpts, observations, quotations, and ideas. This project follows in that tradition, but with a 21st-century twist to enable new capabilities like semantic search, automated information extraction, and temporal reasoning.
 
 Status: still in early development. Check back soon.
 
