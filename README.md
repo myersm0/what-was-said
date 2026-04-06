@@ -143,9 +143,11 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 **Entries**: Segments within a document (messages, paragraphs, sections).
 
-**Chunks**: ~500 char fragments of entries, indexed for search.
+**Chunks**: ~300 word fragments of entries, indexed for search. Boundaries snap to sentence ends when possible, with a 500-char max snap distance to prevent degenerate behavior on text without sentence punctuation.
 
 **Derived content**: LLM-generated summaries stored alongside documents. A detailed summary is generated first (prompt tier selected by document length: short/medium/long), then a brief summary is compressed from it. For short documents, the brief summary is copied directly from the detailed summary without an extra LLM call.
+
+**Near-duplicate detection**: Documents are fingerprinted at ingest time using MinHash over 3-word shingles. When a new document is ingested, it is compared against existing documents within a ±180 day window. If Jaccard similarity exceeds 0.7, the older document is tagged `superseded`. Near-misses (similarity 0.4–0.7) are logged to stderr.
 
 ## Config Files
 
@@ -178,6 +180,6 @@ See `DEVELOPMENT.md` for architecture details.
 
 ## Database
 
-SQLite at `~/.local/share/cathedrals/cathedrals.db` with WAL mode enabled for concurrent read access.
+SQLite at `~/.local/share/cathedrals/cathedrals.db` with WAL mode and foreign key enforcement enabled. All parent-child relationships (documents → entries → chunks) use `ON DELETE CASCADE`.
 
 To reset: delete the db file. To re-embed: drop the vec table (`DROP TABLE vec_chunks;`) then `cathedrals embed`.

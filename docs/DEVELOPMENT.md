@@ -42,7 +42,7 @@ Document (1) ──► Entry (n) ──► Chunk (n)
     │               │
     │               └── author, timestamp, heading
     │
-    └── source_title, doctype, merge_strategy, tags, derived_content
+    └── source_title, doctype, merge_strategy, tags, derived_content, document_minhash
 ```
 
 ### Key Tables
@@ -51,13 +51,15 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 - `source_title`: Browser window title or filename
 - `doctype`: Matched type (slack, email, markdown, etc.)
 - `merge_strategy`: none | positional (for conversations that grow over time)
+- `document_minhash`: MinHash signature over full document body, used for near-duplicate detection at ingest
 
-**entries**: Logical segments within a document (messages, paragraphs, sections).
+**entries**: Logical segments within a document (messages, paragraphs, sections). Cascades on document deletion.
 - `position`: Order within document
 - `author`, `timestamp`: For conversations
 - `heading_title`, `heading_level`: For structured docs
+- `minhash`: Per-entry MinHash signature
 
-**chunks**: Text fragments for search indexing. Entries are split into chunks of ~300 words.
+**chunks**: Text fragments for search indexing. Entries are split into chunks of ~300 words. Cascades on entry deletion.
 - `chunk_index`: Position within entry
 - `body`: The text
 
@@ -146,23 +148,28 @@ run_preprocessor(script_path, file_path) -> SegmentationResult
 ```
 
 **Orchestration**:
-- `ingest_file()`: Main ingestion logic — reads file, detects doctype, parses, handles merge, stores results
+- `ingest_file()`: Main ingestion logic — reads file, detects doctype, parses, handles merge, detects near-duplicates, stores results
 - `ingest_directory()`: Iterates directory, calls ingest_file per file
 - `find_overlap()`: Detects overlapping entries for positional merge
 - `segment()`: Free function that calls `backend.generate()` with segmentation prompt
 
+**Near-duplicate detection**: After parsing but before inserting, computes a document-level MinHash signature and compares against existing documents within a ±180 day window. If Jaccard similarity ≥ 0.7 (`dup_jaccard_threshold`), the older document is tagged `superseded`. Near-misses (≥ 0.4) are logged to stderr for diagnostic tuning.
+
 ### storage/
-All SQLite operations. Uses rusqlite directly (no ORM). Integrates sqlite-vec for vector search. Split into submodules, all re-exported from `storage/mod.rs`. Enables WAL mode on initialization for concurrent read access.
+All SQLite operations. Uses rusqlite directly (no ORM). Integrates sqlite-vec for vector search. Split into submodules, all re-exported from `storage/mod.rs`. Sets `PRAGMA foreign_keys = ON` and `PRAGMA journal_mode=WAL` on initialization for referential integrity and concurrent read access.
 
 Key output types (`GroupedSearchResult`, `ChunkHit`, `SimilarChunk`, `DumpDocument`, `DumpEntry`, `DocumentContent`, `EntryContent`, `ChunkContent`, `DeriveStatus`) derive `Serialize` for JSON output.
 
-**mod.rs**: Schema initialization (`initialize()`), WAL mode pragma, re-exports, tests.
+**mod.rs**: Schema initialization (`initialize()`), foreign keys pragma, WAL mode pragma, `migrate()` for schema upgrades, re-exports, tests.
+
+`migrate()` runs on every startup and handles: rebuilding the entries table to add `ON DELETE CASCADE` if missing, adding the `document_minhash` column to documents if missing, and cleaning up any orphaned entries/chunks with an FTS rebuild.
 
 **documents.rs**: Document/entry/chunk CRUD, list/get/dump, counts, merge helpers.
 - `insert_document/entry/chunks`: Write path
 - `get_document()`: Read full document with entries and chunks
 - `list_documents()`: Browse-mode listing with brief summaries and tags
 - `find_documents_by_merge_key()`: Finds candidates for positional merge
+- `find_dup_candidates()`: Finds documents within a time window that have MinHash signatures, for near-duplicate comparison
 
 **search.rs**: FTS5 search with grouping, author/date filters pushed into SQL.
 - `search()` / `search_filtered()`: FTS5 MATCH with snippet generation
@@ -188,7 +195,7 @@ Shared string utilities.
 ### chunking.rs
 Splits entry text into chunks for indexing.
 
-Strategy: Sliding window of ~300 words with 1/3 stride. Snaps boundaries to sentence ends. Falls back to word boundaries for very long sentences. Entries under 400 words are kept as a single chunk.
+Strategy: Sliding window of ~300 words with 1/3 stride. Snaps boundaries to sentence ends within a max distance of 500 chars; falls back to word boundaries when no sentence punctuation is nearby. Entries under 400 words are kept as a single chunk. Remaining words below the split threshold are absorbed into the final chunk to avoid tiny trailing fragments.
 
 ### tui/
 Ratatui-based terminal UI. Split into submodules with a shared `App` struct in `mod.rs`. Each mode has a key handler and draw function; the event loop dispatches based on `app.mode`.
@@ -211,7 +218,14 @@ Ratatui-based terminal UI. Split into submodules with a shared `App` struct in `
 Shared type definitions: `DocumentId`, `EntryId`, `MediaId`, `SegmentedEntry`, `SegmentationResult`, `MergeStrategy`, `MediaItem`, `MediaType`, `MinHashSignature`.
 
 ### minhash.rs
-MinHash signatures for near-duplicate detection. Used during ingestion to compute per-entry hashes stored in the entries table.
+MinHash signatures for near-duplicate detection. Tokenizes text into 3-word shingles (sliding windows of 3 consecutive words) for order-sensitive fingerprinting. Texts shorter than 3 words fall back to individual token hashing.
+
+Key functions:
+- `minhash()`: Compute a MinHash signature for arbitrary text
+- `minhash_document()`: Compute a document-level signature by concatenating all entry bodies
+- `minhash_with_context()`: Compute with optional surrounding entry text for contextual hashing
+- `jaccard()`: Estimate Jaccard similarity between two signatures
+- `is_short_entry()`: Check if text is below 50 chars (used for short-entry handling)
 
 ### markdown.rs
 Markdown-specific parsing (heading extraction, section splitting).
@@ -323,9 +337,12 @@ Only `body` is required. Timestamps should be ISO 8601, normalized to UTC.
    a. Find existing docs with same merge_key
    b. Check each for overlapping entries (≥150 chars consecutive match)
    c. If overlap found, append new entries to existing doc
-   d. Else create new document
-10. Insert document/entries/chunks
-11. Index in FTS5 (via trigger)
+   d. Else fall through to step 10
+10. Compute document-level MinHash signature
+11. Query existing docs within ±180 day window for near-duplicates
+12. If Jaccard similarity ≥ 0.7, mark older doc as superseded
+13. Insert document/entries/chunks
+14. Index in FTS5 (via trigger)
 ```
 
 ## Search Flow
@@ -380,6 +397,10 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 
 9. **JSON API via serve**: Localhost axum server holding the DB connection open, exposing storage functions as JSON endpoints. Designed as the agent-facing interface, avoiding per-call process spawn overhead.
 
+10. **Foreign key enforcement**: `PRAGMA foreign_keys = ON` set on every connection. All parent-child relationships use `ON DELETE CASCADE`. A migration system in `initialize()` detects old schemas and rebuilds tables as needed, preventing orphaned rows.
+
+11. **Near-duplicate detection via MinHash**: Documents are fingerprinted at ingest using 3-word shingle MinHash signatures. New documents are compared against existing docs within a configurable time window (default ±180 days). Near-duplicates are ingested normally but the older version is tagged `superseded`, preserving both versions while flagging staleness.
+
 ## Adding a New CLI Command
 
 1. Add a variant to the `Command` enum in main.rs with clap attributes
@@ -400,7 +421,7 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 
 **Re-embed everything**: `DROP TABLE vec_chunks;` in sqlite3, then `cathedrals embed`
 
-**Debug ingestion**: Run with file directly, check stderr output
+**Debug ingestion**: Run with file directly, check stderr output. Near-dup matches and near-misses are logged to stderr.
 
 **Profile search**: Add timing around `storage::search()` or `find_similar_chunks()`
 
