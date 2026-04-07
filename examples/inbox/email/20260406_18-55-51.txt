@@ -1,0 +1,20 @@
+# source: Inbox - Rivers, Carlos - Outlook - Brave
+Re: Server migration
+
+Rivers, Carlos
+
+​
+Park, Susan​
+
+Got it, I'll handle the DNS cutover on Friday. I've already coordinated with the network team and they've confirmed the window is available. The TTL on the current records has been lowered to 300 seconds, so propagation should be quick. I'll monitor the cutover closely and keep you posted on any issues.
+
+ 
+
+From: Park, Susan
+Sent: Monday, April 6, 2026 9:15 AM
+To: Rivers, Carlos
+Subject: Server migration
+
+ 
+
+The new server is ready. We need to migrate before end of week. I've run through the checklist and everything looks good on my end. The database has been synced and verified, all dependencies are installed, and the SSL certificates are in place. The main concern is ensuring zero downtime during the transition. I've created a detailed migration plan with rollback procedures in case something goes wrong. Can you review it and let me know if you see any gaps?

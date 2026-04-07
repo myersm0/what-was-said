@@ -1,0 +1,45 @@
+# source: Piano Tuning - Slack - https://app.slack.com/client/T000/search - Brave
+
+alfred_reed  [9:12 AM]
+Has anyone here tuned a piano after moving it between floors?
+
+2 replies
+
+George Finch  [9:14 AM]
+You'll almost always need at least a touch-up. Temperature + humidity shifts matter more than the move itself.
+
+c.zhou  [9:16 AM]
+Right, especially if the instrument sat overnight before acclimating. I moved a Yamaha grand from the third floor to the first floor of our studio last year and the A4 was off by nearly 15 cents when we checked it the next morning.
+
+alfred_reed  [9:17 AM]
+Do you wait 24 hours or longer?
+
+:thread:
+
+George Finch  [9:20 AM]
+24–48h if possible. Also check unisons first—they drift the most. The octave strings tend to hold their tension better than the unisons because of how the pins bed in under load.
+
+c.zhou  [9:22 AM]
+Agreed. I usually start with A4 reference, then do a quick temperament pass. If there's significant deviation, I'll do a full tune the next day after the instrument has settled.
+
+alfred_reed  [9:25 AM]
+Makes sense, thanks!
+
+George Finch  [9:30 AM]
+One more thing—if it's a move with temperature swing, like winter to summer climate, the strings can keep shifting for a week. Don't assume it's stable after 48 hours. Keep that in mind.
+
+M. Liu  [10:05 AM]
+Adding to this: vertical moves are less brutal than horizontal moves across climate zones. If alfred's moving it in the same building, he's probably fine with 48 hours. (edited)
+:star:
+1
+
+c.zhou  [10:07 AM]
+That's a good point. Intra-building moves are pretty straightforward. The real trouble is interstate shipping in climate-controlled trucks.
+
+alfred_reed  [10:09 AM]
+It's same building, same floor actually—just moving it across the room. I was worried I was being overly cautious.
+
+George Finch  [10:11 AM]
+In that case you can probably get away with an hour of settling, but a touch-up appointment in a day or two won't hurt.
+:pray:
+1

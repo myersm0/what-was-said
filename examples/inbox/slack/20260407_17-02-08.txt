@@ -1,0 +1,14 @@
+# source: build-system (Channel) - project-aurora - Slack - Brave
+dev-team  [4:56 PM]
+@Alice Wilson That's exactly what's happening. When we have `//vendor:foo` and `//core:foo`, they're sharing the same cache key. Adding `target.scope` to the key should fix it. I'll make that change and test it.
+
+Marcus Davis  [5:02 PM]
+While you're in there, we should probably add a unit test that explicitly checks for this case. Single-target-name-across-multiple-scopes is a real scenario we should protect against going forward.
+
+dev-team  [5:08 PM]
+Good idea. I'll add a test case and push both the fix and test in the next PR. Thanks for walking through this—the memoization key was a subtle one.
+:pray:
+2
+
+Alice Wilson  [5:15 PM]
+No problem. Keep an eye on the release build times after you deploy this; if the debug path suddenly takes much longer, it might mean the memoization was papering over some other inefficiency. But I suspect it'll actually be faster now that we're not hitting the cache collisions.

@@ -1,0 +1,41 @@
+# source: Inbox - Adams, John - Outlook - Brave
+Re: Project update
+
+Adams, John
+
+​
+Smith, Jane;​
+Doe, Bob​
+​
+Lease, Maria​
+Sounds good, let's proceed with the plan. I've reviewed the revisions Jane suggested and they look solid. The changes to the methodology section actually strengthen our argument considerably. I'm confident we can move forward with the submission timeline we discussed. I'll start on the budget spreadsheet and have preliminary numbers to you by Friday. Let me know if you need anything else from my end.
+
+Thanks,
+
+John.
+
+ 
+
+From: "Smith, Jane" <smithj@univ.edu>
+Date: Thursday, March 6, 2026 at 2:45 PM
+To: "Adams, John" <adamsj@univ.edu>, "Doe, Bob" <doeb@univ.edu>
+Cc: "Lease, Maria" <leem@univ.edu>
+Subject: Re: Project update
+
+ 
+
+I reviewed the document. The third section needs revision. Specifically, the literature review is too brief and misses some recent work by Chen et al. (2025) that directly supports our framework. I'd suggest expanding that section to include at least three additional citations from the past two years. Also, the methodology section could be clearer about our sampling strategy—currently it's ambiguous whether we're using stratified or simple random sampling. Bob, can you clarify that in your next pass? Once those are addressed, I think we're in good shape for submission.
+
+ 
+
+From: Adams, John <adamsj@univ.edu>
+Sent: Thursday, March 6, 2026 11:30 AM
+To: Smith, Jane <smithj@univ.edu>; Doe, Bob <doeb@univ.edu>
+Cc: Lease, Maria <leem@univ.edu>
+Subject: Project update
+
+Can everyone take a look at the attached draft? I've incorporated the feedback from our last meeting and restructured the introduction. The timeline is tight, so I'd appreciate comments by end of day tomorrow if possible. Maria, I especially want your input on the statistical section since that's your area. Let me know if you have any questions.
+
+John.
+
+ 

@@ -1,0 +1,67 @@
+# source: Computer Graphics - Slack - https://app.slack.com/client/T000/search - Brave
+
+maya-patel
+Today at 10:03 AM
+Anyone using temporal anti-aliasing with dynamic resolution scaling?
+
+10:05
+I'm seeing ghosting on fast camera pans.
+
+5 replies
+
+evan.brooks
+Today at 10:08 AM
+TAA + dynamic res can amplify history artifacts. Are you clamping velocity?
+
+maya-patel
+Today at 10:10 AM
+Not yet—just using default reprojection.
+
+evan.brooks
+Today at 10:12 AM
+Try neighborhood clamping and reset history on large motion vectors. Also, what's your jitter pattern? Halton or RGBA noise?
+
+maya-patel
+Today at 10:13 AM
+Got it, I'll try that. Currently using RGBA noise with a 4x subpixel pattern.
+
+evan.brooks
+Today at 10:20 AM
+Also check exposure changes—they can break accumulation. If your dynamic res is scaling aggressively, you might need to scale exposure weights accordingly.
+
+Sarah Davis
+Today at 10:25 AM
+We hit a similar issue in our deferred renderer. Ended up having to track per-frame dilated velocity for the neighborhood clamping to work well.
+
+maya-patel
+Today at 10:27 AM
+Did you find a performance sweet spot? How much overhead for the velocity dilation pass?
+
+Sarah Davis
+Today at 10:32 AM
+About 0.3ms on a 1440p target when rendering to quarter-res history. We compute max velocity in 2x2 neighborhoods, which helps with disocclusion edges too.
+
+:eyes:
+2
+
+evan.brooks
+Today at 10:35 AM
+That's solid. One more gotcha: if you're doing any post-process sharpening, apply it after TAA converges, not before. Otherwise the high frequencies interact badly with the temporal accumulation.
+
+maya-patel
+Today at 10:38 AM
+Good to know. Are you using any machine learning upsampling on top of this?
+
+evan.brooks
+Today at 10:42 AM
+Not in this project, but I've seen DLSS integrate okay with TAA if you're careful about history rejection. The key is making sure the ML upsampler is aware of the reprojection confidence.
+
+Sarah Davis
+Today at 10:45 AM
+We're looking at DLSS 3 frame generation in the next iteration. Might pair it with TAA or replace it—still undecided.
+
+maya-patel
+Today at 10:50 AM
+Thanks, this is really helpful. I'll start with neighborhood clamping and velocity dilation and see if that clears up the ghosting.
+:+1:
+2

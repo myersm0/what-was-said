@@ -1,0 +1,14 @@
+[[doctype]]
+name = "email"
+source_pattern = "- Outlook -"
+parser = "whole"
+merge_strategy = "positional"
+preprocessor = "examples/parsers/email_parser.py"
+
+[[doctype]]
+name = "slack"
+source_pattern = "- Slack -"
+parser = "whole"
+merge_strategy = "positional"
+preprocessor = "examples/parsers/slack_parser.py"
+merge_consecutive_same_author = true

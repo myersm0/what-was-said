@@ -1,0 +1,66 @@
+# source: Carpentry - Slack - https://app.slack.com/client/T000/search - Brave
+
+eli_c  [7:41 AM]
+Any tips for keeping joints square when gluing cabinets?
+
+1 reply
+
+rosa_d  [7:45 AM]
+Use clamps diagonally and check with a framing square. The diagonal should pull the frame back into square if you apply pressure perpendicular to the long diagonal.
+
+eli_c  [7:47 AM]
+Do corner clamps help?
+
+rosa_d  [7:49 AM]
+Yes, especially for small boxes. They apply even pressure across the joint and reduce the number of clamps you need.
+
+eli_c  [7:52 AM]
+Perfect, thanks!
+
+rosa_d  [7:55 AM]
+One more thing: dry-fit the whole assembly first. Find out which clamps you need and in what order before you apply glue.
+
+mford  [8:05 AM]
+That's the golden rule. Take a photo of the dry-fit setup too. Helps you remember the sequence once glue is involved. (edited)
+
+rosa_d  [8:08 AM]
+Absolutely. And label your clamps if you have a lot of them. Nothing worse than grabbing the wrong size mid-glue-up.
+
+eli_c  [8:10 AM]
+Good points. What about glue squeeze-out? Does that affect joint strength?
+
+mford  [8:13 AM]
+Slight squeeze-out is good—it means you have enough glue. Wipe it off before it sets with a damp cloth, but don't obsess over perfect cleanup during the glue-up. You can chisel off dried squeeze-out later.
+
+:+1:
+2
+
+rosa_d  [8:16 AM]
+If you're using hide glue, clean-up is easier because it stays liquid longer. For PVA, you have a smaller window.
+
+Elena V  [8:20 AM]
+I've had good luck with epoxy for cabinet work because the glue line is more water-resistant and it doesn't require perfect clamping pressure like PVA does.
+
+mford  [8:23 AM]
+Epoxy's slower to set, which gives you more time, but it's messier to clean up. And you pay a premium for it.
+
+:pray:
+1
+
+eli_c  [8:25 AM]
+Is it worth it for a high-moisture-area cabinet?
+
+Elena V  [8:28 AM]
+If the cabinet is going in a bathroom or kitchen, yeah. The glue line's durability matters. Finish the cabinet well too though—that's what really protects the wood.
+
+rosa_d  [8:31 AM]
+A good finish will outlast almost any glue. Focus on prep and fit first, glue choice second.
+
+eli_c  [8:33 AM]
+Got it. I think I'm ready to start my glue-up. Thanks everyone!
+
+:star:
+2
+
+rosa_d  [8:35 AM]
+Good luck! Post photos when you're done.

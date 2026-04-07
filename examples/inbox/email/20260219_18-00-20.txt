@@ -1,0 +1,20 @@
+# source: Inbox - Support - Outlook - Brave
+Re: Container build failure
+
+Nguyen, Thanh
+
+​
+Taylor, Morgan​
+
+Fixed in the latest image. Pull tag v2.4.1. I added libGL as a runtime dependency in the base Dockerfile and also included the necessary development headers for anyone building extensions. I've tested the build on both Ubuntu 20.04 and 22.04 and it passes all the sanity checks. The image size increased slightly but it should still be within acceptable limits. Let me know if you run into any other issues.
+
+ 
+
+From: 'Taylor, Morgan' via IntraDB Help<intradb-help@humanconnectome.org>
+Date: Wednesday, February 19, 2026 at 11:20 AM
+To: support-list@humanconnectome.org
+Subject: Re: Container build failure
+
+ 
+
+The Singularity build fails because libGL is missing from the base image. We need this for the visualization tools. Also, a few users have reported that the MPI dependencies aren't being pulled in correctly, so the parallel jobs are failing. Can someone update the container definition to include both fixes?

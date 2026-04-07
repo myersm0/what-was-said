@@ -1,0 +1,73 @@
+# source: Carpentry - Slack - https://app.slack.com/client/T000/search - Brave
+
+jon_m
+Yesterday at 6:01 PM
+What's the best way to prevent tear-out when cross-cutting plywood?
+
+3 replies
+
+sam_ortega
+Yesterday at 6:03 PM
+Use a zero-clearance insert and a sharp blade with high tooth count.
+
+jon_m
+Yesterday at 6:04 PM
+Would blue tape help as well?
+
+sam_ortega
+Yesterday at 6:05 PM
+Yes, tape over the cut line reduces splintering. The tape supports the veneer fibers on both sides of the kerf.
+
+jon_m
+Yesterday at 6:06 PM
+Great, thanks.
+
+sam_ortega
+Yesterday at 6:09 PM
+You can also score the cut line lightly before sawing. A sharp chisel or scoring knife works well.
+
+mford
+Yesterday at 6:15 PM
+Another trick: use the table saw with the blade set higher than usual—just barely through the material. Keeps the blade cooler and reduces friction chatter.
+
+sam_ortega
+Yesterday at 6:17 PM
+That's counterintuitive but yeah, lower angle of blade through the kerf helps reduce splinter. Though you need really sharp teeth or you'll get more tear-out.
+
+mford
+Yesterday at 6:20 PM
+Exactly. I usually combine all three: zero-clearance insert, high tooth count blade, and tape. Haven't had tear-out on 3/4" birch plywood in years.
+
+:star:
+2
+
+jon_m
+Yesterday at 6:22 PM
+Is a track saw better for this than a table saw?
+
+mford
+Yesterday at 6:25 PM
+Track saws are excellent for long cross-cuts and they have natural downforce from gravity, so less tear-out. But the blade speed is usually lower than a table saw, so you need to be even more careful with tooth geometry.
+
+Elena V
+Yesterday at 6:30 PM
+I prefer hand tools for veneer plywood. A fine-toothed handsaw and a sharp chisel for cleanup takes longer but zero tear-out, every time.
+
+sam_ortega
+Yesterday at 6:32 PM
+That works too, but most people need the throughput of a power tool. If you're batch-cutting sheet goods, the table saw route with all the precautions is fastest.
+
+jon_m
+Yesterday at 6:35 PM
+Okay, I think I have enough to experiment. The zero-clearance insert and tape combo sounds like the move for my current project.
+
+Elena V
+Yesterday at 6:38 PM
+One last thing: store your plywood flat. Moisture imbalance makes the veneer lift and separate, which makes tear-out worse.
+
+:pray:
+1
+
+sam_ortega
+Yesterday at 6:40 PM
+Good point. Acclimate the material to your shop humidity for a day before cutting if it's been in a truck.

@@ -1,0 +1,74 @@
+# source: Inbox - Adams, John - Outlook - Brave
+Re: Project update
+
+Adams, John
+
+​
+Smith, Jane;​
+Doe, Bob​
+​
+Lease, Maria​
+
+I've completed the budget spreadsheet and have preliminary numbers ready for review. The total comes to $156,800, which is about 8% higher than my initial estimate due to some additional equipment costs we identified. I've broken it down by category and included justifications for each line item. Also, I incorporated the literature review additions Jane suggested and the methodology clarifications Bob provided. I think we're ready to move forward with submission. Can we schedule a brief call on Tuesday to discuss next steps?
+
+Thanks,
+
+John.
+
+ 
+
+From: "Smith, Jane" <smithj@univ.edu>
+Date: Friday, March 8, 2026 at 9:30 AM
+To: "Adams, John" <adamsj@univ.edu>, "Doe, Bob" <doeb@univ.edu>
+Cc: "Lease, Maria" <leem@univ.edu>
+Subject: Re: Project update
+
+ 
+
+Good news on the revisions. The expanded literature review looks comprehensive now and I verified that the Chen et al. reference was cited correctly. Doe's clarification on the sampling strategy removed all the ambiguity I had. I'm satisfied with the methodology section and ready to move forward. The main thing I'm waiting on now is the budget numbers from Adams so we can finalize the submission package.
+
+ 
+
+From: Doe, Bob <doeb@univ.edu>
+Sent: Thursday, March 7, 2026 3:15 PM
+To: Adams, John <adamsj@univ.edu>; Smith, Jane <smithj@univ.edu>
+Cc: Lease, Maria <leem@univ.edu>
+Subject: Re: Project update
+
+ 
+
+I've clarified the sampling strategy in the methodology section. We're using stratified random sampling with allocation proportional to size across the four geographic regions. I've added a table showing the expected sample distribution by region and stratum. Maria, the power analysis should still hold with this approach—can you confirm? John, let me know once you have the budget numbers so we can finalize everything.
+
+ 
+
+From: Lease, Maria <leem@univ.edu>
+Sent: Thursday, March 7, 2026 10:45 AM
+To: Adams, John <adamsj@univ.edu>; Smith, Jane <smithj@univ.edu>; Doe, Bob <doeb@univ.edu>
+Subject: Re: Project update
+
+ 
+
+I've reviewed the statistical section and everything checks out. The power analysis is sound and the effect size assumptions are conservative given our preliminary data. I made a few minor notational adjustments for consistency with our other papers but nothing substantive. The sample size calculation is clearly justified and I'm confident in the approach.
+
+
+From: "Adams, John" <adamsj@univ.edu>
+Date: Thursday, March 6, 2026 at 5:05 PM
+To: "Adams, John" <adamsj@univ.edu>, "Doe, Bob" <doeb@univ.edu>
+Cc: "Lease, Maria" <leem@univ.edu>
+Subject: Re: Project update
+ 
+Sounds good, let's proceed with the plan. I've reviewed the revisions Jane suggested and they look solid. The changes to the methodology section actually strengthen our argument considerably. I'm confident we can move forward with the submission timeline we discussed. I'll start on the budget spreadsheet and have preliminary numbers to you by Friday. Let me know if you need anything else from my end.
+ 
+Thanks,
+ 
+John.
+ 
+From: "Smith, Jane" <smithj@univ.edu>
+Date: Thursday, March 6, 2026 at 2:45 PM
+To: "Adams, John" <adamsj@univ.edu>, "Doe, Bob" <doeb@univ.edu>
+Cc: "Lease, Maria" <leem@univ.edu>
+Subject: Re: Project update
+
+
+
+I reviewed the document. The third section needs revision. Specifically, the literature review is too brief and misses some recent work by Chen et al. (2025) that directly supports our framework. I'd suggest expanding that section to include at least three additional citations from the past two years. Also, the methodology section could be clearer about our sampling strategy—currently it's ambiguous whether we're using stratified or simple random sampling. Bob, can you clarify that in your next pass? Once those are addressed, I think we're in good shape for submission.

@@ -1,0 +1,38 @@
+# source: build-system (Channel) - project-aurora - Slack - Brave
+
+dev-team  [3:42 PM]@Alice Wilson @Marcus Davis: I'm having trouble with the incremental build system when dealing with large file sets. The issue seems to be that when I modify a single source file in the vendor directory, the entire dependency graph gets invalidated, not just the affected modules. This is causing full rebuilds on what should be incremental changes. Has anyone encountered this before, or is there something about how the hashing strategy works that I'm missing?
+
+4 replies
+
+Alice Wilson  [3:58 PM]This sounds like it might be a fingerprinting issue with how we're hashing the intermediate outputs. The current system uses file modification time as the primary signal, but when you touch files in the vendor directory, the timestamp cascades up through all dependent targets. Have you tried with `--no-stat-cache` to see if that changes the behavior? dev-team  [4:05 PM]@Alice Wilson Yeah, I tried that but it still does a full rebuild. The logs show it's traversing all the way up the dependency chain even though logically only the changed file should trigger rebuilds for its direct dependents. Looking at the build log more closely, it seems like the issue might be in how the `compute_transitive_closure` function is working—it's including way too many targets.
+
+Marcus Davis  [4:12 PM]
+Can you share the output of `bazel query --output=graph deps(//vendor:changed_target)` for one of the problematic files? That might tell us if the dependency graph itself is correct or if the traversal logic is what's broken. Also, when did this start happening? Was the behavior different in the previous release? (edited)
+
+dev-team  [4:20 PM]
+@Marcus Davis Just ran that—the query output shows the dependency graph looks correct, actually. So it's not a metadata issue. Let me dig into the traversal code. I wonder if there's a bug in how we're tracking which targets have already been visited during the walk.
+
+Alice Wilson  [4:28 PM]
+Good catch. The traversal logic in `incremental_build.py` line 247–281 might be the culprit. There's a memoization dictionary that should prevent revisiting nodes, but if the key generation is wrong, you could end up recomputing the closure for the same target multiple times. I'd check that the keys being used for memoization match what's actually being queried.
+
+:+1:
+2
+
+Marcus Davis  [4:35 PM]
+Also worth checking: are you building with `--config=debug` or `--config=release`? The incremental logic has different code paths depending on the config, and there might be an issue with one of them. The debug path does more aggressive memoization caching.
+
+dev-team  [4:42 PM]
+@Marcus Davis I was using `--config=debug`. Let me try with `--config=release` and see if the behavior changes... yep, with release it's only rebuilding the affected modules. So the bug is definitely in the debug path's memoization logic.
+
+Alice Wilson  [4:49 PM]
+Found it. In `incremental_build.py` line 253, the memoization key is built from `target.name` and `target.config`, but it's not including the `target.scope`. This means if you have the same target name in different scopes, they'll get the same cache entry, and subsequent lookups will return the cached result from a different scope entirely. That's a classic cache key collision bug.
+
+:star:
+3
+
+dev-team  [4:56 PM]
+@Alice Wilson That's exactly what's happening. When we have `//vendor:foo` and `//core:foo`, they're sharing the same cache key. Adding `target.scope` to the key should fix it. I'll make that change and test it.
+
+Marcus Davis  [5:02 PM]
+While you're in there, we should probably add a unit test that explicitly checks for this case. Single-target-name-across-multiple-scopes is a real scenario we should protect against going forward.
+

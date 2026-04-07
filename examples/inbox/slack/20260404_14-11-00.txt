@@ -1,0 +1,44 @@
+# source: Piano Tuning - Slack - https://app.slack.com/client/T000/search - Brave
+
+Dana Willis  [2:16 PM]
+Mostly by ear, but some use apps for a starting curve. I've tried both—the apps are good references if you're learning.
+
+R_Kim  [2:18 PM]
+Thanks!
+
+Dana Willis  [2:20 PM]
+If you want to dig into the math, there are some old piano tuning manuals that explain the physics of inharmonicity.
+
+:+1:
+1
+
+M. Liu  [3:05 PM]
+The key thing with uprights is that they have less mass in the soundboard, so stretch becomes audible earlier in the frequency range than on a grand. Even a small upright benefits from it.
+
+R_Kim  [3:07 PM]
+How much stretch are we talking? Like a few cents across the whole keyboard?
+
+Dana Willis  [3:09 PM]
+For a small upright, maybe 5–10 cents total across the full range. Grands can go 15–20 cents depending on the action and soundboard mass.
+
+M. Liu  [3:12 PM]
+Also depends on the age. Older uprights with thinner soundboards need more stretch. Newer ones with reinforced designs can get away with less.
+
+R_Kim  [3:14 PM]
+Okay, so I should experiment on my particular instrument rather than follow a fixed formula.
+
+Dana Willis  [3:16 PM]
+Exactly right. And if you make a mistake, you can always retune. The beauty of stretch tuning is it's not permanent—just a tuning choice.
+
+M. Liu  [3:20 PM]
+GitHub has a few open-source stretch tuner tools if you want to visualize inharmonicity curves for your piano. Some folks use them to generate tuning targets.
+https://github.com/pitch-tools/stretch-tuner
+
+R_Kim  [3:22 PM]
+Great, I'll look into those. This is super helpful.
+
+:pray:
+2
+
+Dana Willis  [3:25 PM]
+Good luck! Feel free to post follow-ups if you get stuck.

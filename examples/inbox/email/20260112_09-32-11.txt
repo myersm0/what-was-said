@@ -1,0 +1,35 @@
+# source: Inbox - Patel, Ravi - Outlook - Brave
+Re: Analysis results
+
+Patel, Ravi
+
+​
+Okafor, Nneka​
+
+Updated results attached. I've rerun the analysis with the corrected parameters you specified. The findings are quite different from the initial run. The effect sizes are smaller but more stable across the subgroups, and the confidence intervals are tighter. I'm confident these results are more reliable. The detailed tables and visualizations are in the spreadsheet. Let me know if you want me to run any additional sensitivity analyses.
+
+ 
+From: "Okafor, Nneka" <okafor@univ.edu>
+Date: Monday, January 12, 2026 at 2:15 PM
+To: "Patel, Ravi" <patelr@univ.edu>
+Subject: Re: Analysis results
+
+ 
+Can you rerun with the corrected parameters? I realized after sending the first email that we need to adjust for the known sampling bias in the data collection phase. The compensation structure was different for the first 50 participants, which could affect their response patterns. Once you apply those corrections, the results should be more generalizable.
+
+ 
+From: Patel, Ravi <patelr@univ.edu>
+Sent: Monday, January 12, 2026 14:44 PM
+To: Okafor, Nneka <okafor@univ.edu>
+Subject: Analysis results
+
+ 
+Here are the initial results from the first pass. I ran the analysis with the parameters we discussed at our last meeting on January 8th. The dataset includes all 487 participants who completed both the baseline and six-month follow-up assessments. I excluded 23 participants who had missing data on more than 10% of the variables, leaving us with a final sample of 464 for the analysis.
+
+The primary outcome showed a significant effect (p < 0.001), with an effect size of d = 0.62. This is consistent with our power analysis expectations. The effect was robust across all three outcome measures. Secondary analyses by age group revealed some interesting patterns: the effect was larger for participants under 45 years old (d = 0.78) compared to those 45 and older (d = 0.48). Gender differences were less pronounced, with males showing d = 0.65 and females showing d = 0.59. These differences were not statistically significant, though the pattern suggests we might want to examine potential moderators more carefully.
+
+The regression models controlling for baseline demographics and clinical characteristics showed that the main effect remained significant (standardized β = 0.31, p < 0.001). When we added the three proposed mediators to the model, the direct effect was reduced to β = 0.18 (p = 0.004), suggesting that these mediators account for approximately 42% of the effect. The indirect effects through each mediator were all significant: psychological flexibility (β = 0.08, p = 0.002), mindfulness (β = 0.06, p = 0.008), and emotion regulation (β = 0.05, p = 0.012).
+
+We should discuss the implications of these mediation pathways in the paper. The fact that psychological flexibility shows the strongest indirect effect aligns with the theoretical framework but is worth highlighting. I've attached a detailed results table and a figure showing the mediation model. The raw data and analysis code are in the shared repository if you want to verify any calculations.
+
+One concern: the response patterns suggest some attrition bias. Participants who completed the follow-up assessment differed significantly from those who dropped out on several baseline variables. We might need to report sensitivity analyses using multiple imputation to address this limitation. I can run those analyses if you'd like, but let me know if you think they're necessary first.

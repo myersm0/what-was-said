@@ -1,0 +1,83 @@
+# source: Computer Graphics - Slack - https://app.slack.com/client/T000/search - Brave
+
+leo.n
+Sunday at 3:49 PM
+Is there a good resource for physically based shading models?
+
+A. Gupta
+:gpu:
+Sunday at 4:12 PM
+Check out Disney BRDF notes. They're from 2012 but still the gold standard for understanding the fundamentals.
+
+leo.n
+Sunday at 4:16 PM
+Is it beginner-friendly?
+
+A. Gupta
+:gpu:
+Sunday at 6:07 PM
+Somewhat—start with Lambert + Cook-Torrance basics. Lambert is linear Lambertian diffuse, super simple.
+
+6:09
+Then move to GGX distribution. It's a microfacet model that handles roughness well.
+
+sarah_c
+Sunday at 6:25 PM
+Also recommend Sebastien Lagarde's work on normal distribution functions. He has some great blog posts breaking down the math.
+
+leo.n
+Sunday at 6:28 PM
+I've heard Fresnel equations are tricky. How do you handle those?
+
+A. Gupta
+:gpu:
+Sunday at 6:32 PM
+Schlick's approximation is your friend. It's a polynomial fit to the Fresnel equations that's fast and accurate for most materials.
+
+sarah_c
+Sunday at 6:35 PM
+The Disney paper actually walks through Schlick's derivation. They also introduce the concept of lobe roughness, which decouples diffuse and specular roughness for more control.
+
+:star:
+1
+
+leo.n
+Sunday at 6:38 PM
+Are there any pitfalls with energy conservation?
+
+A. Gupta
+:gpu:
+Sunday at 6:42 PM
+Big one: if your specular lobe doesn't conserve energy, your metals will darken. Always make sure the integral of your BRDF over the hemisphere is ≤ 1. Disney's model handles this by tying roughness to the specular lobe shape.
+
+sarah_c
+Sunday at 6:45 PM
+We also recommend reading Brent Burley's follow-up work on skin shading. It covers subsurface scattering which isn't in the original Disney paper but is useful for organic materials.
+
+leo.n
+Sunday at 6:50 PM
+This is a lot to unpack. Should I implement from scratch or use an existing library?
+
+A. Gupta
+:gpu:
+Sunday at 6:54 PM
+Implement from scratch first so you understand what's happening. Then look at how others did it. Most game engines have open-source shader implementations you can study.
+
+sarah_c
+Sunday at 6:58 PM
+Yeah, UE5 and Godot both have clean shader code. UE's material expressions are particularly well-documented if you want to see how they layer complexity.
+
+:eyes:
+3
+
+leo.n
+Sunday at 7:02 PM
+Okay, I'll start with Disney + Schlick and see where it takes me. Thanks!
+
+A. Gupta
+:gpu:
+Sunday at 7:05 PM
+Good luck. Post your results if you want feedback.
+
+:100:
+1
