@@ -8,28 +8,38 @@ pub fn parse_markdown_sections(text: &str) -> Vec<SegmentedEntry> {
 	let mut current_heading_title: Option<String> = Option::None;
 	let mut current_start: usize = 1;
 
+	let mut in_code_fence = false;
+
 	for (index, line) in lines.iter().enumerate() {
 		let line_number = index + 1;
-		if let Some((level, title)) = parse_heading(line) {
-			if !current_body.is_empty() || current_heading_level.is_some() {
-				let body = finish_body(&current_body);
-				if !body.is_empty() || current_heading_level.is_some() {
-					entries.push(make_entry(
-						current_start,
-						line_number.saturating_sub(1),
-						&body,
-						current_heading_level,
-						current_heading_title.take(),
-					));
-				}
-			}
-			current_heading_level = Some(level);
-			current_heading_title = Some(title);
-			current_body.clear();
-			current_start = line_number;
-		} else {
+		let trimmed = line.trim_start();
+		if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+			in_code_fence = !in_code_fence;
 			current_body.push(*line);
+			continue;
 		}
+		if !in_code_fence {
+			if let Some((level, title)) = parse_heading(line) {
+				if !current_body.is_empty() || current_heading_level.is_some() {
+					let body = finish_body(&current_body);
+					if !body.is_empty() || current_heading_level.is_some() {
+						entries.push(make_entry(
+							current_start,
+							line_number.saturating_sub(1),
+							&body,
+							current_heading_level,
+							current_heading_title.take(),
+						));
+					}
+				}
+				current_heading_level = Some(level);
+				current_heading_title = Some(title);
+				current_body.clear();
+				current_start = line_number;
+				continue;
+			}
+		}
+		current_body.push(*line);
 	}
 
 	let body = finish_body(&current_body);
