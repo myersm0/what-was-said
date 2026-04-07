@@ -1,5 +1,8 @@
 # Commonplace
 
+[![CI](https://github.com/myersm0/commonplace/actions/workflows/ci.yml/badge.svg)](https://github.com/myersm0/commonplace/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/myersm0/commonplace)](https://github.com/myersm0/commonplace/releases/latest)
+
 A system for collecting, structuring, and querying personal text: emails, Slack threads, notes, web clips, transcripts, papers, etc.
 
 It does not just store documents. It parses them into structured units, tracks how they evolve over time, and makes them searchable lexically and semantically, with provenance preserved.
