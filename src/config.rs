@@ -415,10 +415,8 @@ impl Default for DeriveConfig {
 }
 
 impl DeriveConfig {
-	pub fn load(path: &Path) -> Result<Self> {
-		let derive_path = path.parent()
-			.unwrap_or(Path::new("."))
-			.join("derive.toml");
+	pub fn load(config_dir: &Path) -> Result<Self> {
+		let derive_path = config_dir.join("derive.toml");
 
 		if !derive_path.exists() {
 			return Ok(DeriveConfig::default());
@@ -513,3 +511,113 @@ Never include:
 
 Summary to compress:
 "#;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+	Ollama,
+	#[serde(rename = "openai")]
+	OpenAi,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenAiAuth {
+	#[serde(rename = "api_key")]
+	ApiKey,
+	OAuth,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiConfigToml {
+	base_url: Option<String>,
+	#[serde(default = "default_openai_auth")]
+	auth: OpenAiAuth,
+	oauth_token_url: Option<String>,
+	oauth_scope: Option<String>,
+}
+
+fn default_openai_auth() -> OpenAiAuth { OpenAiAuth::ApiKey }
+
+#[derive(Debug, Deserialize)]
+struct BackendConfigToml {
+	#[serde(default = "default_backend_kind")]
+	backend: BackendKind,
+	#[serde(default = "default_ollama_url")]
+	ollama_url: String,
+	model: Option<String>,
+	embed_model: Option<String>,
+	openai: Option<OpenAiConfigToml>,
+}
+
+fn default_backend_kind() -> BackendKind { BackendKind::Ollama }
+fn default_ollama_url() -> String { "http://localhost:11434".to_string() }
+
+#[derive(Debug, Clone)]
+pub struct OpenAiConfig {
+	pub base_url: String,
+	pub auth: OpenAiAuth,
+	pub oauth_token_url: Option<String>,
+	pub oauth_scope: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackendConfig {
+	pub backend: BackendKind,
+	pub ollama_url: String,
+	pub model: Option<String>,
+	pub embed_model: Option<String>,
+	pub openai: OpenAiConfig,
+}
+
+impl Default for BackendConfig {
+	fn default() -> Self {
+		BackendConfig {
+			backend: BackendKind::Ollama,
+			ollama_url: default_ollama_url(),
+			model: None,
+			embed_model: None,
+			openai: OpenAiConfig {
+				base_url: "https://api.openai.com/v1".to_string(),
+				auth: OpenAiAuth::ApiKey,
+				oauth_token_url: None,
+				oauth_scope: None,
+			},
+		}
+	}
+}
+
+impl BackendConfig {
+	pub fn load(config_dir: &Path) -> Result<Self> {
+		let path = config_dir.join("backend.toml");
+		if !path.exists() {
+			return Ok(BackendConfig::default());
+		}
+		let text = std::fs::read_to_string(&path)
+			.with_context(|| format!("reading backend config from {}", path.display()))?;
+		let raw: BackendConfigToml = toml::from_str(&text)
+			.context("parsing backend.toml")?;
+		let openai = match raw.openai {
+			Some(o) => OpenAiConfig {
+				base_url: o.base_url
+					.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+				auth: o.auth,
+				oauth_token_url: o.oauth_token_url,
+				oauth_scope: o.oauth_scope,
+			},
+			None => OpenAiConfig {
+				base_url: "https://api.openai.com/v1".to_string(),
+				auth: OpenAiAuth::ApiKey,
+				oauth_token_url: None,
+				oauth_scope: None,
+			},
+		};
+		Ok(BackendConfig {
+			backend: raw.backend,
+			ollama_url: raw.ollama_url,
+			model: raw.model,
+			embed_model: raw.embed_model,
+			openai,
+		})
+	}
+}

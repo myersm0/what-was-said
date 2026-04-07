@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 
-use commonplace::config;
+use commonplace::config::{self, BackendConfig, BackendKind};
 use commonplace::derive::{self, DeriveOptions};
 use commonplace::ingest;
 use commonplace::llm::LlmBackend;
@@ -22,20 +22,20 @@ struct Cli {
 	#[arg(long, global = true, value_name = "PATH", help = "Database path")]
 	db: Option<PathBuf>,
 
-	#[arg(long, global = true, value_name = "PATH", help = "Config file path")]
+	#[arg(long, global = true, value_name = "PATH", help = "Config directory path")]
 	config: Option<PathBuf>,
 
-	#[arg(long, global = true, default_value = "ollama", help = "LLM backend (ollama or openai)")]
-	backend: String,
+	#[arg(long, global = true, help = "LLM backend (ollama or openai)")]
+	backend: Option<String>,
 
-	#[arg(long, global = true, default_value = "http://localhost:11434", help = "Ollama endpoint")]
-	ollama: String,
+	#[arg(long, global = true, help = "Ollama endpoint")]
+	ollama: Option<String>,
 
-	#[arg(long, global = true, default_value = "mistral-nemo", help = "Model for segmentation")]
-	model: String,
+	#[arg(long, global = true, help = "Model for generation")]
+	model: Option<String>,
 
-	#[arg(long, global = true, default_value = "qwen3-embedding:8b", help = "Model for embeddings")]
-	embed_model: String,
+	#[arg(long, global = true, help = "Model for embeddings")]
+	embed_model: Option<String>,
 
 	#[arg(long, global = true, help = "Output as JSON")]
 	json: bool,
@@ -150,30 +150,57 @@ fn open_db(path: &Path) -> Result<rusqlite::Connection> {
 	Ok(connection)
 }
 
-fn create_backend(backend_name: &str, ollama_url: &str) -> Result<Box<dyn LlmBackend>> {
-	match backend_name {
-		"ollama" => Ok(Box::new(OllamaClient::new(ollama_url))),
-		"openai" => Ok(Box::new(OpenAiClient::from_env()?)),
-		other => anyhow::bail!("unknown backend: {}", other),
+fn create_backend(backend_config: &BackendConfig) -> Result<Box<dyn LlmBackend>> {
+	match backend_config.backend {
+		BackendKind::Ollama => Ok(Box::new(OllamaClient::new(&backend_config.ollama_url))),
+		BackendKind::OpenAi => Ok(Box::new(OpenAiClient::from_config(&backend_config.openai)?)),
 	}
+}
+
+fn default_config_dir() -> PathBuf {
+	dirs::config_dir()
+		.unwrap_or_else(|| PathBuf::from("."))
+		.join("commonplace")
 }
 
 fn main() -> Result<()> {
 	let cli = Cli::parse();
 
+	let config_dir = cli.config.clone().unwrap_or_else(default_config_dir);
 	let db_path = cli.db.unwrap_or_else(default_db_path);
-	let config = config::load_or_default(cli.config.as_deref())?;
+	let config_file = config_dir.join("config.toml");
+	let config = config::load_or_default(
+		Some(config_file.as_path()).filter(|p| p.exists()),
+	)?;
+	let mut backend_config = BackendConfig::load(&config_dir)?;
 	let connection = open_db(&db_path)?;
 	let json_output = cli.json;
-	let backend_name = cli.backend.clone();
-	let ollama_url = cli.ollama.clone();
-	let model = cli.model.clone();
-	let embed_model = cli.embed_model.clone();
-	let config_path = cli.config.clone();
+
+	if let Some(b) = &cli.backend {
+		backend_config.backend = match b.as_str() {
+			"ollama" => BackendKind::Ollama,
+			"openai" => BackendKind::OpenAi,
+			other => anyhow::bail!("unknown backend: {}", other),
+		};
+	}
+	if let Some(url) = cli.ollama {
+		backend_config.ollama_url = url;
+	}
+	if let Some(m) = cli.model {
+		backend_config.model = Some(m);
+	}
+	if let Some(m) = cli.embed_model {
+		backend_config.embed_model = Some(m);
+	}
+
+	let model = backend_config.model.clone()
+		.unwrap_or_else(|| "mistral-nemo".to_string());
+	let embed_model = backend_config.embed_model.clone()
+		.unwrap_or_else(|| "qwen3-embedding:8b".to_string());
 
 	match cli.command {
 		Some(Command::Ingest { directory, force }) => {
-			let backend = create_backend(&backend_name, &ollama_url)?;
+			let backend = create_backend(&backend_config)?;
 			let (ingested, skipped) = ingest::ingest_directory(
 				&connection, backend.as_ref(), &model, &directory, &config, force,
 			)?;
@@ -276,7 +303,7 @@ fn main() -> Result<()> {
 			}
 		}
 		Some(Command::Embed { limit }) => {
-			let backend = create_backend(&backend_name, &ollama_url)?;
+			let backend = create_backend(&backend_config)?;
 			let pending = storage::count_chunks_without_embeddings(&connection)?;
 			let existing = storage::count_chunks_with_embeddings(&connection)?;
 			println!("embeddings: {} existing, {} pending", existing, pending);
@@ -313,7 +340,7 @@ fn main() -> Result<()> {
 				anyhow::bail!("no embeddings yet - run 'commonplace embed' first");
 			}
 
-			let backend = create_backend(&backend_name, &ollama_url)?;
+			let backend = create_backend(&backend_config)?;
 			let query_embedding = backend.embed(&query, &embed_model)?;
 			let results = storage::find_similar_chunks(&connection, &query_embedding, 10)?;
 
@@ -340,9 +367,7 @@ fn main() -> Result<()> {
 			}
 		}
 		Some(Command::Derive { missing, stale, bad_detailed, bad_brief, force, status, limit }) => {
-			let derive_config = config::DeriveConfig::load(
-				config_path.as_deref().unwrap_or(Path::new(""))
-			)?;
+			let derive_config = config::DeriveConfig::load(&config_dir)?;
 
 			if status {
 				if json_output {
@@ -354,7 +379,7 @@ fn main() -> Result<()> {
 				return Ok(());
 			}
 
-			let backend = create_backend(&backend_name, &ollama_url)?;
+			let backend = create_backend(&backend_config)?;
 			derive::run(&connection, backend.as_ref(), &derive_config, &DeriveOptions {
 				force,
 				missing,
@@ -396,11 +421,11 @@ fn main() -> Result<()> {
 			}
 		}
 		Some(Command::Serve { port }) => {
-			let backend = create_backend(&backend_name, &ollama_url)?;
+			let backend = create_backend(&backend_config)?;
 			serve::run(connection, backend, embed_model, port)?;
 		}
 		Some(Command::Browse { tags, exclude, include_all }) => {
-			let backend = create_backend(&backend_name, &ollama_url)?;
+			let backend = create_backend(&backend_config)?;
 			let filter = tui::GlobalFilter {
 				include: tags,
 				exclude,
@@ -413,7 +438,7 @@ fn main() -> Result<()> {
 			tui::run(&connection, filter, search_config, cli.theme.as_deref())?;
 		}
 		None => {
-			let backend = create_backend(&backend_name, &ollama_url)?;
+			let backend = create_backend(&backend_config)?;
 			let filter = tui::GlobalFilter {
 				include: None,
 				exclude: Vec::new(),

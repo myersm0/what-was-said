@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
+use crate::config::{OpenAiAuth, OpenAiConfig};
 use crate::llm::LlmBackend;
 
 #[derive(Serialize)]
@@ -53,30 +56,121 @@ struct EmbeddingData {
 	embedding: Vec<f32>,
 }
 
+#[derive(Deserialize)]
+struct TokenResponse {
+	access_token: String,
+	expires_in: u64,
+}
+
+struct CachedToken {
+	access_token: String,
+	expires_at: Instant,
+}
+
+enum AuthStrategy {
+	ApiKey(String),
+	OAuth {
+		token_url: String,
+		client_id: String,
+		client_secret: String,
+		scope: String,
+		cached_token: Mutex<Option<CachedToken>>,
+	},
+}
+
 pub struct OpenAiClient {
 	base_url: String,
-	api_key: String,
+	auth: AuthStrategy,
 	client: reqwest::blocking::Client,
 }
 
 impl OpenAiClient {
-	pub fn new(base_url: &str, api_key: &str) -> Self {
-		OpenAiClient {
-			base_url: base_url.to_string(),
-			api_key: api_key.to_string(),
-			client: reqwest::blocking::Client::builder()
-				.timeout(std::time::Duration::from_secs(600))
-				.build()
-				.expect("failed to build http client"),
-		}
+	pub fn from_config(config: &OpenAiConfig) -> Result<Self> {
+		let auth = match config.auth {
+			OpenAiAuth::ApiKey => {
+				let api_key = std::env::var("OPENAI_API_KEY")
+					.context("OPENAI_API_KEY not set (required for auth = \"api_key\")")?;
+				AuthStrategy::ApiKey(api_key)
+			}
+			OpenAiAuth::OAuth => {
+				let token_url = config.oauth_token_url.as_ref()
+					.context("oauth_token_url required when auth = \"oauth\"")?
+					.clone();
+				let scope = config.oauth_scope.as_ref()
+					.context("oauth_scope required when auth = \"oauth\"")?
+					.clone();
+				let client_id = std::env::var("OAUTH2_CLIENT_ID")
+					.context("OAUTH2_CLIENT_ID not set (required for auth = \"oauth\")")?;
+				let client_secret = std::env::var("OAUTH2_CLIENT_SECRET")
+					.context("OAUTH2_CLIENT_SECRET not set (required for auth = \"oauth\")")?;
+				AuthStrategy::OAuth {
+					token_url,
+					client_id,
+					client_secret,
+					scope,
+					cached_token: Mutex::new(None),
+				}
+			}
+		};
+		let client = reqwest::blocking::Client::builder()
+			.timeout(Duration::from_secs(600))
+			.build()
+			.context("failed to build http client")?;
+		Ok(OpenAiClient {
+			base_url: config.base_url.trim_end_matches('/').to_string(),
+			auth,
+			client,
+		})
 	}
 
 	pub fn from_env() -> Result<Self> {
-		let api_key = std::env::var("OPENAI_API_KEY")
-			.context("OPENAI_API_KEY environment variable not set")?;
-		let base_url = std::env::var("OPENAI_API_BASE")
-			.unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-		Ok(Self::new(&base_url, &api_key))
+		let config = OpenAiConfig {
+			base_url: std::env::var("OPENAI_API_BASE")
+				.unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+			auth: OpenAiAuth::ApiKey,
+			oauth_token_url: None,
+			oauth_scope: None,
+		};
+		Self::from_config(&config)
+	}
+
+	fn get_bearer_token(&self) -> Result<String> {
+		match &self.auth {
+			AuthStrategy::ApiKey(key) => Ok(key.clone()),
+			AuthStrategy::OAuth { token_url, client_id, client_secret, scope, cached_token } => {
+				{
+					let guard = cached_token.lock().unwrap();
+					if let Some(ref cached) = *guard {
+						if Instant::now() < cached.expires_at {
+							return Ok(cached.access_token.clone());
+						}
+					}
+				}
+				let params = [
+					("client_id", client_id.as_str()),
+					("client_secret", client_secret.as_str()),
+					("scope", scope.as_str()),
+					("grant_type", "client_credentials"),
+				];
+				let response: TokenResponse = self.client
+					.post(token_url)
+					.form(&params)
+					.send()?
+					.error_for_status()
+					.context("OAuth token request failed")?
+					.json()?;
+				let margin = Duration::from_secs(60);
+				let expires_at = Instant::now()
+					+ Duration::from_secs(response.expires_in)
+					- margin;
+				let access_token = response.access_token.clone();
+				*cached_token.lock().unwrap() = Some(CachedToken {
+					access_token: response.access_token,
+					expires_at,
+				});
+				Ok(access_token)
+			}
+		}
 	}
 }
 
@@ -113,10 +207,11 @@ impl LlmBackend for OpenAiClient {
 			response_format,
 		};
 
+		let token = self.get_bearer_token()?;
 		let response: ChatResponse = self
 			.client
 			.post(format!("{}/chat/completions", self.base_url))
-			.bearer_auth(&self.api_key)
+			.bearer_auth(&token)
 			.json(&request)
 			.send()?
 			.error_for_status()
@@ -137,10 +232,11 @@ impl LlmBackend for OpenAiClient {
 			input: text.to_string(),
 		};
 
+		let token = self.get_bearer_token()?;
 		let response: EmbeddingResponse = self
 			.client
 			.post(format!("{}/embeddings", self.base_url))
-			.bearer_auth(&self.api_key)
+			.bearer_auth(&token)
 			.json(&request)
 			.send()?
 			.error_for_status()
