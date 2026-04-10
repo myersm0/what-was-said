@@ -9,7 +9,8 @@ use ratatui::{
 };
 use rusqlite::Connection;
 
-use crate::storage::{self, GroupedSearchResult, SearchSortColumn};
+use crate::query::{self, GroupedSearchResult, SearchSortColumn};
+use crate::storage;
 use crate::util::truncate_str;
 use super::{App, Mode, SearchConfig, SearchField, SearchMode};
 use super::render::parse_snippet;
@@ -103,7 +104,7 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 
 	match app.search_mode {
 		SearchMode::Fts5 => {
-			let all_results = storage::search_filtered(
+			let all_results = query::search_filtered(
 				connection,
 				&app.search_query,
 				app.search_sort_column,
@@ -132,7 +133,7 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 				}
 			};
 
-			let all_results = storage::find_similar_chunks_filtered(
+			let all_grouped = query::find_similar_grouped_filtered(
 				connection,
 				&query_embedding,
 				50,
@@ -141,47 +142,10 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 				date_to,
 			)?;
 
-			let filtered: Vec<_> = all_results.into_iter()
+			app.search_results = all_grouped.into_iter()
 				.filter(|r| allowed_doc_ids.contains(&r.document_id))
-				.take(30)
 				.collect();
 
-			let mut grouped: Vec<GroupedSearchResult> = Vec::new();
-			for chunk in filtered {
-				let rank = -(chunk.similarity as f64);
-				let hit = storage::ChunkHit {
-					entry_id: 0,
-					entry_position: chunk.entry_position,
-					chunk_index: chunk.chunk_index,
-					chunk_body: chunk.body.clone(),
-					snippet: chunk.body.chars().take(150).collect(),
-					author: chunk.author,
-					heading_title: None,
-					rank,
-				};
-
-				if let Some(doc) = grouped.iter_mut().find(|d| d.document_id == chunk.document_id) {
-					if rank < doc.best_rank {
-						doc.best_rank = rank;
-					}
-					doc.chunks.push(hit);
-				} else {
-					grouped.push(GroupedSearchResult {
-						document_id: chunk.document_id,
-						source_title: chunk.source_title,
-						clip_date: chunk.clip_date,
-						best_rank: rank,
-						chunks: vec![hit],
-					});
-				}
-			}
-
-			for doc in &mut grouped {
-				doc.chunks.sort_by(|a, b| a.rank.partial_cmp(&b.rank).unwrap_or(std::cmp::Ordering::Equal));
-			}
-			grouped.sort_by(|a, b| a.best_rank.partial_cmp(&b.best_rank).unwrap_or(std::cmp::Ordering::Equal));
-
-			app.search_results = grouped;
 			app.total_search_chunks = app.search_results.iter().map(|r| r.chunks.len()).sum();
 		}
 	}

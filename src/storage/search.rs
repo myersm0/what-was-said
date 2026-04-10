@@ -1,6 +1,5 @@
 use anyhow::Result;
 use rusqlite::Connection;
-use serde::Serialize;
 
 pub struct ChunkSearchResult {
 	pub chunk_id: i64,
@@ -17,49 +16,13 @@ pub struct ChunkSearchResult {
 	pub rank: f64,
 }
 
-#[derive(Serialize)]
-pub struct GroupedSearchResult {
-	pub document_id: i64,
-	pub source_title: String,
-	pub clip_date: String,
-	pub best_rank: f64,
-	pub chunks: Vec<ChunkHit>,
-}
-
-#[derive(Serialize)]
-pub struct ChunkHit {
-	pub entry_id: i64,
-	pub entry_position: u32,
-	pub chunk_index: u32,
-	pub chunk_body: String,
-	pub snippet: String,
-	pub author: Option<String>,
-	pub heading_title: Option<String>,
-	pub rank: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchSortColumn {
-	Score,
-	Date,
-}
-
-pub fn search(
+pub fn raw_fts_search(
 	connection: &Connection,
 	query: &str,
-	sort_by: SearchSortColumn,
-) -> Result<Vec<GroupedSearchResult>> {
-	search_filtered(connection, query, sort_by, None, None, None)
-}
-
-pub fn search_filtered(
-	connection: &Connection,
-	query: &str,
-	sort_by: SearchSortColumn,
 	author_like: Option<&str>,
 	date_from: Option<&str>,
 	date_to: Option<&str>,
-) -> Result<Vec<GroupedSearchResult>> {
+) -> Result<Vec<ChunkSearchResult>> {
 	let prefix_query: String = query
 		.split_whitespace()
 		.map(|word| format!("{}*", word))
@@ -116,76 +79,5 @@ pub fn search_filtered(
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 
-	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
-	for row in rows {
-		let doc = grouped.iter_mut().find(|d| d.document_id == row.document_id);
-		let hit = ChunkHit {
-			entry_id: row.entry_id,
-			entry_position: row.entry_position,
-			chunk_index: row.chunk_index,
-			chunk_body: row.chunk_body,
-			snippet: row.snippet,
-			author: row.author,
-			heading_title: row.heading_title,
-			rank: row.rank,
-		};
-		match doc {
-			Some(doc) => {
-				let dominated_by_existing = doc.chunks.iter().any(|c| {
-					(c.entry_id == hit.entry_id && c.chunk_index == hit.chunk_index)
-						|| snippets_similar(&c.snippet, &hit.snippet)
-				});
-				if !dominated_by_existing {
-					doc.chunks.retain(|c| !snippets_similar(&hit.snippet, &c.snippet) || hit.rank >= c.rank);
-					if hit.rank < doc.best_rank {
-						doc.best_rank = hit.rank;
-					}
-					doc.chunks.push(hit);
-				}
-			}
-			None => grouped.push(GroupedSearchResult {
-				document_id: row.document_id,
-				source_title: row.source_title,
-				clip_date: row.clip_date.clone(),
-				best_rank: hit.rank,
-				chunks: vec![hit],
-			}),
-		}
-	}
-
-	for doc in &mut grouped {
-		doc.chunks.sort_by_key(|c| (c.entry_position, c.chunk_index));
-	}
-
-	match sort_by {
-		SearchSortColumn::Score => {
-			grouped.sort_by(|a, b| a.best_rank.partial_cmp(&b.best_rank).unwrap_or(std::cmp::Ordering::Equal));
-		}
-		SearchSortColumn::Date => {
-			grouped.sort_by(|a, b| b.clip_date.cmp(&a.clip_date));
-		}
-	}
-
-	Ok(grouped)
-}
-
-fn snippets_similar(a: &str, b: &str) -> bool {
-	let a_clean = a.trim().replace('\x01', "").replace('\x02', "").replace('\x03', "");
-	let b_clean = b.trim().replace('\x01', "").replace('\x02', "").replace('\x03', "");
-
-	if a_clean == b_clean {
-		return true;
-	}
-
-	let a_words: Vec<&str> = a_clean.split_whitespace().collect();
-	let b_words: Vec<&str> = b_clean.split_whitespace().collect();
-
-	if a_words.len() < 5 || b_words.len() < 5 {
-		return false;
-	}
-
-	let overlap = a_words.iter().filter(|w| b_words.contains(w)).count();
-	let min_len = a_words.len().min(b_words.len());
-
-	overlap as f64 / min_len as f64 > 0.8
+	Ok(rows)
 }

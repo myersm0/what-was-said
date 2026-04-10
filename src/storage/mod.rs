@@ -302,7 +302,7 @@ mod tests {
 		let db = setup_db();
 		insert_test_document(&db, "Rust Guide", "Rust is a systems programming language");
 		insert_test_document(&db, "Python Guide", "Python is a dynamic programming language");
-		let results = search(&db, "rust", SearchSortColumn::Score).unwrap();
+		let results = crate::query::search(&db, "rust", crate::query::SearchSortColumn::Score).unwrap();
 		assert_eq!(results.len(), 1);
 		assert_eq!(results[0].source_title, "Rust Guide");
 	}
@@ -311,7 +311,7 @@ mod tests {
 	fn fts5_search_no_results() {
 		let db = setup_db();
 		insert_test_document(&db, "Doc", "some content");
-		let results = search(&db, "nonexistent", SearchSortColumn::Score).unwrap();
+		let results = crate::query::search(&db, "nonexistent", crate::query::SearchSortColumn::Score).unwrap();
 		assert!(results.is_empty());
 	}
 
@@ -319,7 +319,7 @@ mod tests {
 	fn fts5_search_prefix_matching() {
 		let db = setup_db();
 		insert_test_document(&db, "Doc", "the cathedral and the bazaar");
-		let results = search(&db, "cathed", SearchSortColumn::Score).unwrap();
+		let results = crate::query::search(&db, "cathed", crate::query::SearchSortColumn::Score).unwrap();
 		assert_eq!(results.len(), 1);
 	}
 

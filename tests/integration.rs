@@ -5,7 +5,8 @@ use what_was_said::config;
 use what_was_said::ingest;
 use what_was_said::markdown;
 use what_was_said::minhash;
-use what_was_said::storage::{self, SearchSortColumn, SortColumn, SortDirection};
+use what_was_said::query::{self, SearchSortColumn};
+use what_was_said::storage::{self, SortColumn, SortDirection};
 use what_was_said::types::*;
 use what_was_said::util;
 
@@ -59,7 +60,7 @@ fn ingest_markdown_and_search() {
 
 	ingest_text(&db, "Rust Safety Guide - Brave", &body, Some("markdown"));
 
-	let results = storage::search(&db, "borrow checker", SearchSortColumn::Score).unwrap();
+	let results = query::search(&db, "borrow checker", SearchSortColumn::Score).unwrap();
 	assert_eq!(results.len(), 1);
 	assert!(results[0].chunks.iter().any(|c| c.chunk_body.contains("borrow checker")));
 }
@@ -72,7 +73,7 @@ fn ingest_multiple_documents_search_ranks() {
 	ingest_text(&db, "Python Book", "Python uses garbage collection for memory management.", Some("markdown"));
 	ingest_text(&db, "Cooking Guide", "Preheat the oven to 350 degrees.", Some("markdown"));
 
-	let results = storage::search(&db, "memory", SearchSortColumn::Score).unwrap();
+	let results = query::search(&db, "memory", SearchSortColumn::Score).unwrap();
 	assert_eq!(results.len(), 2);
 
 	let titles: Vec<&str> = results.iter().map(|r| r.source_title.as_str()).collect();
@@ -144,7 +145,7 @@ fn copilot_email_ingest_preserves_authors() {
 	assert_eq!(doc.entries[0].author.as_deref(), Some("Alice Smith"));
 	assert_eq!(doc.entries[1].author.as_deref(), Some("Bob Jones"));
 
-	let results = storage::search(&db, "update", SearchSortColumn::Score).unwrap();
+	let results = query::search(&db, "update", SearchSortColumn::Score).unwrap();
 	assert!(!results.is_empty());
 }
 

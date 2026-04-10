@@ -10,7 +10,8 @@ use what_was_said::ingest;
 use what_was_said::llm::LlmBackend;
 use what_was_said::ollama::OllamaClient;
 use what_was_said::openai::OpenAiClient;
-use what_was_said::storage::{self, SearchSortColumn};
+use what_was_said::query::{self, SearchSortColumn};
+use what_was_said::storage;
 use what_was_said::serve;
 use what_was_said::tui;
 use what_was_said::util;
@@ -227,14 +228,10 @@ fn main() -> Result<()> {
 			if query.is_empty() {
 				anyhow::bail!("search requires a query");
 			}
-			let results = storage::search(&connection, &query, SearchSortColumn::Score)?;
+			let results = query::search(&connection, &query, SearchSortColumn::Score)?;
 			if json_output {
 				let mut results = results;
-				for doc in &mut results {
-					for chunk in &mut doc.chunks {
-						chunk.snippet = util::strip_fts_markers(&chunk.snippet);
-					}
-				}
+				query::strip_fts_markers(&mut results);
 				println!("{}", serde_json::to_string_pretty(&results)?);
 			} else if results.is_empty() {
 				println!("no results");

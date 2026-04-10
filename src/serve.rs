@@ -9,6 +9,7 @@ use axum::{
 use std::sync::{Arc, Mutex};
 
 use crate::llm::LlmBackend;
+use crate::query::{self, SearchSortColumn};
 use crate::storage;
 
 struct AppState {
@@ -38,17 +39,13 @@ async fn search_handler(
 	Query(params): Query<SearchParams>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
 	let sort = match params.sort.as_deref() {
-		Some("date") => storage::SearchSortColumn::Date,
-		_ => storage::SearchSortColumn::Score,
+		Some("date") => SearchSortColumn::Date,
+		_ => SearchSortColumn::Score,
 	};
 	let connection = state.connection.lock().map_err(|e| err_500(e))?;
-	let mut results = storage::search(&connection, &params.q, sort)
+	let mut results = query::search(&connection, &params.q, sort)
 		.map_err(|e| err_500(e))?;
-	for doc in &mut results {
-		for chunk in &mut doc.chunks {
-			chunk.snippet = crate::util::strip_fts_markers(&chunk.snippet);
-		}
-	}
+	query::strip_fts_markers(&mut results);
 	Ok(Json(results))
 }
 

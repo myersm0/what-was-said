@@ -24,10 +24,8 @@ use rusqlite::Connection;
 use std::io;
 
 use crate::config::TagConfig;
-use crate::storage::{
-	self, DocumentContent, DocumentSummary,
-	GroupedSearchResult, SearchSortColumn, SortColumn, SortDirection,
-};
+use crate::query::{GroupedSearchResult, SearchSortColumn};
+use crate::storage::{self, DocumentContent, DocumentSummary, SortColumn, SortDirection};
 use crate::util::extract_group_key;
 
 pub(super) fn entry_chunk_count(entry: &storage::EntryContent) -> usize {
