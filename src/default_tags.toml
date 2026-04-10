@@ -1,7 +1,7 @@
-# Tag configuration for commonplace
+# Tag configuration for what-was-said
 # Place this file at the same location as the database:
-#   macOS: ~/Library/Application Support/commonplace/tags.toml
-#   Linux: ~/.local/share/commonplace/tags.toml
+#   macOS: ~/Library/Application Support/what-was-said/tags.toml
+#   Linux: ~/.local/share/what-was-said/tags.toml
 
 # Default exclusions - these tags are filtered out unless you use --include-all
 # or explicitly include them with --tags

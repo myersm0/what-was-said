@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="myersm0/commonplace"
+REPO="myersm0/what-was-said"
 BIN_DIR="${HOME}/.local/bin"
 
 info() { printf "\033[0;34m%s\033[0m\n" "$*"; }
@@ -23,7 +23,7 @@ detect_platform() {
 		*)             err "Unsupported architecture: $arch" ;;
 	esac
 
-	echo "commonplace-${os}-${arch}"
+	echo "what-was-said-${os}-${arch}"
 }
 
 main() {
@@ -37,19 +37,19 @@ main() {
 	trap 'rm -rf "$tmpdir"' EXIT
 
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL "$url" -o "${tmpdir}/commonplace.tar.gz"
+		curl -fsSL "$url" -o "${tmpdir}/what-was-said.tar.gz"
 	elif command -v wget >/dev/null 2>&1; then
-		wget -qO "${tmpdir}/commonplace.tar.gz" "$url"
+		wget -qO "${tmpdir}/what-was-said.tar.gz" "$url"
 	else
 		err "Neither curl nor wget found."
 	fi
 
-	tar xzf "${tmpdir}/commonplace.tar.gz" -C "$tmpdir"
+	tar xzf "${tmpdir}/what-was-said.tar.gz" -C "$tmpdir"
 
 	mkdir -p "$BIN_DIR"
-	cp "${tmpdir}/${artifact}" "${BIN_DIR}/commonplace"
-	chmod +x "${BIN_DIR}/commonplace"
-	info "Installed binary to ${BIN_DIR}/commonplace"
+	cp "${tmpdir}/${artifact}" "${BIN_DIR}/what-was-said"
+	chmod +x "${BIN_DIR}/what-was-said"
+	info "Installed binary to ${BIN_DIR}/what-was-said"
 
 	echo ""
 	case ":$PATH:" in

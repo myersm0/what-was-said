@@ -1,7 +1,7 @@
-# Commonplace
+# what-was-said
 
-[![CI](https://github.com/myersm0/commonplace/actions/workflows/ci.yml/badge.svg)](https://github.com/myersm0/commonplace/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/myersm0/commonplace)](https://github.com/myersm0/commonplace/releases/latest)
+[![CI](https://github.com/myersm0/what-was-said/actions/workflows/ci.yml/badge.svg)](https://github.com/myersm0/what-was-said/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/myersm0/what-was-said)](https://github.com/myersm0/what-was-said/releases/latest)
 
 A system for collecting, structuring, and querying personal text: emails, Slack threads, notes, web clips, transcripts, papers, etc.
 
@@ -9,15 +9,13 @@ It does not just store documents. It parses them into structured units, tracks h
 
 Built on SQLite, FTS5, and [sqlite-vec](https://github.com/asg017/sqlite-vec), with optional LLM integration for embeddings, summaries, and information extraction.
 
-The name follows the tradition of the [commonplace book](https://en.wikipedia.org/wiki/Commonplace_book): a personal system for collecting excerpts, observations, and ideas. This project extends that idea into a computational system that can search, summarize, and reason over what you've collected.
-
 **Status:** usable but in early development, API subject to rapid change.
 
 ---
 
 ## What it does
 
-Commonplace turns raw text into a structured, queryable collection:
+Turns raw text into a structured, queryable collection:
 
 - Ingests heterogeneous sources (notes, emails, Slack exports, transcripts, web clips, papers)
 - Segments them into entries (messages, paragraphs, sections) and chunks (~300-word fragments for indexing, with sentence-boundary and paragraph-boundary snapping)
@@ -28,7 +26,7 @@ Commonplace turns raw text into a structured, queryable collection:
 - Merges growing conversation threads incrementally without duplication
 - Generates tiered LLM summaries (brief and detailed, with prompt selection by document length)
 
-Structured segmentation and metadata extraction for non-standard formats (e.g. proprietary email exports, internal Slack threads) require you to supply a custom preprocessor script. Commonplace calls this script during ingestion when one is configured for a doctype — the script is responsible for parsing the raw input and emitting the structured representation that Commonplace then ingests. See `DEVELOPMENT.md` and the `config.toml` doctype format for details, and `examples/` for working preprocessor scripts.
+Structured segmentation and metadata extraction for non-standard formats (e.g. proprietary email exports, internal Slack threads) require you to supply a custom preprocessor script. `what-was-said` calls this script during ingestion when one is configured for a doctype — the script is responsible for parsing the raw input and emitting the structured representation that `what-was-said` then ingests. See `DEVELOPMENT.md` and the `config.toml` doctype format for details, and `examples/` for working preprocessor scripts.
 
 ---
 
@@ -36,7 +34,7 @@ Structured segmentation and metadata extraction for non-standard formats (e.g. p
 
 **Structured ingestion** — Documents are parsed into entries and chunks, preserving authorship, timestamps, and hierarchy. Markdown parsing is code-fence-aware (comments inside fenced code blocks are not treated as headings).
 
-**Incremental merging** — Conversation-like sources (Slack, email) grow over time. Commonplace detects overlap and appends new content without duplication.
+**Incremental merging** — Conversation-like sources (Slack, email) grow over time. Detects overlap and appends new content without duplication.
 
 **Provenance-first** — Every piece of text is traceable to its source and position within the original document.
 
@@ -53,7 +51,7 @@ Structured segmentation and metadata extraction for non-standard formats (e.g. p
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/myersm0/commonplace/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/myersm0/what-was-said/main/install.sh | sh
 ```
 
 Installs a prebuilt binary to `~/.local/bin/` (Linux x86_64, macOS x86_64, macOS ARM).
@@ -61,10 +59,10 @@ Installs a prebuilt binary to `~/.local/bin/` (Linux x86_64, macOS x86_64, macOS
 ### From source
 
 ```bash
-git clone https://github.com/myersm0/commonplace.git
-cd commonplace
+git clone https://github.com/myersm0/what-was-said.git
+cd what-was-said
 cargo build --release
-cp target/release/commonplace ~/.local/bin/
+cp target/release/what-was-said ~/.local/bin/
 ```
 
 ### Requirements
@@ -100,45 +98,45 @@ See [Configuration](#configuration) for `backend.toml` setup.
 
 **Ingest**
 ```bash
-commonplace ingest ~/inbox/clips/
+what-was-said ingest ~/inbox/clips/
 ```
 
 **Browse and search**
 ```bash
-commonplace browse
-commonplace browse --theme gruvbox
-commonplace search "keyword query"
-commonplace similar "semantic query"
-commonplace get 42
+what-was-said browse
+what-was-said browse --theme gruvbox
+what-was-said search "keyword query"
+what-was-said similar "semantic query"
+what-was-said get 42
 ```
 
 **Enrich**
 ```bash
-commonplace embed              # compute embeddings
-commonplace derive             # generate summaries (missing only)
-commonplace derive --force     # regenerate all
-commonplace derive --status    # check progress
+what-was-said embed              # compute embeddings
+what-was-said derive             # generate summaries (missing only)
+what-was-said derive --force     # regenerate all
+what-was-said derive --status    # check progress
 ```
 
 **Serve**
 ```bash
-commonplace serve              # default port 3030
-commonplace serve --port 8080
+what-was-said serve              # default port 3030
+what-was-said serve --port 8080
 ```
 
 **JSON output (for scripting)**
 ```bash
-commonplace search "query" --json
-commonplace similar "query" --json
-commonplace get 42 --json
-commonplace stats --json
-commonplace dump --json
-commonplace derive --status --json
+what-was-said search "query" --json
+what-was-said similar "query" --json
+what-was-said get 42 --json
+what-was-said stats --json
+what-was-said dump --json
+what-was-said derive --status --json
 ```
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
-The `--config` flag specifies the config directory (default: `~/.config/commonplace/`). The `--backend`, `--ollama`, `--model`, and `--embed-model` flags override their corresponding values from `backend.toml`.
+The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). The `--backend`, `--ollama`, `--model`, and `--embed-model` flags override their corresponding values from `backend.toml`.
 
 ---
 
@@ -149,11 +147,11 @@ The `examples/` directory contains sample documents, preprocessor scripts, and a
 ```bash
 pip install -r examples/parsers/requirements.txt
 
-commonplace --config examples ingest examples/inbox/email/
-commonplace --config examples ingest examples/inbox/slack/
-commonplace --config examples ingest examples/inbox/markdown/
+what-was-said --config examples ingest examples/inbox/email/
+what-was-said --config examples ingest examples/inbox/slack/
+what-was-said --config examples ingest examples/inbox/markdown/
 
-commonplace browse
+what-was-said browse
 ```
 
 See `examples/README.md` for details on the example documents and parsers.
@@ -189,7 +187,7 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 ## API server
 
-`commonplace serve` starts a localhost JSON API for programmatic access — the agent-facing interface, with the DB connection held open to avoid per-call process spawn overhead.
+`what-was-said serve` starts a localhost JSON API for programmatic access — the agent-facing interface, with the DB connection held open to avoid per-call process spawn overhead.
 
 | Endpoint | Description |
 |---|---|
@@ -209,15 +207,15 @@ All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP s
 ### Themes
 
 ```bash
-commonplace --theme dracula      # default
-commonplace --theme gruvbox
-commonplace --theme nord
-commonplace --theme solarized
-commonplace --theme light
-commonplace --theme ~/mytheme.toml
+what-was-said --theme dracula      # default
+what-was-said --theme gruvbox
+what-was-said --theme nord
+what-was-said --theme solarized
+what-was-said --theme light
+what-was-said --theme ~/mytheme.toml
 ```
 
-Built-in themes are compiled into the binary. Custom themes are TOML files with hex color values for semantic slots (background, text, borders, highlights, etc.) — see `src/tui/themes/` for the format. Custom themes can also live in `~/.config/commonplace/themes/` and be referenced by name.
+Built-in themes are compiled into the binary. Custom themes are TOML files with hex color values for semantic slots (background, text, borders, highlights, etc.) — see `src/tui/themes/` for the format. Custom themes can also live in `~/.config/what-was-said/themes/` and be referenced by name.
 
 ### Keybindings
 
@@ -285,7 +283,7 @@ Built-in themes are compiled into the binary. Custom themes are TOML files with 
 
 ## Configuration
 
-All config lives in `~/.config/commonplace/` (override with `--config`):
+All config lives in `~/.config/what-was-said/` (override with `--config`):
 
 - `config.toml` — doctype definitions and parsing rules
 - `backend.toml` — LLM backend selection, model defaults, and authentication
@@ -351,11 +349,11 @@ Available colors: `red`, `green`, `blue`, `cyan`, `magenta`, `yellow`, `white`, 
 
 ## Database
 
-SQLite at `~/.local/share/commonplace/commonplace.db`, with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`.
+SQLite at `~/.local/share/what-was-said/what-was-said.db`, with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`.
 
 **Reset:**
 ```bash
-rm ~/.local/share/commonplace/commonplace.db
+rm ~/.local/share/what-was-said/what-was-said.db
 ```
 
 **Rebuild embeddings:**
@@ -363,7 +361,7 @@ rm ~/.local/share/commonplace/commonplace.db
 DROP TABLE vec_chunks;
 ```
 ```bash
-commonplace embed
+what-was-said embed
 ```
 
 ---

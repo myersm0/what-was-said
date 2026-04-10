@@ -3,22 +3,22 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 
-use commonplace::config::{self, BackendConfig, BackendKind};
-use commonplace::derive::{self, DeriveOptions};
-use commonplace::extract::{self, ExtractOptions};
-use commonplace::ingest;
-use commonplace::llm::LlmBackend;
-use commonplace::ollama::OllamaClient;
-use commonplace::openai::OpenAiClient;
-use commonplace::storage::{self, SearchSortColumn};
-use commonplace::serve;
-use commonplace::tui;
-use commonplace::util;
+use what_was_said::config::{self, BackendConfig, BackendKind};
+use what_was_said::derive::{self, DeriveOptions};
+use what_was_said::extract::{self, ExtractOptions};
+use what_was_said::ingest;
+use what_was_said::llm::LlmBackend;
+use what_was_said::ollama::OllamaClient;
+use what_was_said::openai::OpenAiClient;
+use what_was_said::storage::{self, SearchSortColumn};
+use what_was_said::serve;
+use what_was_said::tui;
+use what_was_said::util;
 
 static VEC_INIT: Once = Once::new();
 
 #[derive(Parser)]
-#[command(name = "commonplace", about = "Personal knowledge base with full-text and semantic search")]
+#[command(name = "what-was-said", about = "Personal knowledge base with full-text and semantic search")]
 struct Cli {
 	#[arg(long, global = true, value_name = "PATH", help = "Database path")]
 	db: Option<PathBuf>,
@@ -145,8 +145,8 @@ enum Command {
 fn default_db_path() -> PathBuf {
 	dirs::data_dir()
 		.unwrap_or_else(|| PathBuf::from("."))
-		.join("commonplace")
-		.join("commonplace.db")
+		.join("what-was-said")
+		.join("what-was-said.db")
 }
 
 fn open_db(path: &Path) -> Result<rusqlite::Connection> {
@@ -173,7 +173,7 @@ fn create_backend(backend_config: &BackendConfig) -> Result<Box<dyn LlmBackend>>
 fn default_config_dir() -> PathBuf {
 	dirs::config_dir()
 		.unwrap_or_else(|| PathBuf::from("."))
-		.join("commonplace")
+		.join("what-was-said")
 }
 
 fn main() -> Result<()> {
@@ -380,7 +380,7 @@ fn main() -> Result<()> {
 			}
 
 			if !storage::vec_table_exists(&connection) {
-				anyhow::bail!("no embeddings yet - run 'commonplace embed' first");
+				anyhow::bail!("no embeddings yet - run 'what-was-said embed' first");
 			}
 
 			let backend = create_backend(&backend_config)?;

@@ -1,4 +1,4 @@
-# Commonplace Development Guide
+# what-was-said Development Guide
 
 Personal knowledge base for clipped documents with full-text and semantic search.
 
@@ -65,7 +65,7 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 
 **chunks_fts**: FTS5 virtual table for full-text search.
 
-**vec_chunks**: sqlite-vec `vec0` virtual table for semantic search. Stores embeddings with cosine distance metric. Created lazily on first `commonplace embed` with the dimension detected from the embedding model.
+**vec_chunks**: sqlite-vec `vec0` virtual table for semantic search. Stores embeddings with cosine distance metric. Created lazily on first `what-was-said embed` with the dimension detected from the embedding model.
 
 **document_tags**: Many-to-many relationship for tagging.
 
@@ -76,7 +76,7 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 ### main.rs
 CLI parsing via clap derive API and command dispatch. Registers the sqlite-vec extension via `sqlite3_auto_extension`. Contains `open_db()` for connection setup and `create_backend()` factory that returns `Box<dyn LlmBackend>` based on `BackendConfig`.
 
-The `--config` flag specifies the config directory (default: `~/.config/commonplace/`). `BackendConfig` is loaded from `backend.toml` within this directory, with CLI flags (`--backend`, `--ollama`, `--model`, `--embed-model`) as optional overrides. All CLI backend/model flags are `Option<String>` — no hardcoded defaults in clap.
+The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). `BackendConfig` is loaded from `backend.toml` within this directory, with CLI flags (`--backend`, `--ollama`, `--model`, `--embed-model`) as optional overrides. All CLI backend/model flags are `Option<String>` — no hardcoded defaults in clap.
 
 Subcommands: ingest, search, similar, get, dump, stats, embed, derive, serve, browse (default).
 
@@ -261,7 +261,7 @@ name = "slack"
 source_pattern = "(Channel|DM).*Slack"
 parser = "whole"
 merge_strategy = "positional"
-preprocessor = "~/.config/commonplace/parsers/slack_parser.py"
+preprocessor = "~/.config/what-was-said/parsers/slack_parser.py"
 skip = false
 merge_consecutive_same_author = true
 cleanup_patterns = ["^\\s*:\\w+:\\s*$"]
@@ -341,8 +341,8 @@ short_threshold = 1200
 medium_threshold = 3500
 
 [prompts]
-default = "~/.config/commonplace/prompts/detailed.txt"
-brief = "~/.config/commonplace/prompts/brief.txt"
+default = "~/.config/what-was-said/prompts/detailed.txt"
+brief = "~/.config/what-was-said/prompts/brief.txt"
 ```
 
 Prompt tier is selected by document content length: short (<1200 chars) gets a terse 1-2 sentence prompt, medium (<3500) gets a proportional summary, long gets structured section-by-section analysis. For short documents, the brief summary is copied directly from the detailed output without an additional LLM call.
@@ -422,9 +422,9 @@ See `examples/parsers/` for working email and Slack preprocessor scripts, and `e
 
 ## Embeddings
 
-Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance metric. The table is created lazily on the first `commonplace embed` run, with the embedding dimension detected from the model's response.
+Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance metric. The table is created lazily on the first `what-was-said embed` run, with the embedding dimension detected from the model's response.
 
-**Generate**: `commonplace embed [--limit N] [--embed-model MODEL]`
+**Generate**: `what-was-said embed [--limit N] [--embed-model MODEL]`
 
 **Default model**: qwen3-embedding:8b via Ollama
 
@@ -458,7 +458,7 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 
 13. **Paragraph-aware chunking**: Chunk boundary detection recognizes both sentence-ending punctuation (`.!?`) and paragraph breaks (`\n\n`) as snap points. This prevents documents without terminal punctuation (bullet lists, notes, code-heavy content) from producing oversized single chunks.
 
-14. **Config-directory convention**: All configuration files (`config.toml`, `backend.toml`, `tags.toml`, `derive.toml`, themes) live in a single config directory (default `~/.config/commonplace/`), overridable with `--config`. This allows multiple configurations (e.g. personal vs. work) by pointing at different directories.
+14. **Config-directory convention**: All configuration files (`config.toml`, `backend.toml`, `tags.toml`, `derive.toml`, themes) live in a single config directory (default `~/.config/what-was-said/`), overridable with `--config`. This allows multiple configurations (e.g. personal vs. work) by pointing at different directories.
 
 ## Adding a New CLI Command
 
@@ -477,9 +477,9 @@ Stored in `vec_chunks`, a sqlite-vec `vec0` virtual table with cosine distance m
 
 ## Common Maintenance Tasks
 
-**Reset database**: Delete `~/.local/share/commonplace/commonplace.db`
+**Reset database**: Delete `~/.local/share/what-was-said/what-was-said.db`
 
-**Re-embed everything**: `DROP TABLE vec_chunks;` in sqlite3, then `commonplace embed`
+**Re-embed everything**: `DROP TABLE vec_chunks;` in sqlite3, then `what-was-said embed`
 
 **Debug ingestion**: Run with file directly, check stderr output. Near-dup matches and near-misses are logged to stderr.
 

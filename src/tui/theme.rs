@@ -141,7 +141,7 @@ fn builtin_theme(name: &str) -> Option<&'static str> {
 fn themes_dir() -> PathBuf {
 	dirs::config_dir()
 		.unwrap_or_else(|| PathBuf::from("."))
-		.join("commonplace")
+		.join("what-was-said")
 		.join("themes")
 }
 

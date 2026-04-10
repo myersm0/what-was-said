@@ -1,6 +1,6 @@
 # Examples
 
-Test data and parser scripts for Commonplace ingestion.
+Test data and parser scripts for what-was-said ingestion.
 
 ## Quick start
 
@@ -8,14 +8,14 @@ Test data and parser scripts for Commonplace ingestion.
 # from the repo root
 pip install -r examples/parsers/requirements.txt
 
-commonplace --config examples ingest examples/inbox/email/
-commonplace --config examples ingest examples/inbox/slack/
-commonplace --config examples ingest examples/inbox/markdown/
+what-was-said --config examples ingest examples/inbox/email/
+what-was-said --config examples ingest examples/inbox/slack/
+what-was-said --config examples ingest examples/inbox/markdown/
 
-commonplace browse
+what-was-said browse
 ```
 
-The `--config examples` flag tells Commonplace to use `examples/` as the config directory, picking up `examples/config.toml` with the parser paths.
+The `--config examples` flag tells what-was-said to use `examples/` as the config directory, picking up `examples/config.toml` with the parser paths.
 
 ## Structure
 
@@ -35,7 +35,7 @@ examples/
 
 ## Parsing
 
-Each doctype is parsed differently. Markdown parsing is handled internally by Commonplace. Email and Slack require external preprocessor scripts that Commonplace calls during ingestion; each script takes a file path and emits structured JSON to stdout.
+Each doctype is parsed differently. Markdown parsing is handled internally by what-was-said. Email and Slack require external preprocessor scripts that what-was-said calls during ingestion; each script takes a file path and emits structured JSON to stdout.
 
 ### Email
 
@@ -54,7 +54,7 @@ python parsers/email_parser.py --check inbox/email/
 
 ### Markdown
 
-Parsed internally by Commonplace. Documents are segmented into entries by heading structure. Code-fence-aware: `#` lines inside fenced code blocks are not treated as headings. No external preprocessor is needed.
+Parsed internally by what-was-said. Documents are segmented into entries by heading structure. Code-fence-aware: `#` lines inside fenced code blocks are not treated as headings. No external preprocessor is needed.
 
 ### Slack
 

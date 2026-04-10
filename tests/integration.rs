@@ -1,13 +1,13 @@
 use rusqlite::Connection;
 
-use commonplace::chunking;
-use commonplace::config;
-use commonplace::ingest;
-use commonplace::markdown;
-use commonplace::minhash;
-use commonplace::storage::{self, SearchSortColumn, SortColumn, SortDirection};
-use commonplace::types::*;
-use commonplace::util;
+use what_was_said::chunking;
+use what_was_said::config;
+use what_was_said::ingest;
+use what_was_said::markdown;
+use what_was_said::minhash;
+use what_was_said::storage::{self, SearchSortColumn, SortColumn, SortDirection};
+use what_was_said::types::*;
+use what_was_said::util;
 
 fn setup_db() -> Connection {
 	let connection = Connection::open_in_memory().unwrap();
