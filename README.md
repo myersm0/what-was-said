@@ -105,9 +105,9 @@ what-was-said ingest ~/inbox/clips/
 ```bash
 what-was-said browse
 what-was-said browse --theme gruvbox
-what-was-said search "keyword query"
-what-was-said similar "semantic query"
-what-was-said get 42
+what-was-said about "semantic query"
+what-was-said about "keyword query" --method exact
+what-was-said in 42
 ```
 
 **Enrich**
@@ -129,9 +129,9 @@ what-was-said serve --port 8080
 
 **JSON output (for scripting)**
 ```bash
-what-was-said search "query" --json
-what-was-said similar "query" --json
-what-was-said get 42 --json
+what-was-said about "query" --json
+what-was-said about "query" --method exact --json
+what-was-said in 42 --json
 what-was-said stats --json
 what-was-said dump --json
 what-was-said derive --status --json
@@ -195,8 +195,8 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 | Endpoint | Description |
 |---|---|
-| `GET /search?q=...&sort=score\|date` | FTS5 keyword search, results grouped by document |
-| `GET /similar?q=...&limit=N` | Semantic search via embeddings (default limit 10) |
+| `GET /search?q=...&sort=score\|date&author=...&date_from=...&date_to=...` | FTS5 keyword search, results grouped by document |
+| `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...` | Semantic search via embeddings, results grouped by document |
 | `GET /get/:id` | Full document with entries and chunks |
 | `GET /entries/:doc_id` | Entries for a document |
 | `GET /claims/doc/:doc_id` | Claims extracted from a document |
@@ -275,7 +275,7 @@ Built-in themes are compiled into the binary. Custom themes are TOML files with 
 
 ## Key concepts
 
-**Doctype** — Parsing configuration matched by source title pattern or extension. Defines the parser (whole, markdown, whisper, copilot_email, ollama), merge strategy, and optional preprocessor script.
+**Doctype** — Parsing configuration matched by source title pattern or extension. Defines the parser (whole, markdown, whisper, copilot_email), merge strategy, and optional preprocessor script.
 
 **Merge strategy**
 - `none` — each clip creates a new document

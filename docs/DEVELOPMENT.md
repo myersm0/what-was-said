@@ -12,24 +12,33 @@ Personal knowledge base for clipped documents with full-text and semantic search
        │              │              │              │           │
        ▼              ▼              ▼              ▼           ▼
 ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
-│  ingest   │  │ storage/  │  │  derive   │  │   tui/    │  │   serve   │
-│(parse +   │  │ (sqlite)  │  │  (LLM)    │  │(ratatui)  │  │  (axum)   │
-│orchestrate)│  └───────────┘  └───────────┘  └───────────┘  └───────────┘
-└───────────┘        │         ┌───────────┐
-       │             │         │  extract  │
-       ▼             │         │  (LLM)    │
-┌───────────┐        │         └───────────┘
-│ chunking  │◄───────┘
-└───────────┘                  ┌───────────┐
-       ▲                       │   util    │
-       │                       └───────────┘
-┌───────────┐      ┌───────────┐      ┌───────────┐
-│   llm     │◄─────│  ollama   │      │  openai   │
-│  (trait)  │◄─────│(impl)     │      │  (impl)   │
-└───────────┘      └───────────┘      └───────────┘
+│  ingest   │  │  query    │  │  derive   │  │   tui/    │  │   serve   │
+│(parse, or-│  │(group +   │  │  (LLM)    │  │(ratatui)  │  │  (axum)   │
+│chestrate  │  │rank)      │  └───────────┘  └───────────┘  └───────────┘
+└───────────┘  └───────────┘  ┌───────────┐
+       │             │        │  extract  │
+       ▼             ▼        │  (LLM)    │
+┌───────────┐  ┌───────────┐  └───────────┘  ┌───────────┐
+│ chunking  │  │ storage/  │                 │  prompts  │
+└───────────┘  │ (sqlite)  │                 └───────────┘
+               └───────────┘  ┌───────────┐
+                              │   util    │
+               ┌───────────┐  └───────────┘
+               │   llm     │◄─────┐      ┌───────────┐
+               │  (trait)  │◄──┐  │      │  openai   │
+               └───────────┘   │  │      │  (impl)   │
+                          ┌────┘  │      └───────────┘
+                    ┌───────────┐ │
+                    │  ollama   │─┘
+                    │  (impl)   │
+                    └───────────┘
 ```
 
-`LlmBackend` is used by ingest, derive, extract, tui, and serve.
+`LlmBackend` is used by derive, extract, tui, and serve. Ingestion is deterministic — no LLM dependency.
+
+`query` sits between storage and the UI layers (tui, serve, CLI). It owns search result grouping, dedup, and ranking. Both tui and serve call the same query functions.
+
+`prompts` is used by derive and extract for prompt construction, and by config for prompt hashing.
 
 ## Data Model
 
@@ -88,7 +97,7 @@ CLI parsing via clap derive API and command dispatch. Registers the sqlite-vec e
 
 The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). `BackendConfig` is loaded from `backend.toml` within this directory, with CLI flags (`--backend`, `--ollama`, `--model`, `--embed-model`) as optional overrides. All CLI backend/model flags are `Option<String>` — no hardcoded defaults in clap.
 
-Subcommands: ingest, search, similar, get, dump, stats, embed, derive, extract, serve, browse (default).
+Subcommands: ingest, about (with `--method=[exact|semantic]`), in, dump, stats, embed, derive, extract, serve, browse (default).
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
@@ -117,8 +126,8 @@ Translates the `format: Some("json")` parameter to OpenAI's `response_format: {"
 Axum-based localhost JSON API server. Holds an `AppState` with `Mutex<Connection>` and `Box<dyn LlmBackend>`.
 
 Endpoints:
-- `GET /search?q=...&sort=score|date` — FTS5 search, results grouped by document
-- `GET /similar?q=...&limit=N` — semantic search (embeds query via backend, then KNN)
+- `GET /search?q=...&sort=score|date&author=...&date_from=...&date_to=...` — FTS5 search via `query::search_filtered`, results grouped by document
+- `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...` — semantic search via `query::find_similar_grouped_filtered`, results grouped by document
 - `GET /get/:id` — full document with entries and chunks
 - `GET /entries/:doc_id` — entries for a document
 - `GET /claims/doc/:doc_id` — claims extracted from a document
@@ -128,27 +137,55 @@ Endpoints:
 
 Creates a tokio runtime internally so the rest of the binary stays synchronous.
 
+### query.rs
+Shared query layer between storage and the UI layers (tui, serve, CLI). Owns search result grouping, deduplication, and ranking. No `Connection` parameter on the pure domain functions, making them testable with synthetic data.
+
+**Types**:
+- `GroupedSearchResult`: Documents with nested `ChunkHit` vectors
+- `ChunkHit`: A single search hit within a document
+- `SearchSortColumn`: Score or Date
+- `SearchFilters`: Author, date_from, date_to — shared by TUI and serve
+
+**Composed functions** (call storage, then group):
+- `search()` / `search_filtered()`: FTS5 search via `storage::raw_fts_search`, then group/dedup/sort
+- `find_similar_grouped()` / `find_similar_grouped_filtered()`: semantic search via `storage::find_similar_chunks_filtered`, then group/sort
+- `strip_fts_markers()`: removes FTS5 snippet highlight control characters from grouped results
+
+**Pure domain functions** (no DB, testable with synthetic row data):
+- `group_fts_results()`: groups `ChunkSearchResult` rows by document, deduplicates similar snippets, sorts by score or date
+- `group_similar_results()`: groups `SimilarChunk` rows by document, converts similarity to negative rank, sorts by rank
+- `snippets_similar()`: word-overlap similarity check for deduplication
+
 ### derive.rs
-LLM summary generation. Calls `backend.chat()` with prompts from derive.toml.
+LLM summary generation. Pure orchestration: iterates documents, calls `prompts.rs` for prompt construction, calls `backend.chat()`, stores results.
 
 Key functions:
 - `run()`: Iterates documents needing derivation, generates detailed then brief summaries
 - `run_status()`: Reports derivation progress
-- `derive_detailed()`: Generates detailed summary, returns body + content length
-- `derive_brief()`: Generates brief summary via LLM, or copies detailed directly for short documents (under `short_threshold`)
+- `derive_detailed()`: Resolves prompt via `config.resolve_detailed_prompt()`, assembles via `prompts::detailed_summary_prompt()`, generates, stores
+- `derive_brief()`: Resolves prompt via `config.resolve_brief_prompt()`, assembles via `prompts::brief_summary_prompt()`, or copies detailed directly for short documents (under `short_threshold`)
 
 ### extract.rs
-LLM claim extraction. Calls `backend.chat()` with an adaptive prompt that handles all document types. Parallel to `derive.rs` structurally.
+LLM claim extraction. Pure orchestration: iterates documents, calls `prompts.rs` for prompt construction, calls `backend.chat()`, parses and stores results.
 
 Key functions:
 - `run()`: Selects documents needing extraction (missing claims or stale model/prompt), deletes existing claims, re-extracts, stores results
 - `run_status()`: Reports extraction progress (documents with/without claims, total claim count)
-- `extract_document()`: Builds prompt from config (rules + optional source-format framing), calls LLM, parses response, inserts claims
+- `extract_document()`: Resolves framing and rules from config, assembles prompt via `prompts::claim_extraction_prompt()`, calls LLM, parses response, inserts claims
 - `parse_claims()`: Lenient line parser. Strips bullet markers (`- `, `* `), numbered prefixes (`1. `), bracket labels (`[kind]`), and skips blank lines and preamble. Returns clean claim strings.
-- `compute_prompt_hash()`: Hashes the rules text for staleness detection
 - `resolve_author()`: If all entries in a document share a single author, inherits it for claims
 
 Staleness detection: each claim stores the `model` and `prompt_hash` that produced it. `get_documents_needing_extraction(model, prompt_hash)` returns documents whose claims don't match the current config, enabling automatic incremental re-extraction when the model or prompt changes.
+
+### prompts.rs
+Single source of truth for all prompt construction. Contains default prompt text and assembly functions. No config loading or file I/O — takes resolved values as parameters.
+
+- `LengthTier`: Enum (Short/Medium/Long) with `from_len(content_len, short_threshold, medium_threshold)` and `key()` (returns `"short"`/`"medium"`/`"long"` for config map lookup)
+- `detailed_summary_prompt(document_text, instructions)`: Assembles detailed summary prompt
+- `brief_summary_prompt(detailed_summary, instructions)`: Assembles brief summary prompt
+- `claim_extraction_prompt(document_text, rules, framing)`: Assembles claim extraction prompt
+- `compute_prompt_hash(rules)`: Hashes rules text for staleness detection
+- `default_detailed_prompt(tier)`, `default_brief_prompt()`, `default_extract_rules()`: Built-in fallback prompt text
 
 ### config.rs
 Loads and parses configuration files from the config directory. Handles doctype detection.
@@ -162,8 +199,8 @@ Key types:
 - `Doctype`: Parsed config entry
 - `DoctypeMatch`: Result of detection, includes parser/preprocessor/merge_strategy
 - `TagConfig`: Tag hierarchy, default exclusions, color assignments
-- `DeriveConfig`: Model selection, prompt tiers, thresholds
-- `ExtractConfig`: Model selection, source-format framing paths, rules path, prompt hash computation
+- `DeriveConfig`: Model selection, prompt thresholds. `resolve_detailed_prompt(content_len)` checks the prompts map by tier key (`"short"`, `"medium"`, `"long"`), then `"default"`, falling back to built-in defaults via `prompts.rs`. `resolve_brief_prompt()` same pattern.
+- `ExtractConfig`: Model selection, source-format framing paths, rules path. `prompt_hash()` delegates to `prompts::compute_prompt_hash()`.
 - `BackendConfig`: Backend selection, model defaults, OpenAI auth configuration
 - `BackendKind`: Enum (`Ollama`, `OpenAi`)
 - `OpenAiAuth`: Enum (`ApiKey`, `OAuth`)
@@ -172,13 +209,12 @@ Key types:
 `BackendConfig::load(config_dir)` reads `backend.toml` from the config directory, falling back to defaults (Ollama on localhost) if the file doesn't exist. `DeriveConfig::load(config_dir)` reads `derive.toml` similarly. `ExtractConfig::load(config_dir)` reads `extract.toml` similarly, defaulting to `gemma3:27b` and the compiled-in adaptive prompt.
 
 ### ingest.rs
-Text parsing, segmentation, and ingestion orchestration. All public functions accept `&dyn LlmBackend` plus an explicit `model: &str` parameter.
+Text parsing, segmentation, and ingestion orchestration. No LLM dependency — ingestion is a pure function of (file + config).
 
 **Parsers**:
 - `Whole`: Entire file as single entry
 - `Markdown`: Split on headings
 - `CopilotEmail`: Parse Copilot-formatted email threads
-- `Ollama`: LLM-based segmentation (mostly deprecated)
 - `Whisper`: Declared but not yet implemented
 
 **External preprocessors**: Python scripts that return JSON. Called via:
@@ -190,14 +226,13 @@ run_preprocessor(script_path, file_path) -> SegmentationResult
 - `ingest_file()`: Main ingestion logic — reads file, detects doctype, parses, handles merge, detects near-duplicates, stores results
 - `ingest_directory()`: Iterates directory, calls ingest_file per file
 - `find_overlap()`: Detects overlapping entries for positional merge
-- `segment()`: Free function that calls `backend.generate()` with segmentation prompt
 
 **Near-duplicate detection**: After parsing but before inserting, computes a document-level MinHash signature and compares against existing documents within a ±180 day window. If Jaccard similarity ≥ 0.7 (`dup_jaccard_threshold`), the older document is tagged `superseded`. Near-misses (≥ 0.4) are logged to stderr for diagnostic tuning.
 
 ### storage/
 All SQLite operations. Uses rusqlite directly (no ORM). Integrates sqlite-vec for vector search. Split into submodules, all re-exported from `storage/mod.rs`. Sets `PRAGMA foreign_keys = ON` and `PRAGMA journal_mode=WAL` on initialization for referential integrity and concurrent read access.
 
-Key output types (`GroupedSearchResult`, `ChunkHit`, `SimilarChunk`, `SimilarClaim`, `Claim`, `DumpDocument`, `DumpEntry`, `DocumentContent`, `EntryContent`, `ChunkContent`, `DeriveStatus`) derive `Serialize` for JSON output.
+Key output types (`SimilarChunk`, `SimilarClaim`, `Claim`, `DumpDocument`, `DumpEntry`, `DocumentContent`, `EntryContent`, `ChunkContent`, `DeriveStatus`) derive `Serialize` for JSON output. Search result grouping types (`GroupedSearchResult`, `ChunkHit`, `SearchSortColumn`) live in `query.rs`.
 
 **mod.rs**: Schema initialization (`initialize()`), foreign keys pragma, WAL mode pragma, `migrate()` for schema upgrades, re-exports, tests.
 
@@ -210,9 +245,8 @@ Key output types (`GroupedSearchResult`, `ChunkHit`, `SimilarChunk`, `SimilarCla
 - `find_documents_by_merge_key()`: Finds candidates for positional merge
 - `find_dup_candidates()`: Finds documents within a time window that have MinHash signatures, for near-duplicate comparison
 
-**search.rs**: FTS5 search with grouping, author/date filters pushed into SQL.
-- `search()` / `search_filtered()`: FTS5 MATCH with snippet generation
-- Result grouping: chunks grouped by document via `GroupedSearchResult`, deduplicated by snippet similarity
+**search.rs**: Raw FTS5 database access. No grouping or ranking — those live in `query.rs`.
+- `raw_fts_search()`: FTS5 MATCH with snippet generation, author/date filters pushed into SQL. Returns flat `Vec<ChunkSearchResult>`.
 
 **embed.rs**: sqlite-vec integration for both chunks and claims.
 - `ensure_vec_table()`: Creates `vec_chunks` vec0 virtual table with detected embedding dimension
@@ -261,7 +295,7 @@ Ratatui-based terminal UI. Split into submodules with a shared `App` struct in `
 
 **read.rs**: Read mode — view document content, navigate chunks, yank to clipboard, group navigation. Skips empty-body entries during chunk navigation.
 
-**search.rs**: Search mode — FTS5 or semantic search (semantic by default) with author/date filters, backtick mode toggle, search execution. Uses `search_config.backend.embed()` for semantic queries.
+**search.rs**: Search mode — FTS5 or semantic search (semantic by default) with author/date filters, backtick mode toggle, search execution. Builds a `SearchFilters` from app state and calls `query::search_filtered()` or `query::find_similar_grouped_filtered()`. Uses `search_config.backend.embed()` for semantic queries.
 
 **tags.rs**: TagEdit and TagFilter modes — add/remove tags, filter document list by tag.
 
@@ -308,13 +342,12 @@ cleanup_patterns = ["^\\s*:\\w+:\\s*$"]
 - `name`: Identifier for this doctype
 - `source_pattern`: Regex matched against source title
 - `extension`: Alternative match by file extension
-- `parser`: whole | markdown | whisper | copilot_email | ollama
+- `parser`: whole | markdown | whisper | copilot_email
 - `merge_strategy`: none | positional
 - `preprocessor`: Path to external parser script (~ expanded)
 - `skip`: If true, files matching this doctype are skipped
 - `cleanup_patterns`: Regexes for lines to remove
 - `merge_consecutive_same_author`: Combine adjacent same-author entries
-- `prompt`: Custom prompt for ollama parser
 
 ### backend.toml
 
@@ -378,11 +411,13 @@ short_threshold = 1200
 medium_threshold = 3500
 
 [prompts]
-default = "~/.config/what-was-said/prompts/detailed.txt"
+short = "~/.config/what-was-said/prompts/detailed_short.txt"
+medium = "~/.config/what-was-said/prompts/detailed_medium.txt"
+long = "~/.config/what-was-said/prompts/detailed_long.txt"
 brief = "~/.config/what-was-said/prompts/brief.txt"
 ```
 
-Prompt tier is selected by document content length: short (<1200 chars) gets a terse 1-2 sentence prompt, medium (<3500) gets a proportional summary, long gets structured section-by-section analysis. For short documents, the brief summary is copied directly from the detailed output without an additional LLM call.
+Prompt tier is selected by document content length: short (<1200 chars), medium (<3500), long (≥3500). Custom prompts are resolved by tier key (`"short"`, `"medium"`, `"long"`), then `"default"`, falling back to built-in defaults. For short documents, the brief summary is copied directly from the detailed output without an additional LLM call.
 
 ### extract.toml
 
@@ -457,22 +492,31 @@ See `examples/parsers/` for working email and Slack preprocessor scripts, and `e
 
 ### FTS5
 ```
+storage/search.rs (raw DB access):
 1. Convert query to prefix search ("foo bar" → "foo* bar*")
 2. Build SQL with author/date filters in WHERE clause
 3. Execute FTS5 MATCH query with snippet()
-4. Group results by document_id
-5. Deduplicate similar snippets within document
-6. Sort by best rank (or date)
+4. Return flat Vec<ChunkSearchResult>
+
+query.rs (grouping/ranking):
+5. Group results by document_id
+6. Deduplicate similar snippets within document
+7. Sort by best rank (or date)
 ```
 
 ### Semantic
 ```
+storage/embed.rs (raw DB access):
 1. Embed query text via LlmBackend (default: qwen3-embedding:8b via Ollama)
 2. Run KNN query against vec_chunks using sqlite-vec MATCH
 3. Join results back to chunks/entries for metadata
 4. Filter by author/date if specified
-5. Group by document_id
-6. Convert to GroupedSearchResult format
+5. Return flat Vec<SimilarChunk>
+
+query.rs (grouping/ranking):
+6. Group by document_id
+7. Convert similarity to negative rank
+8. Sort by best rank
 ```
 
 ## Embeddings
@@ -489,7 +533,7 @@ The embed command processes chunks first, then claims, with separate progress re
 
 ## Key Design Decisions
 
-1. **Chunk-level search, document-level display**: Search indexes chunks for precision, but results are grouped by document for context.
+1. **Chunk-level search, document-level display**: Search indexes chunks for precision, but results are grouped by document for context. Grouping, deduplication, and ranking logic lives in `query.rs`, shared by TUI, serve, and CLI.
 
 2. **Positional merge**: Conversation documents (Slack, email) grow over time. Overlap detection allows appending new messages without duplicating.
 
@@ -505,7 +549,7 @@ The embed command processes chunks first, then claims, with separate progress re
 
 8. **WAL mode**: SQLite journal_mode=WAL set on initialization. Enables concurrent readers during serve mode without blocking on writes.
 
-9. **JSON API via serve**: Localhost axum server holding the DB connection open, exposing storage functions as JSON endpoints. Designed as the agent-facing interface, avoiding per-call process spawn overhead.
+9. **JSON API via serve**: Localhost axum server holding the DB connection open, exposing query functions as JSON endpoints. Designed as the agent-facing interface, avoiding per-call process spawn overhead.
 
 10. **Foreign key enforcement**: `PRAGMA foreign_keys = ON` set on every connection. All parent-child relationships use `ON DELETE CASCADE`. A migration system in `initialize()` detects old schemas and rebuilds tables as needed, preventing orphaned rows.
 
@@ -522,6 +566,12 @@ The embed command processes chunks first, then claims, with separate progress re
 16. **Incremental re-extraction via model + prompt_hash**: Each claim stores the model and a hash of the prompt rules that produced it. `what-was-said extract` compares against the current config and re-extracts only stale documents. This means changing the configured model or editing the prompt file triggers automatic re-extraction without `--force`.
 
 17. **Separate vec_claims table**: Claims and chunks are different semantic objects — claims are atomic propositions, chunks are text fragments. They have different query purposes (what was said vs. where is it) and different re-embedding lifecycles (re-extract claims without re-chunking). Mixing them in one vector table would couple these concerns.
+
+18. **Query layer between storage and UI**: `query.rs` owns all search result grouping, deduplication, and ranking. TUI, serve, and CLI all call the same functions, preventing divergence. Raw DB access in `storage/search.rs` returns flat rows; `query.rs` composes the pipeline. The grouping functions are testable with synthetic data (no DB needed).
+
+19. **Centralized prompt construction**: All prompt assembly lives in `prompts.rs`. Derive and extract are pure orchestration — they call prompt functions, then call the LLM, then store results. Custom prompts are resolved by config (per-tier keys for derive, rules/framings for extract), with built-in defaults compiled into the binary. `compute_prompt_hash` lives here too, breaking what was previously a circular dependency between config and extract.
+
+20. **Deterministic ingestion**: Ingestion has no LLM dependency. All parsing is deterministic (built-in parsers or external preprocessor scripts). LLM enrichment (summaries, embeddings, claims) is a separate post-ingest step.
 
 ## Adding a New CLI Command
 
@@ -548,6 +598,6 @@ The embed command processes chunks first, then claims, with separate progress re
 
 **Debug ingestion**: Run with file directly, check stderr output. Near-dup matches and near-misses are logged to stderr.
 
-**Profile search**: Add timing around `storage::search()` or `find_similar_chunks()`
+**Profile search**: Add timing around `query::search()` or `query::find_similar_grouped()`
 
 **Run tests**: `cargo test` (all tests use in-memory SQLite, no network or filesystem dependencies)
