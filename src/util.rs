@@ -84,6 +84,38 @@ pub fn extract_group_key(source_title: &str) -> Option<String> {
 	Some(key)
 }
 
+pub fn diff_regions(new_text: &str, existing_text: &str) -> (String, String) {
+	let existing_lines: std::collections::HashSet<&str> = existing_text
+		.lines()
+		.map(str::trim)
+		.filter(|line| !line.is_empty())
+		.collect();
+	let new_lines: std::collections::HashSet<&str> = new_text
+		.lines()
+		.map(str::trim)
+		.filter(|line| !line.is_empty())
+		.collect();
+
+	let added: String = new_text
+		.lines()
+		.filter(|line| {
+			let trimmed = line.trim();
+			!trimmed.is_empty() && !existing_lines.contains(trimmed)
+		})
+		.collect::<Vec<_>>()
+		.join("\n");
+	let removed: String = existing_text
+		.lines()
+		.filter(|line| {
+			let trimmed = line.trim();
+			!trimmed.is_empty() && !new_lines.contains(trimmed)
+		})
+		.collect::<Vec<_>>()
+		.join("\n");
+
+	(added, removed)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

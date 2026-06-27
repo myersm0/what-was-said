@@ -47,6 +47,19 @@ pub fn claim_extraction_prompt(
 	}
 }
 
+pub fn document_diff_prompt(added: &str, removed: &str, instructions: &str) -> String {
+	format!(
+		"{}\n\n## Added in the new version\n{}\n\n## Removed from the previous version\n{}\n",
+		instructions,
+		if added.is_empty() { "(nothing)" } else { added },
+		if removed.is_empty() { "(nothing)" } else { removed },
+	)
+}
+
+pub fn default_diff_instructions() -> &'static str {
+	DEFAULT_DIFF_INSTRUCTIONS
+}
+
 pub fn compute_prompt_hash(rules: &str) -> String {
 	let mut hasher = DefaultHasher::new();
 	rules.hash(&mut hasher);
@@ -68,6 +81,8 @@ pub fn default_brief_prompt() -> &'static str {
 pub fn default_extract_rules() -> &'static str {
 	DEFAULT_EXTRACT_RULES
 }
+
+const DEFAULT_DIFF_INSTRUCTIONS: &str = r#"Two near-duplicate documents were detected: a newer version and a previous one. You are shown only the lines that differ. In a few sentences, describe what substantively changed from the previous version to the new one — what was added, removed, or revised, and whether it looks like a meaningful revision or a trivial edit. Be concise and concrete. Do not restate unchanged content."#;
 
 const DEFAULT_DETAILED_SHORT: &str = r#"Summarize briefly. 1-2 sentences max. No filler.
 

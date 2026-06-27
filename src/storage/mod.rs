@@ -128,6 +128,10 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			similarity REAL,
 			shared_block_words INTEGER,
 			resolution TEXT NOT NULL CHECK (resolution IN ('superseded', 'kept_both', 'pending')),
+			summary TEXT,
+			summary_model TEXT,
+			summary_prompt_hash TEXT,
+			summarized_at TEXT,
 			created_at TEXT NOT NULL,
 			UNIQUE (from_document_id, to_document_id)
 		);
@@ -227,6 +231,23 @@ fn migrate(connection: &Connection) -> Result<()> {
 				);
 				CREATE INDEX IF NOT EXISTS claims_document_id ON claims(document_id);",
 			)?;
+		}
+	}
+	let relations_exists: bool = connection
+		.query_row(
+			"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'document_relations'",
+			[], |_| Ok(()),
+		)
+		.is_ok();
+	if relations_exists {
+		let relations_sql: String = connection.query_row(
+			"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'document_relations'",
+			[], |row| row.get(0),
+		)?;
+		if !relations_sql.contains("summary") {
+			for column in ["summary TEXT", "summary_model TEXT", "summary_prompt_hash TEXT", "summarized_at TEXT"] {
+				connection.execute_batch(&format!("ALTER TABLE document_relations ADD COLUMN {};", column))?;
+			}
 		}
 	}
 	Ok(())

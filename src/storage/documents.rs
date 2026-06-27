@@ -468,7 +468,7 @@ pub fn insert_document_relation(
 	similarity: f64,
 	shared_block_words: Option<i64>,
 	resolution: &str,
-) -> Result<()> {
+) -> Result<i64> {
 	connection.execute(
 		"INSERT OR REPLACE INTO document_relations
 		 (from_document_id, to_document_id, relation, similarity, shared_block_words, resolution, created_at)
@@ -483,7 +483,56 @@ pub fn insert_document_relation(
 			chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
 		],
 	)?;
+	Ok(connection.last_insert_rowid())
+}
+
+pub fn set_relation_summary(
+	connection: &Connection,
+	relation_id: i64,
+	summary: &str,
+	model: &str,
+	prompt_hash: &str,
+) -> Result<()> {
+	connection.execute(
+		"UPDATE document_relations
+		 SET summary = ?1, summary_model = ?2, summary_prompt_hash = ?3, summarized_at = ?4
+		 WHERE id = ?5",
+		params![
+			summary,
+			model,
+			prompt_hash,
+			chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+			relation_id,
+		],
+	)?;
 	Ok(())
+}
+
+pub struct RelationPair {
+	pub id: i64,
+	pub from_document_id: i64,
+	pub to_document_id: i64,
+}
+
+pub fn get_relations_needing_summary(
+	connection: &Connection,
+	model: &str,
+	prompt_hash: &str,
+) -> Result<Vec<RelationPair>> {
+	let mut stmt = connection.prepare(
+		"SELECT id, from_document_id, to_document_id FROM document_relations
+		 WHERE summary IS NULL OR summary_model != ?1 OR summary_prompt_hash != ?2"
+	)?;
+	let rows = stmt
+		.query_map(params![model, prompt_hash], |row| {
+			Ok(RelationPair {
+				id: row.get(0)?,
+				from_document_id: row.get(1)?,
+				to_document_id: row.get(2)?,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(rows)
 }
 
 pub fn get_document_full_text(connection: &Connection, document_id: i64) -> Result<String> {

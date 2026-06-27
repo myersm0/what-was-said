@@ -6,8 +6,10 @@ use std::process::Command;
 
 use crate::chunking;
 use crate::config::{self, Parser};
+use crate::llm::LlmBackend;
 use crate::markdown;
 use crate::minhash;
+use crate::prompts;
 use crate::storage;
 use crate::types::*;
 use crate::util;
@@ -161,9 +163,17 @@ const dup_jaccard_low: f64 = 0.4;
 const dup_shared_block_words: usize = 300;
 const dup_window_days: i64 = 180;
 
-pub struct IngestOptions {
+pub struct IngestOptions<'a> {
 	pub force: bool,
 	pub interactive: bool,
+	pub backend: Option<&'a dyn LlmBackend>,
+	pub model: String,
+}
+
+struct DiffSummary {
+	text: String,
+	model: String,
+	prompt_hash: String,
 }
 
 pub enum IngestOutcome {
@@ -240,30 +250,14 @@ fn join_entry_bodies(entries: &[SegmentedEntry]) -> String {
 }
 
 fn print_block_diff(new_text: &str, existing_text: &str, existing_id: i64) {
-	let existing_lines: std::collections::HashSet<&str> = existing_text
-		.lines()
-		.map(str::trim)
-		.filter(|line| !line.is_empty())
-		.collect();
-	let new_lines: std::collections::HashSet<&str> = new_text
-		.lines()
-		.map(str::trim)
-		.filter(|line| !line.is_empty())
-		.collect();
-
+	let (added, removed) = util::diff_regions(new_text, existing_text);
 	eprintln!("  --- only in new file ---");
-	for line in new_text.lines() {
-		let trimmed = line.trim();
-		if !trimmed.is_empty() && !existing_lines.contains(trimmed) {
-			eprintln!("  + {}", line);
-		}
+	for line in added.lines() {
+		eprintln!("  + {}", line);
 	}
 	eprintln!("  --- only in doc {} ---", existing_id);
-	for line in existing_text.lines() {
-		let trimmed = line.trim();
-		if !trimmed.is_empty() && !new_lines.contains(trimmed) {
-			eprintln!("  - {}", line);
-		}
+	for line in removed.lines() {
+		eprintln!("  - {}", line);
 	}
 }
 
@@ -276,7 +270,9 @@ fn prompt_gray_zone(
 	shared_block_words: usize,
 	new_text: &str,
 	existing_text: &str,
-) -> GrayZoneResolution {
+	backend: Option<&dyn LlmBackend>,
+	model: &str,
+) -> (GrayZoneResolution, Option<DiffSummary>) {
 	use std::io::Write;
 
 	eprintln!("Near-duplicate detected:");
@@ -284,19 +280,46 @@ fn prompt_gray_zone(
 	eprintln!("  new:      {} (current file)", new_path);
 	eprintln!("  similarity: {:.2}, shared block: ~{} words", similarity, shared_block_words);
 
+	let mut summary: Option<DiffSummary> = None;
 	loop {
-		eprint!("\n  [s]upersede old  [k]eep both  [d]iff  [q]uit  ");
+		eprint!("\n  [s]upersede old  [k]eep both  [d]iff  [v]iew LLM summary  [q]uit  ");
 		let _ = std::io::stderr().flush();
 
 		let mut input = String::new();
 		if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
-			return GrayZoneResolution::KeepBoth;
+			return (GrayZoneResolution::KeepBoth, summary);
 		}
 		match input.trim().chars().next() {
-			Some('s') | Some('S') => return GrayZoneResolution::Supersede,
-			Some('k') | Some('K') => return GrayZoneResolution::KeepBoth,
-			Some('q') | Some('Q') => return GrayZoneResolution::Quit,
+			Some('s') | Some('S') => return (GrayZoneResolution::Supersede, summary),
+			Some('k') | Some('K') => return (GrayZoneResolution::KeepBoth, summary),
+			Some('q') | Some('Q') => return (GrayZoneResolution::Quit, summary),
 			Some('d') | Some('D') => print_block_diff(new_text, existing_text, existing_id),
+			Some('v') | Some('V') => {
+				if let Some(ref existing) = summary {
+					eprintln!("\n{}\n", existing.text);
+				} else {
+					match backend {
+						Some(llm) => {
+							let (added, removed) = util::diff_regions(new_text, existing_text);
+							let instructions = prompts::default_diff_instructions();
+							let prompt = prompts::document_diff_prompt(&added, &removed, instructions);
+							eprintln!("  generating summary...");
+							match llm.chat(&prompt, model) {
+								Ok(text) => {
+									eprintln!("\n{}\n", text);
+									summary = Some(DiffSummary {
+										text,
+										model: model.to_string(),
+										prompt_hash: prompts::compute_prompt_hash(instructions),
+									});
+								}
+								Err(error) => eprintln!("  LLM summary failed: {}", error),
+							}
+						}
+						None => eprintln!("  no LLM backend configured"),
+					}
+				}
+			}
 			_ => eprintln!("  unrecognized choice"),
 		}
 	}
@@ -323,7 +346,7 @@ pub fn ingest_file(
 	connection: &rusqlite::Connection,
 	file_path: &Path,
 	config: &config::Config,
-	options: &IngestOptions,
+	options: &IngestOptions<'_>,
 	gray_zones: &mut Vec<GrayZoneCase>,
 ) -> Result<IngestOutcome> {
 	let canonical_path = file_path.canonicalize()
@@ -503,6 +526,7 @@ pub fn ingest_file(
 		similarity: f64,
 		shared_block_words: Option<usize>,
 		resolution: Resolution,
+		summary: Option<DiffSummary>,
 	}
 	struct GrayCandidate {
 		id: i64,
@@ -526,6 +550,7 @@ pub fn ingest_file(
 				similarity: sim,
 				shared_block_words: None,
 				resolution: Resolution::Superseded,
+				summary: None,
 			});
 			break;
 		}
@@ -543,6 +568,7 @@ pub fn ingest_file(
 					similarity: sim,
 					shared_block_words: Some(shared),
 					resolution: Resolution::Superseded,
+					summary: None,
 				});
 				break;
 			}
@@ -564,8 +590,8 @@ pub fn ingest_file(
 
 	if near_dup.is_none() {
 		if let Some(gray) = strongest_gray {
-			let resolution = if options.interactive {
-				match prompt_gray_zone(
+			let (resolution, summary) = if options.interactive {
+				let (choice, summary) = prompt_gray_zone(
 					&new_path,
 					gray.id,
 					&gray.path,
@@ -574,7 +600,10 @@ pub fn ingest_file(
 					gray.shared_block_words,
 					&new_text,
 					&gray.existing_text,
-				) {
+					options.backend,
+					&options.model,
+				);
+				let resolution = match choice {
 					GrayZoneResolution::Supersede => Resolution::Superseded,
 					GrayZoneResolution::KeepBoth => {
 						eprintln!(
@@ -587,7 +616,8 @@ pub fn ingest_file(
 						eprintln!("  aborted at {}", new_path);
 						return Ok(IngestOutcome::Quit);
 					}
-				}
+				};
+				(resolution, summary)
 			} else {
 				eprintln!(
 					"  near-match: doc {} {} (similarity: {:.2}, shared block: ~{} words) — keeping both",
@@ -600,7 +630,7 @@ pub fn ingest_file(
 					similarity: gray.similarity,
 					shared_block_words: gray.shared_block_words,
 				});
-				Resolution::Pending
+				(Resolution::Pending, None)
 			};
 			near_dup = Some(NearDupEvent {
 				existing_id: gray.id,
@@ -608,6 +638,7 @@ pub fn ingest_file(
 				similarity: gray.similarity,
 				shared_block_words: Some(gray.shared_block_words),
 				resolution,
+				summary,
 			});
 		}
 	}
@@ -657,7 +688,7 @@ pub fn ingest_file(
 				event.existing_id, event.existing_path, event.similarity,
 			);
 		}
-		storage::insert_document_relation(
+		let relation_id = storage::insert_document_relation(
 			&transaction,
 			document_id.0,
 			event.existing_id,
@@ -666,6 +697,15 @@ pub fn ingest_file(
 			event.shared_block_words.map(|words| words as i64),
 			resolution,
 		)?;
+		if let Some(summary) = event.summary {
+			storage::set_relation_summary(
+				&transaction,
+				relation_id,
+				&summary.text,
+				&summary.model,
+				&summary.prompt_hash,
+			)?;
+		}
 	}
 
 	transaction.commit()?;
@@ -683,7 +723,7 @@ pub fn ingest_directory(
 	connection: &rusqlite::Connection,
 	directory: &Path,
 	config: &config::Config,
-	options: &IngestOptions,
+	options: &IngestOptions<'_>,
 ) -> Result<(u32, u32)> {
 	let mut ingested = 0u32;
 	let mut skipped = 0u32;

@@ -1,6 +1,7 @@
 pub mod chunking;
 pub mod config;
 pub mod derive;
+pub mod diff;
 pub mod embed;
 pub mod extract;
 pub mod types;

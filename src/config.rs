@@ -668,3 +668,168 @@ impl ExtractConfig {
 		crate::prompts::compute_prompt_hash(&self.get_rules())
 	}
 }
+
+#[derive(Debug, Deserialize)]
+struct DeriveSectionToml {
+	detailed_model: Option<String>,
+	brief_model: Option<String>,
+	#[serde(default = "default_prompt_version")]
+	prompt_version: String,
+	#[serde(default)]
+	prompts: std::collections::HashMap<String, String>,
+	#[serde(default = "default_short_threshold")]
+	short_threshold: usize,
+	#[serde(default = "default_medium_threshold")]
+	medium_threshold: usize,
+}
+
+impl Default for DeriveSectionToml {
+	fn default() -> Self {
+		DeriveSectionToml {
+			detailed_model: None,
+			brief_model: None,
+			prompt_version: default_prompt_version(),
+			prompts: std::collections::HashMap::new(),
+			short_threshold: default_short_threshold(),
+			medium_threshold: default_medium_threshold(),
+		}
+	}
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtractSectionToml {
+	model: Option<String>,
+	#[serde(default)]
+	framings: std::collections::HashMap<String, String>,
+	rules: Option<String>,
+}
+
+impl Default for ExtractSectionToml {
+	fn default() -> Self {
+		ExtractSectionToml {
+			model: None,
+			framings: std::collections::HashMap::new(),
+			rules: None,
+		}
+	}
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DiffSectionToml {
+	model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LlmsConfigToml {
+	#[serde(default = "default_backend_kind")]
+	backend: BackendKind,
+	#[serde(default = "default_ollama_url")]
+	ollama_url: String,
+	model: Option<String>,
+	embed_model: Option<String>,
+	openai: Option<OpenAiConfigToml>,
+	#[serde(default)]
+	derive: DeriveSectionToml,
+	#[serde(default)]
+	extract: ExtractSectionToml,
+	#[serde(default)]
+	diff: DiffSectionToml,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffConfig {
+	pub model: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmsConfig {
+	pub backend: BackendConfig,
+	pub derive: DeriveConfig,
+	pub extract: ExtractConfig,
+	pub diff: DiffConfig,
+}
+
+impl LlmsConfig {
+	pub fn load(config_dir: &Path) -> Result<Self> {
+		let path = config_dir.join("llms.toml");
+		if !path.exists() {
+			return Self::load_legacy(config_dir);
+		}
+
+		let text = std::fs::read_to_string(&path)
+			.with_context(|| format!("reading llms config from {}", path.display()))?;
+		let raw: LlmsConfigToml = toml::from_str(&text)
+			.context("parsing llms.toml")?;
+
+		let default_model = raw.model.clone();
+
+		let openai = match raw.openai {
+			Some(o) => OpenAiConfig {
+				base_url: o.base_url
+					.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+				auth: o.auth,
+				oauth_token_url: o.oauth_token_url,
+				oauth_scope: o.oauth_scope,
+			},
+			None => OpenAiConfig {
+				base_url: "https://api.openai.com/v1".to_string(),
+				auth: OpenAiAuth::ApiKey,
+				oauth_token_url: None,
+				oauth_scope: None,
+			},
+		};
+
+		let backend = BackendConfig {
+			backend: raw.backend,
+			ollama_url: raw.ollama_url,
+			model: raw.model.clone(),
+			embed_model: raw.embed_model.clone(),
+			openai,
+		};
+
+		let derive_raw = raw.derive;
+		let derive = DeriveConfig {
+			detailed_model: derive_raw.detailed_model
+				.or_else(|| default_model.clone())
+				.unwrap_or_else(default_detailed_model),
+			brief_model: derive_raw.brief_model
+				.or_else(|| default_model.clone())
+				.unwrap_or_else(default_brief_model),
+			prompt_version: derive_raw.prompt_version,
+			prompts: derive_raw.prompts.into_iter()
+				.map(|(k, v)| (k, expand_tilde(&v)))
+				.collect(),
+			short_threshold: derive_raw.short_threshold,
+			medium_threshold: derive_raw.medium_threshold,
+		};
+
+		let extract_raw = raw.extract;
+		let extract = ExtractConfig {
+			model: extract_raw.model
+				.or_else(|| default_model.clone())
+				.unwrap_or_else(default_extract_model),
+			framings: extract_raw.framings.into_iter()
+				.map(|(k, v)| (k, expand_tilde(&v)))
+				.collect(),
+			rules_path: extract_raw.rules.map(|p| expand_tilde(&p)),
+		};
+
+		let diff = DiffConfig {
+			model: raw.diff.model
+				.or_else(|| default_model.clone())
+				.unwrap_or_else(default_detailed_model),
+		};
+
+		Ok(LlmsConfig { backend, derive, extract, diff })
+	}
+
+	fn load_legacy(config_dir: &Path) -> Result<Self> {
+		let backend = BackendConfig::load(config_dir)?;
+		let derive = DeriveConfig::load(config_dir)?;
+		let extract = ExtractConfig::load(config_dir)?;
+		let diff = DiffConfig {
+			model: backend.model.clone().unwrap_or_else(default_detailed_model),
+		};
+		Ok(LlmsConfig { backend, derive, extract, diff })
+	}
+}

@@ -5,6 +5,7 @@ use std::sync::Once;
 
 use what_was_said::config::{self, BackendConfig, BackendKind};
 use what_was_said::derive::{self, DeriveOptions};
+use what_was_said::diff;
 use what_was_said::embed;
 use what_was_said::extract::{self, ExtractOptions};
 use what_was_said::ingest;
@@ -143,6 +144,12 @@ enum Command {
 		#[arg(long, help = "Limit number of documents to extract")]
 		limit: Option<usize>,
 	},
+
+	/// Summarize differences between near-duplicate documents
+	Diff {
+		#[arg(long, help = "Re-summarize all relations, even if already summarized")]
+		force: bool,
+	},
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -194,35 +201,40 @@ fn main() -> Result<()> {
 	let config = config::load_or_default(
 		Some(config_file.as_path()).filter(|p| p.exists()),
 	)?;
-	let mut backend_config = BackendConfig::load(&config_dir)?;
+	let mut llms = config::LlmsConfig::load(&config_dir)?;
 	let connection = open_db(&db_path)?;
 	let json_output = cli.json;
 
 	if let Some(b) = &cli.backend {
-		backend_config.backend = match b.as_str() {
+		llms.backend.backend = match b.as_str() {
 			"ollama" => BackendKind::Ollama,
 			"openai" => BackendKind::OpenAi,
 			other => anyhow::bail!("unknown backend: {}", other),
 		};
 	}
 	if let Some(url) = cli.ollama {
-		backend_config.ollama_url = url;
+		llms.backend.ollama_url = url;
 	}
-	if let Some(m) = cli.model {
-		backend_config.model = Some(m);
+	if let Some(m) = &cli.model {
+		llms.backend.model = Some(m.clone());
+		llms.diff.model = m.clone();
 	}
 	if let Some(m) = cli.embed_model {
-		backend_config.embed_model = Some(m);
+		llms.backend.embed_model = Some(m);
 	}
 
-	let model = backend_config.model.clone()
-		.unwrap_or_else(|| "mistral-nemo".to_string());
-	let embed_model = backend_config.embed_model.clone()
+	let embed_model = llms.backend.embed_model.clone()
 		.unwrap_or_else(|| "qwen3-embedding:8b".to_string());
 
 	match cli.command {
 		Some(Command::Ingest { path, force, non_interactive }) => {
-			let options = ingest::IngestOptions { force, interactive: !non_interactive };
+			let llm = create_backend(&llms.backend).ok();
+			let options = ingest::IngestOptions {
+				force,
+				interactive: !non_interactive,
+				backend: llm.as_deref(),
+				model: llms.diff.model.clone(),
+			};
 			if path.is_dir() {
 				let (ingested, skipped) = ingest::ingest_directory(
 					&connection, &path, &config, &options,
@@ -284,7 +296,7 @@ fn main() -> Result<()> {
 						anyhow::bail!("no embeddings yet - run 'what-was-said embed' first");
 					}
 
-					let backend = create_backend(&backend_config)?;
+					let backend = create_backend(&llms.backend)?;
 					let query_embedding = backend.embed(&query, &embed_model)?;
 					let results = query::find_similar_grouped(&connection, &query_embedding, 10)?;
 
@@ -375,11 +387,11 @@ fn main() -> Result<()> {
 			}
 		}
 		Some(Command::Embed { limit }) => {
-			let backend = create_backend(&backend_config)?;
+			let backend = create_backend(&llms.backend)?;
 			embed::run(&connection, backend.as_ref(), &embed_model, limit)?;
 		}
 		Some(Command::Derive { missing, stale, bad_detailed, bad_brief, force, status, limit }) => {
-			let derive_config = config::DeriveConfig::load(&config_dir)?;
+			let derive_config = &llms.derive;
 
 			if status {
 				if json_output {
@@ -391,8 +403,8 @@ fn main() -> Result<()> {
 				return Ok(());
 			}
 
-			let backend = create_backend(&backend_config)?;
-			derive::run(&connection, backend.as_ref(), &derive_config, &DeriveOptions {
+			let backend = create_backend(&llms.backend)?;
+			derive::run(&connection, backend.as_ref(), derive_config, &DeriveOptions {
 				force,
 				missing,
 				stale,
@@ -402,7 +414,7 @@ fn main() -> Result<()> {
 			})?;
 		}
 		Some(Command::Extract { force, status, limit }) => {
-			let extract_config = config::ExtractConfig::load(&config_dir)?;
+			let extract_config = &llms.extract;
 
 			if status {
 				if json_output {
@@ -421,13 +433,17 @@ fn main() -> Result<()> {
 				return Ok(());
 			}
 
-			let backend = create_backend(&backend_config)?;
+			let backend = create_backend(&llms.backend)?;
 			let skip_doctypes = config.no_extract_doctypes();
-			extract::run(&connection, backend.as_ref(), &extract_config, &ExtractOptions {
+			extract::run(&connection, backend.as_ref(), extract_config, &ExtractOptions {
 				force,
 				limit,
 				status: false,
 			}, &skip_doctypes)?;
+		}
+		Some(Command::Diff { force }) => {
+			let backend = create_backend(&llms.backend)?;
+			diff::run(&connection, backend.as_ref(), &llms.diff.model, force)?;
 		}
 		Some(Command::In { id }) => {
 			let doc = storage::get_document(&connection, id)?
@@ -461,11 +477,11 @@ fn main() -> Result<()> {
 			}
 		}
 		Some(Command::Serve { port }) => {
-			let backend = create_backend(&backend_config)?;
+			let backend = create_backend(&llms.backend)?;
 			serve::run(connection, backend, embed_model, port)?;
 		}
 		Some(Command::Browse { tags, exclude, include_all }) => {
-			let backend = create_backend(&backend_config)?;
+			let backend = create_backend(&llms.backend)?;
 			let filter = tui::GlobalFilter {
 				include: tags,
 				exclude,
@@ -478,7 +494,7 @@ fn main() -> Result<()> {
 			tui::run(&connection, filter, search_config, cli.theme.as_deref())?;
 		}
 		None => {
-			let backend = create_backend(&backend_config)?;
+			let backend = create_backend(&llms.backend)?;
 			let filter = tui::GlobalFilter::default();
 			let search_config = tui::SearchConfig {
 				embed_model: embed_model.clone(),
