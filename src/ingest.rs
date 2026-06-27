@@ -166,10 +166,16 @@ pub struct IngestOptions {
 	pub interactive: bool,
 }
 
+pub enum IngestOutcome {
+	Ingested,
+	Skipped,
+	Quit,
+}
+
 pub struct GrayZoneCase {
-	pub new_source_title: String,
+	pub new_path: String,
 	pub existing_id: i64,
-	pub existing_title: String,
+	pub existing_path: String,
 	pub similarity: f64,
 	pub shared_block_words: usize,
 }
@@ -262,9 +268,9 @@ fn print_block_diff(new_text: &str, existing_text: &str, existing_id: i64) {
 }
 
 fn prompt_gray_zone(
-	new_title: &str,
+	new_path: &str,
 	existing_id: i64,
-	existing_title: &str,
+	existing_path: &str,
 	existing_date: &str,
 	similarity: f64,
 	shared_block_words: usize,
@@ -274,8 +280,8 @@ fn prompt_gray_zone(
 	use std::io::Write;
 
 	eprintln!("Near-duplicate detected:");
-	eprintln!("  existing: \"{}\" (doc {}, ingested {})", existing_title, existing_id, existing_date);
-	eprintln!("  new:      \"{}\" (current file)", new_title);
+	eprintln!("  existing: {} (doc {}, ingested {})", existing_path, existing_id, existing_date);
+	eprintln!("  new:      {} (current file)", new_path);
 	eprintln!("  similarity: {:.2}, shared block: ~{} words", similarity, shared_block_words);
 
 	loop {
@@ -303,10 +309,10 @@ pub fn print_gray_zone_summary(cases: &[GrayZoneCase]) {
 	eprintln!("\n{} gray-zone near-duplicate(s) kept for manual review:", cases.len());
 	for case in cases {
 		eprintln!(
-			"  \"{}\" vs doc {} \"{}\" (similarity: {:.2}, shared block: ~{} words)",
-			case.new_source_title,
+			"  {}\n    vs doc {} {} (similarity: {:.2}, shared block: ~{} words)",
+			case.new_path,
 			case.existing_id,
-			case.existing_title,
+			case.existing_path,
 			case.similarity,
 			case.shared_block_words,
 		);
@@ -319,14 +325,14 @@ pub fn ingest_file(
 	config: &config::Config,
 	options: &IngestOptions,
 	gray_zones: &mut Vec<GrayZoneCase>,
-) -> Result<bool> {
+) -> Result<IngestOutcome> {
 	let canonical_path = file_path.canonicalize()
 		.unwrap_or_else(|_| file_path.to_path_buf());
 	let file_path = canonical_path.as_path();
 	let file_path_str = file_path.to_string_lossy();
 
 	if !options.force && storage::document_exists_by_path(connection, &file_path_str)? {
-		return Ok(false);
+		return Ok(IngestOutcome::Skipped);
 	}
 
 	let text = std::fs::read_to_string(file_path)
@@ -334,7 +340,7 @@ pub fn ingest_file(
 
 	let lines: Vec<&str> = text.lines().collect();
 	if lines.is_empty() {
-		return Ok(false);
+		return Ok(IngestOutcome::Skipped);
 	}
 
 	let source_title = parse_source_header(lines[0])
@@ -362,7 +368,7 @@ pub fn ingest_file(
 	if let Some(ref m) = doctype_match {
 		if m.skip {
 			eprintln!("  skipping (doctype '{}' marked skip)", m.name);
-			return Ok(false);
+			return Ok(IngestOutcome::Skipped);
 		}
 	}
 
@@ -386,7 +392,7 @@ pub fn ingest_file(
 			Parser::CopilotEmail => parse_copilot_email_summary(&body),
 			Parser::Whisper => {
 				eprintln!("  whisper parser not yet implemented, skipping");
-				return Ok(false);
+				return Ok(IngestOutcome::Skipped);
 			}
 			Parser::Whole => {
 				vec![SegmentedEntry {
@@ -405,7 +411,7 @@ pub fn ingest_file(
 
 	if segmented.is_empty() {
 		eprintln!("  no entries found, skipping");
-		return Ok(false);
+		return Ok(IngestOutcome::Skipped);
 	}
 
 	let title = segmented.iter()
@@ -435,7 +441,7 @@ pub fn ingest_file(
 
 				if entries_to_add.is_empty() {
 					eprintln!("  all entries already exist in doc {}, skipping", existing_doc_id);
-					return Ok(false);
+					return Ok(IngestOutcome::Skipped);
 				}
 
 				let transaction = connection.unchecked_transaction()?;
@@ -472,20 +478,26 @@ pub fn ingest_file(
 					existing_doc_id,
 					overlap_len,
 				);
-				return Ok(true);
+				return Ok(IngestOutcome::Ingested);
 			}
 		}
 	}
 
 	let doc_hash = minhash::minhash_document(&segmented);
 	let new_text = join_entry_bodies(&segmented);
+	let new_path = file_path_str.to_string();
+
+	let candidate_path = |candidate: &storage::DupCandidate| -> String {
+		candidate.origin_path.clone()
+			.unwrap_or_else(|| candidate.source_title.clone())
+	};
 
 	let candidates = storage::find_dup_candidates(connection, &clip_date_str, dup_window_days)?;
 	let mut superseded_doc: Option<(i64, String, f64)> = None;
 
 	struct GrayCandidate {
 		id: i64,
-		title: String,
+		path: String,
 		date: String,
 		similarity: f64,
 		shared_block_words: usize,
@@ -496,7 +508,7 @@ pub fn ingest_file(
 	for candidate in &candidates {
 		let sim = minhash::jaccard(&doc_hash, &candidate.document_minhash);
 		if sim >= dup_jaccard_high {
-			superseded_doc = Some((candidate.id, candidate.source_title.clone(), sim));
+			superseded_doc = Some((candidate.id, candidate_path(candidate), sim));
 			break;
 		}
 		if sim >= dup_jaccard_low {
@@ -507,7 +519,7 @@ pub fn ingest_file(
 				.join("\n");
 			let shared = minhash::longest_shared_block_words(&new_text, &existing_text);
 			if shared >= dup_shared_block_words {
-				superseded_doc = Some((candidate.id, candidate.source_title.clone(), sim));
+				superseded_doc = Some((candidate.id, candidate_path(candidate), sim));
 				break;
 			}
 			let stronger = strongest_gray.as_ref()
@@ -516,7 +528,7 @@ pub fn ingest_file(
 			if stronger {
 				strongest_gray = Some(GrayCandidate {
 					id: candidate.id,
-					title: candidate.source_title.clone(),
+					path: candidate_path(candidate),
 					date: candidate.clip_date.clone(),
 					similarity: sim,
 					shared_block_words: shared,
@@ -530,9 +542,9 @@ pub fn ingest_file(
 		if let Some(gray) = strongest_gray {
 			if options.interactive {
 				match prompt_gray_zone(
-					&source_title,
+					&new_path,
 					gray.id,
-					&gray.title,
+					&gray.path,
 					&gray.date,
 					gray.similarity,
 					gray.shared_block_words,
@@ -540,28 +552,28 @@ pub fn ingest_file(
 					&gray.existing_text,
 				) {
 					GrayZoneResolution::Supersede => {
-						superseded_doc = Some((gray.id, gray.title.clone(), gray.similarity));
+						superseded_doc = Some((gray.id, gray.path.clone(), gray.similarity));
 					}
 					GrayZoneResolution::KeepBoth => {
 						eprintln!(
-							"  keeping both: doc {} \"{}\" (similarity: {:.2}, shared block: ~{} words)",
-							gray.id, gray.title, gray.similarity, gray.shared_block_words,
+							"  keeping both: doc {} {} (similarity: {:.2}, shared block: ~{} words)",
+							gray.id, gray.path, gray.similarity, gray.shared_block_words,
 						);
 					}
 					GrayZoneResolution::Quit => {
-						eprintln!("  aborted, not ingesting \"{}\"", source_title);
-						return Ok(false);
+						eprintln!("  aborted at {}", new_path);
+						return Ok(IngestOutcome::Quit);
 					}
 				}
 			} else {
 				eprintln!(
-					"  near-match: doc {} \"{}\" (similarity: {:.2}, shared block: ~{} words) — keeping both",
-					gray.id, gray.title, gray.similarity, gray.shared_block_words,
+					"  near-match: doc {} {} (similarity: {:.2}, shared block: ~{} words) — keeping both",
+					gray.id, gray.path, gray.similarity, gray.shared_block_words,
 				);
 				gray_zones.push(GrayZoneCase {
-					new_source_title: source_title.clone(),
+					new_path: new_path.clone(),
 					existing_id: gray.id,
-					existing_title: gray.title.clone(),
+					existing_path: gray.path.clone(),
 					similarity: gray.similarity,
 					shared_block_words: gray.shared_block_words,
 				});
@@ -601,11 +613,11 @@ pub fn ingest_file(
 		total_chunks += chunks.len();
 	}
 
-	if let Some((old_id, ref old_title, sim)) = superseded_doc {
+	if let Some((old_id, ref old_path, sim)) = superseded_doc {
 		storage::add_tag(&transaction, old_id, "superseded")?;
 		eprintln!(
-			"  tagged doc {} \"{}\" as superseded (similarity: {:.2})",
-			old_id, old_title, sim,
+			"  tagged doc {} {} as superseded (similarity: {:.2})",
+			old_id, old_path, sim,
 		);
 	}
 
@@ -617,14 +629,14 @@ pub fn ingest_file(
 		total_chunks,
 		source_title,
 	);
-	Ok(true)
+	Ok(IngestOutcome::Ingested)
 }
 
 pub fn ingest_directory(
 	connection: &rusqlite::Connection,
 	directory: &Path,
 	config: &config::Config,
-	force: bool,
+	options: &IngestOptions,
 ) -> Result<(u32, u32)> {
 	let mut ingested = 0u32;
 	let mut skipped = 0u32;
@@ -641,13 +653,16 @@ pub fn ingest_directory(
 
 	eprintln!("found {} files in {}", paths.len(), directory.display());
 
-	let options = IngestOptions { force, interactive: false };
 	let mut gray_zones = Vec::new();
 
 	for path in &paths {
-		match ingest_file(connection, path, config, &options, &mut gray_zones) {
-			Ok(true) => ingested += 1,
-			Ok(false) => skipped += 1,
+		match ingest_file(connection, path, config, options, &mut gray_zones) {
+			Ok(IngestOutcome::Ingested) => ingested += 1,
+			Ok(IngestOutcome::Skipped) => skipped += 1,
+			Ok(IngestOutcome::Quit) => {
+				eprintln!("aborted, stopping ingest");
+				break;
+			}
 			Err(error) => eprintln!("error ingesting {}: {:#}", path.display(), error),
 		}
 	}

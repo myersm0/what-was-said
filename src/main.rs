@@ -222,9 +222,10 @@ fn main() -> Result<()> {
 
 	match cli.command {
 		Some(Command::Ingest { path, force, non_interactive }) => {
+			let options = ingest::IngestOptions { force, interactive: !non_interactive };
 			if path.is_dir() {
 				let (ingested, skipped) = ingest::ingest_directory(
-					&connection, &path, &config, force,
+					&connection, &path, &config, &options,
 				)?;
 				if skipped > 0 {
 					eprintln!("ingested {} files, skipped {} (already in db)", ingested, skipped);
@@ -232,13 +233,12 @@ fn main() -> Result<()> {
 					eprintln!("ingested {} files", ingested);
 				}
 			} else {
-				let options = ingest::IngestOptions { force, interactive: !non_interactive };
 				let mut gray_zones = Vec::new();
-				let ingested = ingest::ingest_file(&connection, &path, &config, &options, &mut gray_zones)?;
-				if ingested {
-					eprintln!("ingested 1 file");
-				} else {
-					eprintln!("skipped 1 file");
+				let outcome = ingest::ingest_file(&connection, &path, &config, &options, &mut gray_zones)?;
+				match outcome {
+					ingest::IngestOutcome::Ingested => eprintln!("ingested 1 file"),
+					ingest::IngestOutcome::Skipped => eprintln!("skipped 1 file"),
+					ingest::IngestOutcome::Quit => eprintln!("aborted"),
 				}
 				ingest::print_gray_zone_summary(&gray_zones);
 			}
