@@ -34,11 +34,11 @@ Personal knowledge base for clipped documents with full-text and semantic search
                     └───────────┘
 ```
 
-`LlmBackend` is used by derive, extract, tui, and serve. Ingestion is deterministic — no LLM dependency.
+`LlmBackend` is used by derive, extract, diff, tui, and serve. Ingestion is deterministic by default — no LLM dependency for parsing, chunking, dup detection, or storage. The one exception is the interactive near-duplicate prompt's optional `[v]iew LLM summary` action, which is on demand only and degrades gracefully when no backend is configured (see ingest.rs).
 
 `query` sits between storage and the UI layers (tui, serve, CLI). It owns search result grouping, dedup, and ranking. Both tui and serve call the same query functions.
 
-`prompts` is used by derive and extract for prompt construction, and by config for prompt hashing.
+`prompts` is used by derive, extract, and diff for prompt construction, and by config for prompt hashing.
 
 ## Data Model
 
@@ -53,7 +53,9 @@ Document (1) ──► Entry (n) ──► Chunk (n)
     │
     ├── source_title, doctype, merge_strategy, tags, derived_content, document_minhash
     │
-    └── claims (n) ──► vec_claims (1:1, via sqlite-vec)
+    ├── claims (n) ──► vec_claims (1:1, via sqlite-vec)
+    │
+    └── document_relations (n) ──► another Document (near-duplicate pairs, with diff summary)
 ```
 
 ### Key Tables
@@ -90,14 +92,23 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 
 **vec_claims**: sqlite-vec `vec0` virtual table for semantic search over claims. Separate from `vec_chunks` because claims and chunks are different semantic objects with different query purposes and re-embedding lifecycles. Created lazily on first `what-was-said embed` after claims exist.
 
+**document_relations**: One row per near-duplicate decision made at ingest, recording the relationship between a newly-ingested document and an existing one. The document-level sibling of the planned `claim_links` table (same cross-reference shape — a pair, a relation type, a score, optional LLM commentary — at a different granularity). Written for every resolution, including auto-supersedes, so it is a complete audit trail of supersession history.
+- `from_document_id`, `to_document_id`: The new and existing documents (both `ON DELETE CASCADE`)
+- `relation`: Relation type (currently always `near_duplicate`)
+- `similarity`: Jaccard similarity at the time of the decision
+- `shared_block_words`: Longest shared contiguous block in words; NULL when the pair was auto-superseded on Jaccard alone (the block was never computed — see ingest.rs)
+- `resolution`: `superseded` | `kept_both` | `pending` (deferred non-interactive cases), CHECK-constrained
+- `summary`, `summary_model`, `summary_prompt_hash`, `summarized_at`: LLM diff summary and its provenance, for staleness detection
+- `UNIQUE(from_document_id, to_document_id)`; both endpoints indexed
+
 ## Module Responsibilities
 
 ### main.rs
 CLI parsing via clap derive API and command dispatch. Registers the sqlite-vec extension via `sqlite3_auto_extension`. Contains `open_db()` for connection setup and `create_backend()` factory that returns `Box<dyn LlmBackend>` based on `BackendConfig`.
 
-The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). `BackendConfig` is loaded from `backend.toml` within this directory, with CLI flags (`--backend`, `--ollama`, `--model`, `--embed-model`) as optional overrides. All CLI backend/model flags are `Option<String>` — no hardcoded defaults in clap.
+The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). `LlmsConfig::load` reads all LLM configuration (backend, auth, model defaults, and per-task overrides) from `llms.toml` within this directory, falling back to the legacy `backend.toml`/`derive.toml`/`extract.toml` files when `llms.toml` is absent. CLI flags (`--backend`, `--ollama`, `--model`, `--embed-model`) are optional overrides; `--model` overrides both the general and diff models. All CLI backend/model flags are `Option<String>` — no hardcoded defaults in clap.
 
-Subcommands: ingest, about (with `--method=[exact|semantic]`), in, dump, stats, embed, derive, extract, serve, browse (default).
+Subcommands: ingest (file or directory, with `--non-interactive`), about (with `--method=[exact|semantic]`), in, dump, stats, embed, derive, extract, diff, serve, browse (default).
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
@@ -118,7 +129,7 @@ The trait requires `Send + Sync` for use in the async serve module.
 - **API key** (`auth = "api_key"`): Reads `OPENAI_API_KEY` from environment. Compatible with standard OpenAI, Azure OpenAI, and other OpenAI-compatible endpoints.
 - **OAuth2 client credentials** (`auth = "oauth"`): Reads `OAUTH2_CLIENT_ID` and `OAUTH2_CLIENT_SECRET` from environment. Fetches bearer tokens from a configured token URL with a configured scope. Tokens are cached in a `Mutex<Option<CachedToken>>` (for `Send + Sync` compatibility) and refreshed automatically 60 seconds before expiry.
 
-The primary constructor is `from_config(&OpenAiConfig)`, taking its configuration from `backend.toml`. A convenience `from_env()` constructor remains for the plain API key case.
+The primary constructor is `from_config(&OpenAiConfig)`, taking its configuration from the `[openai]` section of `llms.toml`. A convenience `from_env()` constructor remains for the plain API key case.
 
 Translates the `format: Some("json")` parameter to OpenAI's `response_format: {"type": "json_object"}`.
 
@@ -184,8 +195,9 @@ Single source of truth for all prompt construction. Contains default prompt text
 - `detailed_summary_prompt(document_text, instructions)`: Assembles detailed summary prompt
 - `brief_summary_prompt(detailed_summary, instructions)`: Assembles brief summary prompt
 - `claim_extraction_prompt(document_text, rules, framing)`: Assembles claim extraction prompt
+- `document_diff_prompt(added, removed, instructions)`: Assembles the near-duplicate change-summary prompt from the non-overlapping regions of a pair
 - `compute_prompt_hash(rules)`: Hashes rules text for staleness detection
-- `default_detailed_prompt(tier)`, `default_brief_prompt()`, `default_extract_rules()`: Built-in fallback prompt text
+- `default_detailed_prompt(tier)`, `default_brief_prompt()`, `default_extract_rules()`, `default_diff_instructions()`: Built-in fallback prompt text
 
 ### config.rs
 Loads and parses configuration files from the config directory. Handles doctype detection.
@@ -201,12 +213,14 @@ Key types:
 - `TagConfig`: Tag hierarchy, default exclusions, color assignments
 - `DeriveConfig`: Model selection, prompt thresholds. `resolve_detailed_prompt(content_len)` checks the prompts map by tier key (`"short"`, `"medium"`, `"long"`), then `"default"`, falling back to built-in defaults via `prompts.rs`. `resolve_brief_prompt()` same pattern.
 - `ExtractConfig`: Model selection, source-format framing paths, rules path. `prompt_hash()` delegates to `prompts::compute_prompt_hash()`.
+- `DiffConfig`: Model selection for near-duplicate change summaries.
 - `BackendConfig`: Backend selection, model defaults, OpenAI auth configuration
 - `BackendKind`: Enum (`Ollama`, `OpenAi`)
 - `OpenAiAuth`: Enum (`ApiKey`, `OAuth`)
 - `OpenAiConfig`: Base URL, auth strategy, OAuth token URL and scope
+- `LlmsConfig`: Aggregate of `BackendConfig`, `DeriveConfig`, `ExtractConfig`, and `DiffConfig`, loaded from a single `llms.toml`
 
-`BackendConfig::load(config_dir)` reads `backend.toml` from the config directory, falling back to defaults (Ollama on localhost) if the file doesn't exist. `DeriveConfig::load(config_dir)` reads `derive.toml` similarly. `ExtractConfig::load(config_dir)` reads `extract.toml` similarly, defaulting to `gemma3:27b` and the compiled-in adaptive prompt.
+`LlmsConfig::load(config_dir)` reads `llms.toml` from the config directory and builds all four sub-configs. The top-level `model` is the default generation model; each per-task model (`[derive].detailed_model`/`brief_model`, `[extract].model`, `[diff].model`) falls back to it when omitted, and to a compiled-in default (`qwen2.5:32b` for generation, `gemma3:27b` for extraction) when the top-level is also unset — so the diff/`[v]` path can never silently fall through to an unrelated default. If `llms.toml` is absent, `load_legacy` reads the older `backend.toml`/`derive.toml`/`extract.toml` via the still-present `BackendConfig::load`/`DeriveConfig::load`/`ExtractConfig::load`, and resolves the diff model from the backend model. CLI `--model` overrides both the backend and diff models.
 
 ### ingest.rs
 Text parsing, segmentation, and ingestion orchestration. No LLM dependency — ingestion is a pure function of (file + config).
@@ -227,7 +241,13 @@ run_preprocessor(script_path, file_path) -> SegmentationResult
 - `ingest_directory()`: Iterates directory, calls ingest_file per file
 - `find_overlap()`: Detects overlapping entries for positional merge
 
-**Near-duplicate detection**: After parsing but before inserting, computes a document-level MinHash signature and compares against existing documents within a ±180 day window. If Jaccard similarity ≥ 0.7 (`dup_jaccard_threshold`), the older document is tagged `superseded`. Near-misses (≥ 0.4) are logged to stderr for diagnostic tuning.
+**Near-duplicate detection**: After parsing but before inserting, computes a document-level MinHash signature and compares against existing documents within a ±180 day window (`dup_window_days`). The decision combines two signals: Jaccard similarity over the MinHash signatures, and `minhash::longest_shared_block_words` (the longest contiguous run of shared shingles, in words). Jaccard ≥ `dup_jaccard_high` (0.7) or a shared block ≥ `dup_shared_block_words` (300) auto-supersedes the older document. Jaccard between `dup_jaccard_low` (0.4) and `dup_jaccard_high` with a smaller block is the gray zone, resolved interactively (or kept-both under `--non-interactive`). Below `dup_jaccard_low` is not a match.
+
+The candidate loop breaks on the first auto-supersede, so when a pair clears the Jaccard-high bar the shared-block computation is skipped and `shared_block_words` is recorded as NULL — Jaccard runs on the stored signatures (no document text), whereas the block requires fetching the existing document's text and running an O(m·n) LCS, which is deliberately avoided once the decision is already made. Making the block always-computed (for a uniformly-populated audit trail) is a ~5-line reorder, left as a future option.
+
+**Interactive resolution**: `prompt_gray_zone` presents `[s]upersede old / [k]eep both / [d]iff / [v]iew LLM summary / [q]uit` on stderr/stdin. Interactive is the default for both single-file and directory ingests; `--non-interactive` keeps both and emits an end-of-run review summary. `[q]uit` aborts the whole run, so `ingest_file` returns an `IngestOutcome` enum (`Ingested` / `Skipped` / `Quit`) rather than a bool. `[v]` calls the (optional) backend on demand to summarize the change; the backend is passed as `Option<&dyn LlmBackend>` so ingestion still runs with no LLM configured. Prompts and the summary identify documents by file path.
+
+**Relation recording**: every decision (including auto-supersedes and non-interactive deferrals) is written to `document_relations` in the same transaction as the new document, via `storage::insert_document_relation`. A summary generated by `[v]` is stored on the row at resolution time.
 
 ### storage/
 All SQLite operations. Uses rusqlite directly (no ORM). Integrates sqlite-vec for vector search. Split into submodules, all re-exported from `storage/mod.rs`. Sets `PRAGMA foreign_keys = ON` and `PRAGMA journal_mode=WAL` on initialization for referential integrity and concurrent read access.
@@ -236,7 +256,7 @@ Key output types (`SimilarChunk`, `SimilarClaim`, `Claim`, `DumpDocument`, `Dump
 
 **mod.rs**: Schema initialization (`initialize()`), foreign keys pragma, WAL mode pragma, `migrate()` for schema upgrades, re-exports, tests.
 
-`migrate()` runs on every startup and handles: rebuilding the entries table to add `ON DELETE CASCADE` if missing, adding the `document_minhash` column to documents if missing, migrating the claims table if it has the old `kind` column or lacks `prompt_hash` (drops and recreates the table; re-extract to repopulate), and cleaning up any orphaned entries/chunks with an FTS rebuild.
+`migrate()` runs on every startup and handles: rebuilding the entries table to add `ON DELETE CASCADE` if missing, adding the `document_minhash` column to documents if missing, migrating the claims table if it has the old `kind` column or lacks `prompt_hash` (drops and recreates the table; re-extract to repopulate), creating the `document_relations` table and its indexes if absent (also defensively `ALTER`-ing in any summary columns missing from an older copy), and cleaning up any orphaned entries/chunks with an FTS rebuild.
 
 **documents.rs**: Document/entry/chunk CRUD, list/get/dump, counts, merge helpers.
 - `insert_document/entry/chunks`: Write path
@@ -244,6 +264,9 @@ Key output types (`SimilarChunk`, `SimilarClaim`, `Claim`, `DumpDocument`, `Dump
 - `list_documents()`: Browse-mode listing with brief summaries and tags
 - `find_documents_by_merge_key()`: Finds candidates for positional merge
 - `find_dup_candidates()`: Finds documents within a time window that have MinHash signatures, for near-duplicate comparison
+- `insert_document_relation()`: Records a near-duplicate decision in `document_relations`
+- `set_relation_summary()`: Stores an LLM diff summary (with model + prompt hash) on a relation
+- `get_relations_needing_summary(model, prompt_hash)`: Relations with a missing or stale summary, for the `diff` command
 
 **search.rs**: Raw FTS5 database access. No grouping or ranking — those live in `query.rs`.
 - `raw_fts_search()`: FTS5 MATCH with snippet generation, author/date filters pushed into SQL. Returns flat `Vec<ChunkSearchResult>`.
@@ -276,6 +299,7 @@ Shared string utilities.
 - `normalize_to_ascii()`: Converts curly quotes, em-dashes, ellipsis to ASCII equivalents. Collapses whitespace (including non-breaking spaces).
 - `truncate_str()`: Char-boundary-safe string truncation.
 - `strip_fts_markers()`: Removes FTS5 snippet highlight control characters (`\x01`, `\x02`, `\x03`) for clean JSON output.
+- `diff_regions(new, existing)`: Line-level set difference returning the only-in-new and only-in-existing blocks. Used by the ingest `[d]iff` view and to feed the diff summary prompt only the changed regions.
 
 ### chunking.rs
 Splits entry text into chunks for indexing.
@@ -314,7 +338,11 @@ Key functions:
 - `minhash_document()`: Compute a document-level signature by concatenating all entry bodies
 - `minhash_with_context()`: Compute with optional surrounding entry text for contextual hashing
 - `jaccard()`: Estimate Jaccard similarity between two signatures
+- `longest_shared_block_words()`: Longest contiguous block of shared 3-word shingles between two texts, in approximate words (rolling-DP longest-common-substring over interned shingle ids). The structural signal for near-duplicate detection, catching revisions that share a large block but fall below the Jaccard threshold overall.
 - `is_short_entry()`: Check if text is below 50 chars (used for short-entry handling)
+
+### diff.rs
+The `what-was-said diff` command: batch generation of LLM change summaries for near-duplicate pairs. Walks relations whose summary is missing or stale (`get_relations_needing_summary`, or all relations under `--force`), fetches both documents' text, computes the non-overlapping regions via `util::diff_regions`, assembles the prompt via `prompts::document_diff_prompt`, calls `backend.chat()`, and stores the result with the model and prompt hash via `storage::set_relation_summary`. Complements the on-demand `[v]` summary at ingest, covering relations that were never viewed interactively (notably non-interactive `pending` ones).
 
 ### markdown.rs
 Markdown-specific parsing (heading extraction, section splitting). Tracks fenced code block state (```` ``` ```` and `~~~` delimiters) so that `#` comment lines inside code blocks are not misinterpreted as headings.
@@ -349,12 +377,14 @@ cleanup_patterns = ["^\\s*:\\w+:\\s*$"]
 - `cleanup_patterns`: Regexes for lines to remove
 - `merge_consecutive_same_author`: Combine adjacent same-author entries
 
-### backend.toml
+### llms.toml
+
+All LLM configuration in one file: backend selection, authentication, default models, and per-task overrides. Replaces the legacy `backend.toml`/`derive.toml`/`extract.toml`; if `llms.toml` is absent those three are read as a fallback.
 
 ```toml
 backend = "openai"
 ollama_url = "http://localhost:11434"
-model = "gpt-4.1-mini"
+model = "gpt-4.1-mini"            # default generation model for every task
 embed_model = "text-embedding-3-small"
 
 [openai]
@@ -362,25 +392,50 @@ base_url = "https://api.openai.com/v1"
 auth = "oauth"
 oauth_token_url = "https://login.microsoftonline.com/.../oauth2/v2.0/token"
 oauth_scope = "api://.../.default"
+
+[derive]
+detailed_model = "qwen2.5:32b"
+brief_model = "qwen2.5:32b"
+prompt_version = "v1"
+short_threshold = 1200
+medium_threshold = 3500
+[derive.prompts]
+short = "~/.config/what-was-said/prompts/detailed_short.txt"
+medium = "~/.config/what-was-said/prompts/detailed_medium.txt"
+long = "~/.config/what-was-said/prompts/detailed_long.txt"
+brief = "~/.config/what-was-said/prompts/brief.txt"
+
+[extract]
+model = "gemma3:27b"
+rules = "~/.config/what-was-said/prompts/extract_rules.txt"
+[extract.framings]
+email = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
+slack = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
+whisper = "~/.config/what-was-said/prompts/extract_framing_voice.txt"
+
+[diff]
+model = "qwen2.5:32b"
 ```
 
-**Fields**:
+**Top-level fields**:
 - `backend`: `ollama` (default) or `openai`
 - `ollama_url`: Ollama endpoint (default: `http://localhost:11434`)
-- `model`: Default model for generation (overridden by `--model` CLI flag)
-- `embed_model`: Default model for embeddings (overridden by `--embed-model` CLI flag)
+- `model`: Default generation model. Every per-task model falls back to this when its section (or its `model` key) is omitted; the final fallback when this is also unset is a compiled-in default (`qwen2.5:32b` for generation, `gemma3:27b` for extraction). Overridden by `--model`, which also overrides the diff model.
+- `embed_model`: Default embeddings model (overridden by `--embed-model`)
 
 **`[openai]` section**:
 - `base_url`: API endpoint (default: `https://api.openai.com/v1`)
 - `auth`: `api_key` (default) or `oauth`
-- `oauth_token_url`: OAuth2 token endpoint (required when `auth = "oauth"`)
-- `oauth_scope`: OAuth2 scope (required when `auth = "oauth"`)
+- `oauth_token_url`, `oauth_scope`: Required when `auth = "oauth"`
+- Env vars: `OPENAI_API_KEY` for `api_key`; `OAUTH2_CLIENT_ID` / `OAUTH2_CLIENT_SECRET` for `oauth`
 
-Environment variables:
-- `OPENAI_API_KEY`: Required when `auth = "api_key"`
-- `OAUTH2_CLIENT_ID`, `OAUTH2_CLIENT_SECRET`: Required when `auth = "oauth"`
+**`[derive]` section**: Summary generation. Prompt tier is selected by document content length: short (<`short_threshold`), medium (<`medium_threshold`), long (≥`medium_threshold`). Custom prompts under `[derive.prompts]` are resolved by tier key (`"short"`/`"medium"`/`"long"`), then `"default"`, falling back to built-in defaults. For short documents, the brief summary is copied from the detailed output without an extra LLM call.
 
-If `backend.toml` doesn't exist, defaults to Ollama on localhost with no file needed.
+**`[extract]` section**: Claim extraction. `rules` is an optional path to a custom extraction-rules prompt (compiled-in adaptive prompt if absent). `[extract.framings]` are optional per-doctype structural hints (e.g. "attribute to speaker"), keyed by doctype name from `config.toml` — not domain instructions, which the adaptive prompt handles.
+
+**`[diff]` section**: Near-duplicate change summaries. Only `model` for now; the diff instructions are the compiled-in default (a custom prompt path, mirroring `[extract].rules`, is a future addition).
+
+All sections are optional. With no `llms.toml` and no legacy files, the system defaults to Ollama on localhost with the compiled-in per-task model defaults.
 
 ### tags.toml
 
@@ -401,41 +456,9 @@ reference = "blue"
 - `[includes]`: Parent tags that match documents tagged with any child
 - `[colors]`: Tag color for browse view markers (named colors or hex `#RRGGBB`)
 
-### derive.toml
+### derive.toml / extract.toml (legacy)
 
-```toml
-detailed_model = "qwen2.5:32b"
-brief_model = "qwen2.5:32b"
-prompt_version = "v1"
-short_threshold = 1200
-medium_threshold = 3500
-
-[prompts]
-short = "~/.config/what-was-said/prompts/detailed_short.txt"
-medium = "~/.config/what-was-said/prompts/detailed_medium.txt"
-long = "~/.config/what-was-said/prompts/detailed_long.txt"
-brief = "~/.config/what-was-said/prompts/brief.txt"
-```
-
-Prompt tier is selected by document content length: short (<1200 chars), medium (<3500), long (≥3500). Custom prompts are resolved by tier key (`"short"`, `"medium"`, `"long"`), then `"default"`, falling back to built-in defaults. For short documents, the brief summary is copied directly from the detailed output without an additional LLM call.
-
-### extract.toml
-
-```toml
-model = "gemma3:27b"
-
-[framings]
-email = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
-slack = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
-whisper = "~/.config/what-was-said/prompts/extract_framing_voice.txt"
-```
-
-**Fields**:
-- `model`: LLM for claim extraction (default: `gemma3:27b`). Independent of the global `model` in `backend.toml`.
-- `rules`: Optional path to a custom extraction rules prompt. If absent, the compiled-in adaptive prompt is used.
-- `framings`: Optional per-doctype source-format framings. These are structural hints (e.g. "attribute to speaker"), not domain-specific instructions — the adaptive prompt handles domain adaptation. Keyed by doctype name from `config.toml`.
-
-If `extract.toml` doesn't exist, defaults to `gemma3:27b` with the compiled-in prompt and no framings.
+Read only when `llms.toml` is absent. Same fields as the `[derive]` and `[extract]` sections above, but as standalone top-level files (no section header). Kept for backward compatibility; new setups should use `llms.toml`.
 
 ## External Preprocessors
 
@@ -482,11 +505,17 @@ See `examples/parsers/` for working email and Slack preprocessor scripts, and `e
    c. If overlap found, append new entries to existing doc
    d. Else fall through to step 10
 10. Compute document-level MinHash signature
-11. Query existing docs within ±180 day window for near-duplicates
-12. If Jaccard similarity ≥ 0.7, mark older doc as superseded
+11. Query existing docs within ±180 day window for near-duplicate candidates
+12. For each candidate, evaluate Jaccard and (in the gray band) longest shared block:
+    a. Jaccard ≥ 0.7 or shared block ≥ 300 words → auto-supersede older doc
+    b. 0.4 ≤ Jaccard < 0.7 with smaller block → resolve interactively (or keep both if --non-interactive)
+    c. Jaccard < 0.4 → not a match
 13. Insert document/entries/chunks
-14. Index in FTS5 (via trigger)
+14. Record each near-duplicate decision in document_relations (same transaction)
+15. Index in FTS5 (via trigger)
 ```
+
+(`[q]uit` at an interactive prompt aborts the whole run; a `[v]iew` summary generated during resolution is stored on the relation row in step 14.)
 
 ## Search Flow
 
@@ -545,7 +574,7 @@ The embed command processes chunks first, then claims, with separate progress re
 
 6. **Short-doc brief optimization**: Documents under the short threshold get their brief summary copied from the detailed output, saving an LLM round-trip on content that's already 1-2 sentences.
 
-7. **LLM backend abstraction**: `LlmBackend` trait with `OllamaClient` and `OpenAiClient` implementations. Backend selection and model defaults are configured in `backend.toml`, with CLI flags as overrides. `OpenAiClient` supports both static API keys and OAuth2 client credentials with automatic token refresh, enabling use on machines with institutional OpenAI endpoints.
+7. **LLM backend abstraction**: `LlmBackend` trait with `OllamaClient` and `OpenAiClient` implementations. Backend selection and model defaults are configured in `llms.toml`, with CLI flags as overrides. `OpenAiClient` supports both static API keys and OAuth2 client credentials with automatic token refresh, enabling use on machines with institutional OpenAI endpoints.
 
 8. **WAL mode**: SQLite journal_mode=WAL set on initialization. Enables concurrent readers during serve mode without blocking on writes.
 
@@ -553,13 +582,13 @@ The embed command processes chunks first, then claims, with separate progress re
 
 10. **Foreign key enforcement**: `PRAGMA foreign_keys = ON` set on every connection. All parent-child relationships use `ON DELETE CASCADE`. A migration system in `initialize()` detects old schemas and rebuilds tables as needed, preventing orphaned rows.
 
-11. **Near-duplicate detection via MinHash**: Documents are fingerprinted at ingest using 3-word shingle MinHash signatures. New documents are compared against existing docs within a configurable time window (default ±180 days). Near-duplicates are ingested normally but the older version is tagged `superseded`, preserving both versions while flagging staleness.
+11. **Near-duplicate detection via two signals**: Documents are fingerprinted at ingest using 3-word shingle MinHash signatures and compared against existing docs within a configurable window (default ±180 days). The decision combines Jaccard similarity with a longest-shared-block heuristic — the latter catches revisions that share a large contiguous block but fall below the Jaccard threshold overall (clip → edit → re-clip workflows). Strong matches auto-supersede the older version (tagging it `superseded`, preserving both); a middle band is resolved by an interactive prompt, defaulting on rather than logging to stderr. The block is intentionally not computed when a pair is auto-superseded on Jaccard alone (it would cost a text fetch plus an O(m·n) LCS the decision doesn't need), so `shared_block_words` is NULL in that case.
 
 12. **Themeable TUI via semantic color slots**: All TUI colors are driven by a `Theme` struct with named semantic slots (background, text, text_muted, highlight_bg, heading, code, etc.) rather than hardcoded terminal colors. Themes are TOML files with hex color values. Five built-in themes are compiled into the binary; custom themes can be loaded from the config directory or an absolute path. Tag colors remain user-configured independently of the theme.
 
 13. **Paragraph-aware chunking**: Chunk boundary detection recognizes both sentence-ending punctuation (`.!?`) and paragraph breaks (`\n\n`) as snap points. This prevents documents without terminal punctuation (bullet lists, notes, code-heavy content) from producing oversized single chunks.
 
-14. **Config-directory convention**: All configuration files (`config.toml`, `backend.toml`, `tags.toml`, `derive.toml`, `extract.toml`, themes) live in a single config directory (default `~/.config/what-was-said/`), overridable with `--config`. This allows multiple configurations (e.g. personal vs. work) by pointing at different directories.
+14. **Config-directory convention**: All configuration files (`config.toml`, `llms.toml`, `tags.toml`, themes) live in a single config directory (default `~/.config/what-was-said/`), overridable with `--config`. This allows multiple configurations (e.g. personal vs. work) by pointing at different directories.
 
 15. **Claim extraction with adaptive prompt**: A single prompt handles all document types. The LLM adapts its extraction to whatever is substantive in the text rather than following per-domain rules. Source-format framings (email attribution, voice memo context) are retained as structural hints only. No stored classification — testing showed models are weak at it, and the claim text itself is the representation.
 
@@ -571,7 +600,13 @@ The embed command processes chunks first, then claims, with separate progress re
 
 19. **Centralized prompt construction**: All prompt assembly lives in `prompts.rs`. Derive and extract are pure orchestration — they call prompt functions, then call the LLM, then store results. Custom prompts are resolved by config (per-tier keys for derive, rules/framings for extract), with built-in defaults compiled into the binary. `compute_prompt_hash` lives here too, breaking what was previously a circular dependency between config and extract.
 
-20. **Deterministic ingestion**: Ingestion has no LLM dependency. All parsing is deterministic (built-in parsers or external preprocessor scripts). LLM enrichment (summaries, embeddings, claims) is a separate post-ingest step.
+20. **Deterministic ingestion (with one scoped exception)**: Ingestion has no LLM dependency for parsing, chunking, dup detection, or storage — all deterministic (built-in parsers or external preprocessor scripts), with LLM enrichment (summaries, embeddings, claims) as a separate post-ingest step. The single exception is the interactive near-duplicate prompt's `[v]iew LLM summary` action: it calls the LLM on demand only, takes the backend as `Option<&dyn LlmBackend>`, and degrades to "no backend configured" so core ingestion always runs LLM-free.
+
+21. **Shared-block heuristic at shingle granularity**: The longest-shared-block signal is computed over interned 3-word shingle ids (a rolling-DP longest-common-substring), not characters. The question is only "is there a big shared block?", so shingle granularity is sufficient and reuses the existing tokenizer; the result is reported as an approximate word count. The full block computation is gated behind the gray band precisely because it is the expensive part (text fetch + O(m·n) LCS), unlike Jaccard which runs on the stored signatures.
+
+22. **Persisted relations as the document-level link table**: Every near-duplicate decision is recorded in `document_relations`, the document-level sibling of the planned `claim_links` table (same pair/type/score/commentary shape at a different granularity). Recording all decisions — including auto-supersedes and non-interactive deferrals — turns near-dup handling into a queryable audit trail rather than ephemeral stderr output, and gives the diff summaries (at-ingest `[v]` and batch `diff`) a durable place to attach, keyed for staleness by model + prompt hash like derive/extract.
+
+23. **All LLM config in one llms.toml**: Backend, auth, default models, and per-task (`[derive]`/`[extract]`/`[diff]`) overrides live in a single file, with each per-task model falling back to a top-level default. This removes the footgun where a task without its own configured model silently fell through to an unrelated global default. Legacy `backend.toml`/`derive.toml`/`extract.toml` are still read when `llms.toml` is absent, so migration is optional.
 
 ## Adding a New CLI Command
 
@@ -596,7 +631,11 @@ The embed command processes chunks first, then claims, with separate progress re
 
 **Re-extract all claims**: `what-was-said extract --force` then `what-was-said embed`
 
-**Debug ingestion**: Run with file directly, check stderr output. Near-dup matches and near-misses are logged to stderr.
+**Re-summarize near-duplicate changes**: `what-was-said diff --force`
+
+**Inspect near-duplicate relations**: `SELECT from_document_id, to_document_id, resolution, similarity, shared_block_words FROM document_relations ORDER BY similarity DESC;` in sqlite3
+
+**Debug ingestion**: Run with a single file directly. Gray-zone near-duplicates prompt interactively; pass `--non-interactive` for an unattended run with an end-of-run review summary of deferred cases.
 
 **Profile search**: Add timing around `query::search()` or `query::find_similar_grouped()`
 

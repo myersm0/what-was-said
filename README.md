@@ -7,7 +7,7 @@ A system for collecting, structuring, and querying personal text: emails, Slack 
 
 It does not just store documents. It parses them into structured units, tracks how they evolve over time, and makes them searchable lexically and semantically, with provenance preserved.
 
-Built on SQLite, FTS5, and [sqlite-vec](https://github.com/asg017/sqlite-vec), with optional LLM integration for embeddings, summaries, and information extraction.
+Built on SQLite, FTS5, and [sqlite-vec](https://github.com/asg017/sqlite-vec), with optional LLM integration for embeddings, summaries, claim extraction, and near-duplicate change summaries.
 
 **Status:** usable but in early development, API subject to rapid change.
 
@@ -22,9 +22,10 @@ Turns raw text into a structured, queryable collection:
 - Extracts metadata (author, timestamp, hierarchy) when present in the source
 - Builds a full-text index (FTS5) and a semantic index (embeddings via sqlite-vec)
 - Tracks provenance at every level: document → entry → chunk
-- Detects near-duplicates at ingest time using MinHash over 3-word shingles
+- Detects near-duplicates at ingest time using MinHash over 3-word shingles plus a longest-shared-block signal, resolving them automatically or by prompting you, and records every decision
 - Merges growing conversation threads incrementally without duplication
 - Generates tiered LLM summaries (brief and detailed, with prompt selection by document length)
+- Summarizes what changed between near-duplicate versions with an LLM, on demand at ingest or in a batch pass
 
 Structured segmentation and metadata extraction for non-standard formats (e.g. proprietary email exports, internal Slack threads) require you to supply a custom preprocessor script. `what-was-said` calls this script during ingestion when one is configured for a doctype — the script is responsible for parsing the raw input and emitting the structured representation that `what-was-said` then ingests. See `DEVELOPMENT.md` and the `config.toml` doctype format for details, and `examples/` for working preprocessor scripts.
 
@@ -36,13 +37,15 @@ Structured segmentation and metadata extraction for non-standard formats (e.g. p
 
 **Incremental merging** — Conversation-like sources (Slack, email) grow over time. Detects overlap and appends new content without duplication.
 
+**Near-duplicate handling** — Revisions of an already-clipped document are detected by MinHash/Jaccard and a longest-shared-block heuristic, then auto-superseded, kept, or resolved by an interactive prompt. Every decision is recorded as a queryable relation, and an LLM can summarize what changed between versions.
+
 **Provenance-first** — Every piece of text is traceable to its source and position within the original document.
 
 **Hybrid search** — FTS5 keyword search for precision; embedding-based semantic search for recall.
 
 **Local-first** — SQLite + sqlite-vec. No external services required.
 
-**LLM integration** — Summaries, embeddings, and structured claim extraction. Works with Ollama locally or any OpenAI-compatible API, including endpoints secured with OAuth2 client credentials.
+**LLM integration** — Summaries, embeddings, structured claim extraction, and near-duplicate change summaries. Works with Ollama locally or any OpenAI-compatible API, including endpoints secured with OAuth2 client credentials.
 
 **Terminal-native interface** — Fast TUI for browsing, reading, tagging, and searching your collection.
 
@@ -74,7 +77,7 @@ LLM features are optional but recommended.
 ```bash
 # Install Ollama, then pull models
 ollama pull qwen3-embedding:8b
-ollama pull qwen2.5:32b        # or configure your preferred model in backend.toml
+ollama pull qwen2.5:32b        # or configure your preferred model in llms.toml
 ```
 
 **Remote (OpenAI-compatible):**
@@ -90,7 +93,7 @@ export OAUTH2_CLIENT_ID=...
 export OAUTH2_CLIENT_SECRET=...
 ```
 
-See [Configuration](#configuration) for `backend.toml` setup.
+See [Configuration](#configuration) for `llms.toml` setup.
 
 ---
 
@@ -98,8 +101,12 @@ See [Configuration](#configuration) for `backend.toml` setup.
 
 **Ingest**
 ```bash
-what-was-said ingest ~/inbox/clips/
+what-was-said ingest ~/inbox/clips/          # a directory, or a single file
+what-was-said ingest ~/inbox/clips/note.md   # prompts on gray-zone near-duplicates
+what-was-said ingest ~/inbox/clips/ --non-interactive   # never prompt; keep both, summarize at end
 ```
+
+Ingest accepts a file or a directory. Gray-zone near-duplicates (similar, but not clearly a revision) prompt you to supersede, keep both, view a text diff, view an LLM summary of the change, or quit. `--non-interactive` skips the prompts (auto-supersede above threshold, keep both below, with a review summary at the end).
 
 **Browse and search**
 ```bash
@@ -119,6 +126,8 @@ what-was-said derive --status    # check progress
 what-was-said extract            # extract claims (missing or stale)
 what-was-said extract --force    # re-extract all
 what-was-said extract --status   # check progress
+what-was-said diff               # summarize near-duplicate changes (missing or stale)
+what-was-said diff --force        # re-summarize all relations
 ```
 
 **Serve**
@@ -140,7 +149,7 @@ what-was-said extract --status --json
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
-The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). The `--backend`, `--ollama`, `--model`, and `--embed-model` flags override their corresponding values from `backend.toml`.
+The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). The `--backend`, `--ollama`, `--model`, and `--embed-model` flags override their corresponding values from `llms.toml`.
 
 ---
 
@@ -283,7 +292,9 @@ Built-in themes are compiled into the binary. Custom themes are TOML files with 
 
 **Derived content** — LLM-generated summaries stored alongside documents. A detailed summary is generated first (prompt tier selected by document length: short/medium/long), then a brief summary is compressed from it. For short documents the brief summary is copied directly without an extra LLM call.
 
-**Near-duplicate detection** — Documents are fingerprinted at ingest time using MinHash over 3-word shingles. New documents are compared against existing documents within a ±180-day window. Jaccard similarity above 0.7 tags the older document as `superseded`; near-misses (0.4–0.7) are logged to stderr.
+**Near-duplicate detection** — Documents are fingerprinted at ingest time using MinHash over 3-word shingles, and compared against existing documents within a ±180-day window. Two signals drive the decision: Jaccard similarity over the signatures, and the longest contiguous block of shingles shared by the two documents (a structural signal that catches revisions which add or cut sections yet still share a large block). Jaccard ≥ 0.7 or a shared block ≥ 300 words auto-supersedes the older document (tagging it `superseded`). Jaccard between 0.4 and 0.7 with a smaller shared block is a gray zone: by default ingestion prompts you (supersede, keep both, view a text diff, view an LLM summary of the change, or quit), or with `--non-interactive` keeps both and lists the case in an end-of-run review summary. Jaccard below 0.4 is not a match. Every decision, including auto-supersedes, is recorded in `document_relations` (see below).
+
+**Document relations** — Each near-duplicate decision is persisted as a row in `document_relations`, recording the two documents, the similarity, the shared block size, and the resolution (`superseded`, `kept_both`, or `pending` for deferred non-interactive cases). This is a queryable audit trail of supersession history, and the input to diff summaries. `what-was-said diff` generates an LLM description of what changed between each pair (from only the non-overlapping regions, not the full documents) and stores it on the relation, with the model and prompt hash for staleness detection — so changing the model or prompt re-summarizes automatically. The same summary can be generated on demand during an interactive ingest prompt via the `[v]iew LLM summary` option, which also stores it on the relation.
 
 **Claim extraction** — LLM-extracted atomic propositions from documents. Claims are not facts: they represent what was stated, with provenance and attribution preserved. Each claim records its source document, author (when known), the extraction model, and a prompt hash for staleness detection. An adaptive prompt handles all document types; source-format framings (email attribution, voice memo context) can be configured for structural hints. Claims are embedded into a separate `vec_claims` table for semantic search independent of chunks. Running `what-was-said extract` automatically detects documents needing extraction — including those whose claims were produced by a different model or prompt than what's currently configured.
 
@@ -294,20 +305,20 @@ Built-in themes are compiled into the binary. Custom themes are TOML files with 
 All config lives in `~/.config/what-was-said/` (override with `--config`):
 
 - `config.toml` — doctype definitions and parsing rules
-- `backend.toml` — LLM backend selection, model defaults, and authentication
+- `llms.toml` — all LLM configuration: backend selection, authentication, model defaults, and per-task (derive/extract/diff) overrides
 - `tags.toml` — tag hierarchy, default exclusions, tag colors
-- `derive.toml` — LLM prompt thresholds and model overrides for summary generation
-- `extract.toml` — claim extraction model and prompt overrides
 
-### backend.toml
+`llms.toml` replaces the older `backend.toml`, `derive.toml`, and `extract.toml`. If `llms.toml` is absent, those legacy files are still read as a fallback, so existing setups keep working until you migrate.
 
-Selects the LLM backend and provides model defaults. CLI flags (`--backend`, `--model`, `--embed-model`, `--ollama`) override these values when provided.
+### llms.toml
+
+Selects the LLM backend, provides authentication and model defaults, and configures the per-task models and thresholds. CLI flags (`--backend`, `--model`, `--embed-model`, `--ollama`) override the top-level values when provided. Each per-task model falls back to the top-level `model` when its section (or its `model` key) is omitted, so you only set a section when a task needs a different model from the default.
 
 **Ollama (default, no file needed):**
 ```toml
 backend = "ollama"
 ollama_url = "http://localhost:11434"
-model = "qwen2.5:32b"
+model = "qwen2.5:32b"          # default generation model for every task
 embed_model = "qwen3-embedding:8b"
 ```
 
@@ -336,6 +347,25 @@ oauth_token_url = "https://login.microsoftonline.com/.../oauth2/v2.0/token"
 oauth_scope = "api://.../.default"
 ```
 Reads `OAUTH2_CLIENT_ID` and `OAUTH2_CLIENT_SECRET` from the environment. Tokens are cached and refreshed automatically before expiry.
+
+**Per-task sections (all optional):**
+```toml
+[derive]
+detailed_model = "qwen2.5:32b"   # falls back to top-level model if omitted
+brief_model = "qwen2.5:32b"
+short_threshold = 1200
+medium_threshold = 3500
+[derive.prompts]
+short = "~/.config/what-was-said/prompts/detailed_short.txt"
+
+[extract]
+model = "gemma3:27b"             # claim extraction; falls back to top-level model
+[extract.framings]
+email = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
+
+[diff]
+model = "qwen2.5:32b"            # near-duplicate change summaries; falls back to top-level model
+```
 
 ### Tag colors
 
