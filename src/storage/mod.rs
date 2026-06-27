@@ -91,11 +91,6 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 
 		CREATE INDEX IF NOT EXISTS document_tags_tag ON document_tags(tag);
 
-		CREATE TABLE IF NOT EXISTS chunk_embeddings (
-			chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
-			embedding BLOB NOT NULL
-		);
-
 		CREATE TABLE IF NOT EXISTS derived_content (
 			id INTEGER PRIMARY KEY,
 			document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,

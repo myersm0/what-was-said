@@ -54,6 +54,9 @@ pub fn run(
 	println!("extracting claims from {} documents...", doc_ids.len());
 	println!("  model: {}", config.model);
 
+	let rules = config.get_rules();
+	let mut framing_cache: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+
 	let mut total_claims = 0usize;
 	let mut skipped = 0usize;
 	for (i, doc_id) in doc_ids.iter().enumerate() {
@@ -70,6 +73,11 @@ pub fn run(
 			}
 		}
 
+		let framing_key = doctype_name.as_deref().unwrap_or("").to_string();
+		let framing = framing_cache.entry(framing_key)
+			.or_insert_with(|| config.get_framing(doctype_name.as_deref()))
+			.clone();
+
 		eprint!(
 			"\r  [{}/{}] {}...",
 			i + 1,
@@ -80,7 +88,7 @@ pub fn run(
 		storage::delete_claims_for_document(connection, *doc_id)?;
 
 		let count = extract_document(
-			connection, backend, config, *doc_id, doctype_name.as_deref(), &prompt_hash,
+			connection, backend, config, *doc_id, &rules, framing.as_deref(), &prompt_hash,
 		)?;
 		total_claims += count;
 	}
@@ -98,13 +106,12 @@ fn extract_document(
 	backend: &dyn LlmBackend,
 	config: &ExtractConfig,
 	document_id: i64,
-	doctype_name: Option<&str>,
+	rules: &str,
+	framing: Option<&str>,
 	prompt_hash: &str,
 ) -> Result<usize> {
 	let full_text = storage::get_document_full_text(connection, document_id)?;
-	let framing = config.get_framing(doctype_name);
-	let rules = config.get_rules();
-	let prompt = crate::prompts::claim_extraction_prompt(&full_text, &rules, framing.as_deref());
+	let prompt = crate::prompts::claim_extraction_prompt(&full_text, rules, framing);
 	let response = backend.chat(&prompt, &config.model)?;
 	let claims = parse_claims(&response);
 

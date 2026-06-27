@@ -5,6 +5,7 @@ use std::sync::Once;
 
 use what_was_said::config::{self, BackendConfig, BackendKind};
 use what_was_said::derive::{self, DeriveOptions};
+use what_was_said::embed;
 use what_was_said::extract::{self, ExtractOptions};
 use what_was_said::ingest;
 use what_was_said::llm::LlmBackend;
@@ -360,56 +361,7 @@ fn main() -> Result<()> {
 		}
 		Some(Command::Embed { limit }) => {
 			let backend = create_backend(&backend_config)?;
-
-			let chunk_pending = storage::count_chunks_without_embeddings(&connection)?;
-			let chunk_existing = storage::count_chunks_with_embeddings(&connection)?;
-			println!("chunk embeddings: {} existing, {} pending", chunk_existing, chunk_pending);
-
-			if chunk_pending > 0 {
-				let chunks = storage::get_chunks_without_embeddings(&connection, limit)?;
-				let total = chunks.len();
-				println!("computing embeddings for {} chunks using {}...", total, embed_model);
-
-				for (i, chunk) in chunks.iter().enumerate() {
-					let embedding = backend.embed(&chunk.body, &embed_model)?;
-					if i == 0 {
-						storage::ensure_vec_table(&connection, embedding.len())?;
-					}
-					storage::insert_embedding(&connection, chunk.id, &embedding)?;
-					if (i + 1) % 10 == 0 || i + 1 == total {
-						eprint!("\r  {}/{}", i + 1, total);
-					}
-				}
-				eprintln!();
-			}
-
-			let claim_pending = storage::count_claims_without_embeddings(&connection)?;
-			let claim_existing = storage::count_claims_with_embeddings(&connection)?;
-			println!("claim embeddings: {} existing, {} pending", claim_existing, claim_pending);
-
-			if claim_pending > 0 {
-				let claims = storage::get_claims_without_embeddings(&connection, limit)?;
-				let total = claims.len();
-				println!("computing embeddings for {} claims using {}...", total, embed_model);
-
-				for (i, claim) in claims.iter().enumerate() {
-					let embedding = backend.embed(&claim.content, &embed_model)?;
-					if i == 0 {
-						storage::ensure_vec_claims_table(&connection, embedding.len())?;
-					}
-					storage::insert_claim_embedding(&connection, claim.id, &embedding)?;
-					if (i + 1) % 10 == 0 || i + 1 == total {
-						eprint!("\r  {}/{}", i + 1, total);
-					}
-				}
-				eprintln!();
-			}
-
-			if chunk_pending == 0 && claim_pending == 0 {
-				println!("all chunks and claims have embeddings");
-			} else {
-				println!("done");
-			}
+			embed::run(&connection, backend.as_ref(), &embed_model, limit)?;
 		}
 		Some(Command::Derive { missing, stale, bad_detailed, bad_brief, force, status, limit }) => {
 			let derive_config = config::DeriveConfig::load(&config_dir)?;
@@ -512,11 +464,7 @@ fn main() -> Result<()> {
 		}
 		None => {
 			let backend = create_backend(&backend_config)?;
-			let filter = tui::GlobalFilter {
-				include: None,
-				exclude: Vec::new(),
-				include_all: false,
-			};
+			let filter = tui::GlobalFilter::default();
 			let search_config = tui::SearchConfig {
 				embed_model: embed_model.clone(),
 				backend: backend.as_ref(),

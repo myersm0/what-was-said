@@ -453,22 +453,6 @@ impl DeriveConfig {
 		})
 	}
 
-	pub fn get_prompt_for_doctype(&self, doctype: Option<&str>) -> String {
-		if let Some(dt) = doctype {
-			if let Some(path) = self.prompts.get(dt) {
-				if let Ok(text) = std::fs::read_to_string(path) {
-					return text;
-				}
-			}
-		}
-		if let Some(path) = self.prompts.get("default") {
-			if let Ok(text) = std::fs::read_to_string(path) {
-				return text;
-			}
-		}
-		crate::prompts::default_detailed_prompt(crate::prompts::LengthTier::Medium).to_string()
-	}
-
 	pub fn resolve_detailed_prompt(&self, content_len: usize) -> String {
 		let tier = crate::prompts::LengthTier::from_len(
 			content_len, self.short_threshold, self.medium_threshold,
