@@ -4,6 +4,107 @@ use serde::Serialize;
 
 use crate::types::*;
 
+pub struct InsertDocumentParams<'a> {
+	pub title: Option<&'a str>,
+	pub source_title: &'a str,
+	pub doctype_name: Option<&'a str>,
+	pub merge_strategy: MergeStrategy,
+	pub origin_path: Option<&'a str>,
+	pub clip_date: &'a str,
+	pub document_minhash: Option<&'a MinHashSignature>,
+	pub project: Option<&'a str>,
+	pub relative_path: Option<&'a str>,
+	pub content_hash: Option<&'a str>,
+	pub doc_status: Option<&'a str>,
+	pub doc_role: Option<&'a str>,
+	pub synced_at: Option<&'a str>,
+}
+
+impl<'a> InsertDocumentParams<'a> {
+	pub fn captured(
+		title: Option<&'a str>,
+		source_title: &'a str,
+		doctype_name: Option<&'a str>,
+		merge_strategy: MergeStrategy,
+		origin_path: Option<&'a str>,
+		clip_date: &'a str,
+		document_minhash: Option<&'a MinHashSignature>,
+	) -> Self {
+		Self {
+			title,
+			source_title,
+			doctype_name,
+			merge_strategy,
+			origin_path,
+			clip_date,
+			document_minhash,
+			project: None,
+			relative_path: None,
+			content_hash: None,
+			doc_status: None,
+			doc_role: None,
+			synced_at: None,
+		}
+	}
+
+	pub fn project(
+		project: &'a str,
+		relative_path: &'a str,
+		content_hash: &'a str,
+		doc_status: &'a str,
+		doc_role: &'a str,
+		synced_at: &'a str,
+	) -> Self {
+		Self {
+			title: None,
+			source_title: relative_path,
+			doctype_name: Some("project_markdown"),
+			merge_strategy: MergeStrategy::None,
+			origin_path: None,
+			clip_date: synced_at,
+			document_minhash: None,
+			project: Some(project),
+			relative_path: Some(relative_path),
+			content_hash: Some(content_hash),
+			doc_status: Some(doc_status),
+			doc_role: Some(doc_role),
+			synced_at: Some(synced_at),
+		}
+	}
+}
+
+pub fn insert_document_with_params(
+	connection: &Connection,
+	params: &InsertDocumentParams<'_>,
+) -> Result<DocumentId> {
+	let minhash_bytes: Option<Vec<u8>> = params.document_minhash.map(|sig| {
+		sig.iter().flat_map(|v| v.to_le_bytes()).collect()
+	});
+	connection.execute(
+		"INSERT INTO documents (
+			title, source_title, doctype_name, merge_strategy, origin_path,
+			clip_date, document_minhash, project, relative_path, content_hash,
+			doc_status, doc_role, synced_at
+		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+		params![
+			params.title,
+			params.source_title,
+			params.doctype_name,
+			super::merge_strategy_to_str(params.merge_strategy),
+			params.origin_path,
+			params.clip_date,
+			minhash_bytes,
+			params.project,
+			params.relative_path,
+			params.content_hash,
+			params.doc_status,
+			params.doc_role,
+			params.synced_at,
+		],
+	)?;
+	Ok(DocumentId(connection.last_insert_rowid()))
+}
+
 pub fn insert_document(
 	connection: &Connection,
 	title: Option<&str>,
@@ -14,23 +115,30 @@ pub fn insert_document(
 	clip_date: &str,
 	document_minhash: Option<&MinHashSignature>,
 ) -> Result<DocumentId> {
-	let minhash_bytes: Option<Vec<u8>> = document_minhash.map(|sig| {
-		sig.iter().flat_map(|v| v.to_le_bytes()).collect()
-	});
-	connection.execute(
-		"INSERT INTO documents (title, source_title, doctype_name, merge_strategy, origin_path, clip_date, document_minhash)
-		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-		params![
-			title,
-			source_title,
-			doctype_name,
-			super::merge_strategy_to_str(merge_strategy),
-			origin_path,
-			clip_date,
-			minhash_bytes,
-		],
-	)?;
-	Ok(DocumentId(connection.last_insert_rowid()))
+	insert_document_with_params(
+		connection,
+		&InsertDocumentParams::captured(
+			title, source_title, doctype_name, merge_strategy,
+			origin_path, clip_date, document_minhash,
+		),
+	)
+}
+
+pub fn insert_project_document(
+	connection: &Connection,
+	project: &str,
+	relative_path: &str,
+	content_hash: &str,
+	doc_status: &str,
+	doc_role: &str,
+	synced_at: &str,
+) -> Result<DocumentId> {
+	insert_document_with_params(
+		connection,
+		&InsertDocumentParams::project(
+			project, relative_path, content_hash, doc_status, doc_role, synced_at,
+		),
+	)
 }
 
 pub fn update_document_title(connection: &Connection, document_id: DocumentId, title: &str) -> Result<()> {

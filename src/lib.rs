@@ -11,6 +11,7 @@ pub mod markdown;
 pub mod ollama;
 pub mod openai;
 pub mod prompts;
+pub mod projects;
 pub mod query;
 pub mod serve;
 pub mod storage;

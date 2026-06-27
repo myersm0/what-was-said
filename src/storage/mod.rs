@@ -30,7 +30,13 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			merge_strategy TEXT NOT NULL CHECK (merge_strategy IN ('none', 'positional', 'timestamped')),
 			origin_path TEXT,
 			clip_date TEXT NOT NULL,
-			document_minhash BLOB
+			document_minhash BLOB,
+			project TEXT,
+			relative_path TEXT,
+			content_hash TEXT,
+			doc_status TEXT,
+			doc_role TEXT,
+			synced_at TEXT
 		);
 
 		CREATE TABLE IF NOT EXISTS entries (
@@ -187,6 +193,23 @@ fn migrate(connection: &Connection) -> Result<()> {
 			"ALTER TABLE documents ADD COLUMN document_minhash BLOB;",
 		)?;
 	}
+	if !doc_sql.contains("project") {
+		for column in [
+			"project TEXT",
+			"relative_path TEXT",
+			"content_hash TEXT",
+			"doc_status TEXT",
+			"doc_role TEXT",
+			"synced_at TEXT",
+		] {
+			connection.execute_batch(&format!("ALTER TABLE documents ADD COLUMN {};", column))?;
+		}
+	}
+	connection.execute_batch(
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_project_path
+		 ON documents(project, relative_path)
+		 WHERE project IS NOT NULL AND relative_path IS NOT NULL;",
+	)?;
 	let orphaned_entries: i64 = connection.query_row(
 		"SELECT COUNT(*) FROM entries WHERE document_id NOT IN (SELECT id FROM documents)",
 		[],
