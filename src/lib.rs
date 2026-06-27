@@ -15,6 +15,7 @@ pub mod projects;
 pub mod query;
 pub mod serve;
 pub mod storage;
+pub mod sync;
 pub mod ingest;
 pub mod util;
 pub mod whisper;

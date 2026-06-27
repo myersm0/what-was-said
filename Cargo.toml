@@ -22,3 +22,4 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 sqlite-vec = "0.1.9"
 zerocopy = { version = "0.8", features = ["derive"] }
+sha2 = "0.10"

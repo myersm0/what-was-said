@@ -15,6 +15,7 @@ use what_was_said::openai::OpenAiClient;
 use what_was_said::query::{self, SearchSortColumn};
 use what_was_said::storage;
 use what_was_said::serve;
+use what_was_said::sync;
 use what_was_said::tui;
 use what_was_said::util;
 
@@ -149,6 +150,12 @@ enum Command {
 	Diff {
 		#[arg(long, help = "Re-summarize all relations, even if already summarized")]
 		force: bool,
+	},
+
+	/// Sync curated project documents from their manifests
+	Sync {
+		#[arg(long, help = "Sync only the named project")]
+		project: Option<String>,
 	},
 }
 
@@ -444,6 +451,9 @@ fn main() -> Result<()> {
 		Some(Command::Diff { force }) => {
 			let backend = create_backend(&llms.backend)?;
 			diff::run(&connection, backend.as_ref(), &llms.diff.model, force)?;
+		}
+		Some(Command::Sync { project }) => {
+			sync::run(&connection, &config_dir, project.as_deref())?;
 		}
 		Some(Command::In { id }) => {
 			let doc = storage::get_document(&connection, id)?

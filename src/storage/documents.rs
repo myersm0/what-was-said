@@ -52,7 +52,7 @@ impl<'a> InsertDocumentParams<'a> {
 		relative_path: &'a str,
 		content_hash: &'a str,
 		doc_status: &'a str,
-		doc_role: &'a str,
+		doc_role: Option<&'a str>,
 		synced_at: &'a str,
 	) -> Self {
 		Self {
@@ -67,7 +67,7 @@ impl<'a> InsertDocumentParams<'a> {
 			relative_path: Some(relative_path),
 			content_hash: Some(content_hash),
 			doc_status: Some(doc_status),
-			doc_role: Some(doc_role),
+			doc_role,
 			synced_at: Some(synced_at),
 		}
 	}
@@ -130,7 +130,7 @@ pub fn insert_project_document(
 	relative_path: &str,
 	content_hash: &str,
 	doc_status: &str,
-	doc_role: &str,
+	doc_role: Option<&str>,
 	synced_at: &str,
 ) -> Result<DocumentId> {
 	insert_document_with_params(
@@ -139,6 +139,96 @@ pub fn insert_project_document(
 			project, relative_path, content_hash, doc_status, doc_role, synced_at,
 		),
 	)
+}
+
+pub fn get_project_document(
+	connection: &Connection,
+	project: &str,
+	relative_path: &str,
+) -> Result<Option<(i64, Option<String>)>> {
+	let row = connection
+		.query_row(
+			"SELECT id, content_hash FROM documents WHERE project = ?1 AND relative_path = ?2",
+			params![project, relative_path],
+			|row| Ok((row.get(0)?, row.get(1)?)),
+		)
+		.optional()?;
+	Ok(row)
+}
+
+pub fn list_project_documents(connection: &Connection, project: &str) -> Result<Vec<(i64, String)>> {
+	let mut stmt = connection.prepare(
+		"SELECT id, relative_path FROM documents
+		 WHERE project = ?1 AND relative_path IS NOT NULL",
+	)?;
+	let rows = stmt
+		.query_map(params![project], |row| Ok((row.get(0)?, row.get(1)?)))?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(rows)
+}
+
+pub fn replace_document_children(connection: &Connection, document_id: i64) -> Result<()> {
+	if super::vec_table_exists(connection) {
+		let chunk_ids = chunk_ids_for_document(connection, document_id)?;
+		let mut stmt = connection.prepare("DELETE FROM vec_chunks WHERE chunk_id = ?1")?;
+		for id in chunk_ids {
+			stmt.execute(params![id])?;
+		}
+	}
+	if super::vec_claims_table_exists(connection) {
+		let claim_ids = claim_ids_for_document(connection, document_id)?;
+		let mut stmt = connection.prepare("DELETE FROM vec_claims WHERE claim_id = ?1")?;
+		for id in claim_ids {
+			stmt.execute(params![id])?;
+		}
+	}
+	connection.execute("DELETE FROM claims WHERE document_id = ?1", params![document_id])?;
+	connection.execute("DELETE FROM entries WHERE document_id = ?1", params![document_id])?;
+	connection.execute("DELETE FROM derived_content WHERE document_id = ?1", params![document_id])?;
+	Ok(())
+}
+
+fn chunk_ids_for_document(connection: &Connection, document_id: i64) -> Result<Vec<i64>> {
+	let mut stmt = connection.prepare(
+		"SELECT c.id FROM chunks c JOIN entries e ON e.id = c.entry_id WHERE e.document_id = ?1",
+	)?;
+	let ids = stmt
+		.query_map(params![document_id], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<i64>, _>>()?;
+	Ok(ids)
+}
+
+fn claim_ids_for_document(connection: &Connection, document_id: i64) -> Result<Vec<i64>> {
+	let mut stmt = connection.prepare("SELECT id FROM claims WHERE document_id = ?1")?;
+	let ids = stmt
+		.query_map(params![document_id], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<i64>, _>>()?;
+	Ok(ids)
+}
+
+pub fn update_project_document(
+	connection: &Connection,
+	document_id: i64,
+	content_hash: &str,
+	doc_status: &str,
+	doc_role: Option<&str>,
+	synced_at: &str,
+) -> Result<()> {
+	connection.execute(
+		"UPDATE documents
+		 SET content_hash = ?1, doc_status = ?2, doc_role = ?3, synced_at = ?4
+		 WHERE id = ?5",
+		params![content_hash, doc_status, doc_role, synced_at, document_id],
+	)?;
+	Ok(())
+}
+
+pub fn set_document_missing(connection: &Connection, document_id: i64, synced_at: &str) -> Result<()> {
+	connection.execute(
+		"UPDATE documents SET doc_status = 'missing', synced_at = ?1 WHERE id = ?2",
+		params![synced_at, document_id],
+	)?;
+	Ok(())
 }
 
 pub fn update_document_title(connection: &Connection, document_id: DocumentId, title: &str) -> Result<()> {
