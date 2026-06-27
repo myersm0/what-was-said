@@ -119,6 +119,21 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 		);
 
 		CREATE INDEX IF NOT EXISTS claims_document_id ON claims(document_id);
+
+		CREATE TABLE IF NOT EXISTS document_relations (
+			id INTEGER PRIMARY KEY,
+			from_document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+			to_document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+			relation TEXT NOT NULL,
+			similarity REAL,
+			shared_block_words INTEGER,
+			resolution TEXT NOT NULL CHECK (resolution IN ('superseded', 'kept_both', 'pending')),
+			created_at TEXT NOT NULL,
+			UNIQUE (from_document_id, to_document_id)
+		);
+
+		CREATE INDEX IF NOT EXISTS document_relations_from ON document_relations(from_document_id);
+		CREATE INDEX IF NOT EXISTS document_relations_to ON document_relations(to_document_id);
 		",
 	)?;
 	migrate(connection)?;

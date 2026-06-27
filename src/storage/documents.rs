@@ -460,6 +460,32 @@ pub fn find_dup_candidates(
 	Ok(results)
 }
 
+pub fn insert_document_relation(
+	connection: &Connection,
+	from_document_id: i64,
+	to_document_id: i64,
+	relation: &str,
+	similarity: f64,
+	shared_block_words: Option<i64>,
+	resolution: &str,
+) -> Result<()> {
+	connection.execute(
+		"INSERT OR REPLACE INTO document_relations
+		 (from_document_id, to_document_id, relation, similarity, shared_block_words, resolution, created_at)
+		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+		params![
+			from_document_id,
+			to_document_id,
+			relation,
+			similarity,
+			shared_block_words,
+			resolution,
+			chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+		],
+	)?;
+	Ok(())
+}
+
 pub fn get_document_full_text(connection: &Connection, document_id: i64) -> Result<String> {
 	let mut stmt = connection.prepare(
 		"SELECT body, author, heading_title FROM entries WHERE document_id = ?1 ORDER BY position"

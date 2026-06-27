@@ -492,9 +492,18 @@ pub fn ingest_file(
 			.unwrap_or_else(|| candidate.source_title.clone())
 	};
 
-	let candidates = storage::find_dup_candidates(connection, &clip_date_str, dup_window_days)?;
-	let mut superseded_doc: Option<(i64, String, f64)> = None;
-
+	enum Resolution {
+		Superseded,
+		KeptBoth,
+		Pending,
+	}
+	struct NearDupEvent {
+		existing_id: i64,
+		existing_path: String,
+		similarity: f64,
+		shared_block_words: Option<usize>,
+		resolution: Resolution,
+	}
 	struct GrayCandidate {
 		id: i64,
 		path: String,
@@ -503,12 +512,21 @@ pub fn ingest_file(
 		shared_block_words: usize,
 		existing_text: String,
 	}
+
+	let candidates = storage::find_dup_candidates(connection, &clip_date_str, dup_window_days)?;
+	let mut near_dup: Option<NearDupEvent> = None;
 	let mut strongest_gray: Option<GrayCandidate> = None;
 
 	for candidate in &candidates {
 		let sim = minhash::jaccard(&doc_hash, &candidate.document_minhash);
 		if sim >= dup_jaccard_high {
-			superseded_doc = Some((candidate.id, candidate_path(candidate), sim));
+			near_dup = Some(NearDupEvent {
+				existing_id: candidate.id,
+				existing_path: candidate_path(candidate),
+				similarity: sim,
+				shared_block_words: None,
+				resolution: Resolution::Superseded,
+			});
 			break;
 		}
 		if sim >= dup_jaccard_low {
@@ -519,7 +537,13 @@ pub fn ingest_file(
 				.join("\n");
 			let shared = minhash::longest_shared_block_words(&new_text, &existing_text);
 			if shared >= dup_shared_block_words {
-				superseded_doc = Some((candidate.id, candidate_path(candidate), sim));
+				near_dup = Some(NearDupEvent {
+					existing_id: candidate.id,
+					existing_path: candidate_path(candidate),
+					similarity: sim,
+					shared_block_words: Some(shared),
+					resolution: Resolution::Superseded,
+				});
 				break;
 			}
 			let stronger = strongest_gray.as_ref()
@@ -538,9 +562,9 @@ pub fn ingest_file(
 		}
 	}
 
-	if superseded_doc.is_none() {
+	if near_dup.is_none() {
 		if let Some(gray) = strongest_gray {
-			if options.interactive {
+			let resolution = if options.interactive {
 				match prompt_gray_zone(
 					&new_path,
 					gray.id,
@@ -551,14 +575,13 @@ pub fn ingest_file(
 					&new_text,
 					&gray.existing_text,
 				) {
-					GrayZoneResolution::Supersede => {
-						superseded_doc = Some((gray.id, gray.path.clone(), gray.similarity));
-					}
+					GrayZoneResolution::Supersede => Resolution::Superseded,
 					GrayZoneResolution::KeepBoth => {
 						eprintln!(
 							"  keeping both: doc {} {} (similarity: {:.2}, shared block: ~{} words)",
 							gray.id, gray.path, gray.similarity, gray.shared_block_words,
 						);
+						Resolution::KeptBoth
 					}
 					GrayZoneResolution::Quit => {
 						eprintln!("  aborted at {}", new_path);
@@ -577,7 +600,15 @@ pub fn ingest_file(
 					similarity: gray.similarity,
 					shared_block_words: gray.shared_block_words,
 				});
-			}
+				Resolution::Pending
+			};
+			near_dup = Some(NearDupEvent {
+				existing_id: gray.id,
+				existing_path: gray.path,
+				similarity: gray.similarity,
+				shared_block_words: Some(gray.shared_block_words),
+				resolution,
+			});
 		}
 	}
 
@@ -613,12 +644,28 @@ pub fn ingest_file(
 		total_chunks += chunks.len();
 	}
 
-	if let Some((old_id, ref old_path, sim)) = superseded_doc {
-		storage::add_tag(&transaction, old_id, "superseded")?;
-		eprintln!(
-			"  tagged doc {} {} as superseded (similarity: {:.2})",
-			old_id, old_path, sim,
-		);
+	if let Some(event) = near_dup {
+		let resolution = match event.resolution {
+			Resolution::Superseded => "superseded",
+			Resolution::KeptBoth => "kept_both",
+			Resolution::Pending => "pending",
+		};
+		if resolution == "superseded" {
+			storage::add_tag(&transaction, event.existing_id, "superseded")?;
+			eprintln!(
+				"  tagged doc {} {} as superseded (similarity: {:.2})",
+				event.existing_id, event.existing_path, event.similarity,
+			);
+		}
+		storage::insert_document_relation(
+			&transaction,
+			document_id.0,
+			event.existing_id,
+			"near_duplicate",
+			event.similarity,
+			event.shared_block_words.map(|words| words as i64),
+			resolution,
+		)?;
 	}
 
 	transaction.commit()?;
