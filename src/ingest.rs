@@ -156,8 +156,29 @@ pub fn parse_copilot_email_summary(text: &str) -> Vec<SegmentedEntry> {
 }
 
 const merge_min_chars: usize = 150;
-const dup_jaccard_threshold: f64 = 0.6;
+const dup_jaccard_high: f64 = 0.7;
+const dup_jaccard_low: f64 = 0.4;
+const dup_shared_block_words: usize = 300;
 const dup_window_days: i64 = 180;
+
+pub struct IngestOptions {
+	pub force: bool,
+	pub interactive: bool,
+}
+
+pub struct GrayZoneCase {
+	pub new_source_title: String,
+	pub existing_id: i64,
+	pub existing_title: String,
+	pub similarity: f64,
+	pub shared_block_words: usize,
+}
+
+enum GrayZoneResolution {
+	Supersede,
+	KeepBoth,
+	Quit,
+}
 
 fn find_overlap(
 	existing: &[storage::ExistingEntry],
@@ -205,18 +226,106 @@ fn find_overlap(
 	}
 }
 
+fn join_entry_bodies(entries: &[SegmentedEntry]) -> String {
+	entries.iter()
+		.map(|e| e.body.as_str())
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
+fn print_block_diff(new_text: &str, existing_text: &str, existing_id: i64) {
+	let existing_lines: std::collections::HashSet<&str> = existing_text
+		.lines()
+		.map(str::trim)
+		.filter(|line| !line.is_empty())
+		.collect();
+	let new_lines: std::collections::HashSet<&str> = new_text
+		.lines()
+		.map(str::trim)
+		.filter(|line| !line.is_empty())
+		.collect();
+
+	eprintln!("  --- only in new file ---");
+	for line in new_text.lines() {
+		let trimmed = line.trim();
+		if !trimmed.is_empty() && !existing_lines.contains(trimmed) {
+			eprintln!("  + {}", line);
+		}
+	}
+	eprintln!("  --- only in doc {} ---", existing_id);
+	for line in existing_text.lines() {
+		let trimmed = line.trim();
+		if !trimmed.is_empty() && !new_lines.contains(trimmed) {
+			eprintln!("  - {}", line);
+		}
+	}
+}
+
+fn prompt_gray_zone(
+	new_title: &str,
+	existing_id: i64,
+	existing_title: &str,
+	existing_date: &str,
+	similarity: f64,
+	shared_block_words: usize,
+	new_text: &str,
+	existing_text: &str,
+) -> GrayZoneResolution {
+	use std::io::Write;
+
+	eprintln!("Near-duplicate detected:");
+	eprintln!("  existing: \"{}\" (doc {}, ingested {})", existing_title, existing_id, existing_date);
+	eprintln!("  new:      \"{}\" (current file)", new_title);
+	eprintln!("  similarity: {:.2}, shared block: ~{} words", similarity, shared_block_words);
+
+	loop {
+		eprint!("\n  [s]upersede old  [k]eep both  [d]iff  [q]uit  ");
+		let _ = std::io::stderr().flush();
+
+		let mut input = String::new();
+		if std::io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
+			return GrayZoneResolution::KeepBoth;
+		}
+		match input.trim().chars().next() {
+			Some('s') | Some('S') => return GrayZoneResolution::Supersede,
+			Some('k') | Some('K') => return GrayZoneResolution::KeepBoth,
+			Some('q') | Some('Q') => return GrayZoneResolution::Quit,
+			Some('d') | Some('D') => print_block_diff(new_text, existing_text, existing_id),
+			_ => eprintln!("  unrecognized choice"),
+		}
+	}
+}
+
+pub fn print_gray_zone_summary(cases: &[GrayZoneCase]) {
+	if cases.is_empty() {
+		return;
+	}
+	eprintln!("\n{} gray-zone near-duplicate(s) kept for manual review:", cases.len());
+	for case in cases {
+		eprintln!(
+			"  \"{}\" vs doc {} \"{}\" (similarity: {:.2}, shared block: ~{} words)",
+			case.new_source_title,
+			case.existing_id,
+			case.existing_title,
+			case.similarity,
+			case.shared_block_words,
+		);
+	}
+}
+
 pub fn ingest_file(
 	connection: &rusqlite::Connection,
 	file_path: &Path,
 	config: &config::Config,
-	force: bool,
+	options: &IngestOptions,
+	gray_zones: &mut Vec<GrayZoneCase>,
 ) -> Result<bool> {
 	let canonical_path = file_path.canonicalize()
 		.unwrap_or_else(|_| file_path.to_path_buf());
 	let file_path = canonical_path.as_path();
 	let file_path_str = file_path.to_string_lossy();
 
-	if !force && storage::document_exists_by_path(connection, &file_path_str)? {
+	if !options.force && storage::document_exists_by_path(connection, &file_path_str)? {
 		return Ok(false);
 	}
 
@@ -369,27 +478,94 @@ pub fn ingest_file(
 	}
 
 	let doc_hash = minhash::minhash_document(&segmented);
+	let new_text = join_entry_bodies(&segmented);
 
 	let candidates = storage::find_dup_candidates(connection, &clip_date_str, dup_window_days)?;
 	let mut superseded_doc: Option<(i64, String, f64)> = None;
-	let mut best_sim: Option<(i64, String, f64)> = None;
+
+	struct GrayCandidate {
+		id: i64,
+		title: String,
+		date: String,
+		similarity: f64,
+		shared_block_words: usize,
+		existing_text: String,
+	}
+	let mut strongest_gray: Option<GrayCandidate> = None;
+
 	for candidate in &candidates {
 		let sim = minhash::jaccard(&doc_hash, &candidate.document_minhash);
-		if sim >= dup_jaccard_threshold {
+		if sim >= dup_jaccard_high {
 			superseded_doc = Some((candidate.id, candidate.source_title.clone(), sim));
 			break;
 		}
-		let dominated = best_sim.as_ref().map(|(_, _, s)| sim > *s).unwrap_or(true);
-		if sim >= 0.4 && dominated {
-			best_sim = Some((candidate.id, candidate.source_title.clone(), sim));
+		if sim >= dup_jaccard_low {
+			let existing_entries = storage::get_entries_for_document(connection, candidate.id)?;
+			let existing_text = existing_entries.iter()
+				.map(|e| e.body.as_str())
+				.collect::<Vec<_>>()
+				.join("\n");
+			let shared = minhash::longest_shared_block_words(&new_text, &existing_text);
+			if shared >= dup_shared_block_words {
+				superseded_doc = Some((candidate.id, candidate.source_title.clone(), sim));
+				break;
+			}
+			let stronger = strongest_gray.as_ref()
+				.map(|g| (shared, sim) > (g.shared_block_words, g.similarity))
+				.unwrap_or(true);
+			if stronger {
+				strongest_gray = Some(GrayCandidate {
+					id: candidate.id,
+					title: candidate.source_title.clone(),
+					date: candidate.clip_date.clone(),
+					similarity: sim,
+					shared_block_words: shared,
+					existing_text,
+				});
+			}
 		}
 	}
+
 	if superseded_doc.is_none() {
-		if let Some((id, ref title, sim)) = best_sim {
-			eprintln!(
-				"  near-match: doc {} \"{}\" (similarity: {:.2}, threshold: {:.2})",
-				id, title, sim, dup_jaccard_threshold,
-			);
+		if let Some(gray) = strongest_gray {
+			if options.interactive {
+				match prompt_gray_zone(
+					&source_title,
+					gray.id,
+					&gray.title,
+					&gray.date,
+					gray.similarity,
+					gray.shared_block_words,
+					&new_text,
+					&gray.existing_text,
+				) {
+					GrayZoneResolution::Supersede => {
+						superseded_doc = Some((gray.id, gray.title.clone(), gray.similarity));
+					}
+					GrayZoneResolution::KeepBoth => {
+						eprintln!(
+							"  keeping both: doc {} \"{}\" (similarity: {:.2}, shared block: ~{} words)",
+							gray.id, gray.title, gray.similarity, gray.shared_block_words,
+						);
+					}
+					GrayZoneResolution::Quit => {
+						eprintln!("  aborted, not ingesting \"{}\"", source_title);
+						return Ok(false);
+					}
+				}
+			} else {
+				eprintln!(
+					"  near-match: doc {} \"{}\" (similarity: {:.2}, shared block: ~{} words) — keeping both",
+					gray.id, gray.title, gray.similarity, gray.shared_block_words,
+				);
+				gray_zones.push(GrayZoneCase {
+					new_source_title: source_title.clone(),
+					existing_id: gray.id,
+					existing_title: gray.title.clone(),
+					similarity: gray.similarity,
+					shared_block_words: gray.shared_block_words,
+				});
+			}
 		}
 	}
 
@@ -465,13 +641,18 @@ pub fn ingest_directory(
 
 	eprintln!("found {} files in {}", paths.len(), directory.display());
 
+	let options = IngestOptions { force, interactive: false };
+	let mut gray_zones = Vec::new();
+
 	for path in &paths {
-		match ingest_file(connection, path, config, force) {
+		match ingest_file(connection, path, config, &options, &mut gray_zones) {
 			Ok(true) => ingested += 1,
 			Ok(false) => skipped += 1,
 			Err(error) => eprintln!("error ingesting {}: {:#}", path.display(), error),
 		}
 	}
+
+	print_gray_zone_summary(&gray_zones);
 	Ok((ingested, skipped))
 }
 

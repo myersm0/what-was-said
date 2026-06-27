@@ -64,12 +64,15 @@ enum Command {
 		include_all: bool,
 	},
 
-	/// Ingest new files from directory
+	/// Ingest new files from a file or directory
 	Ingest {
-		directory: PathBuf,
+		path: PathBuf,
 
 		#[arg(long, help = "Re-ingest files even if already in database")]
 		force: bool,
+
+		#[arg(long, help = "Never prompt on gray-zone near-duplicates; keep both")]
+		non_interactive: bool,
 	},
 
 	/// Search the collection
@@ -218,14 +221,26 @@ fn main() -> Result<()> {
 		.unwrap_or_else(|| "qwen3-embedding:8b".to_string());
 
 	match cli.command {
-		Some(Command::Ingest { directory, force }) => {
-			let (ingested, skipped) = ingest::ingest_directory(
-				&connection, &directory, &config, force,
-			)?;
-			if skipped > 0 {
-				eprintln!("ingested {} files, skipped {} (already in db)", ingested, skipped);
+		Some(Command::Ingest { path, force, non_interactive }) => {
+			if path.is_dir() {
+				let (ingested, skipped) = ingest::ingest_directory(
+					&connection, &path, &config, force,
+				)?;
+				if skipped > 0 {
+					eprintln!("ingested {} files, skipped {} (already in db)", ingested, skipped);
+				} else {
+					eprintln!("ingested {} files", ingested);
+				}
 			} else {
-				eprintln!("ingested {} files", ingested);
+				let options = ingest::IngestOptions { force, interactive: !non_interactive };
+				let mut gray_zones = Vec::new();
+				let ingested = ingest::ingest_file(&connection, &path, &config, &options, &mut gray_zones)?;
+				if ingested {
+					eprintln!("ingested 1 file");
+				} else {
+					eprintln!("skipped 1 file");
+				}
+				ingest::print_gray_zone_summary(&gray_zones);
 			}
 		}
 		Some(Command::About { query, method }) => {

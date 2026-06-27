@@ -426,6 +426,7 @@ pub fn update_document_clip_date(connection: &Connection, document_id: i64, clip
 pub struct DupCandidate {
 	pub id: i64,
 	pub source_title: String,
+	pub clip_date: String,
 	pub document_minhash: MinHashSignature,
 }
 
@@ -435,7 +436,7 @@ pub fn find_dup_candidates(
 	window_days: i64,
 ) -> Result<Vec<DupCandidate>> {
 	let mut stmt = connection.prepare(
-		"SELECT id, source_title, document_minhash FROM documents
+		"SELECT id, source_title, clip_date, document_minhash FROM documents
 		 WHERE document_minhash IS NOT NULL
 		 AND ABS(julianday(?1) - julianday(clip_date)) < ?2"
 	)?;
@@ -443,14 +444,15 @@ pub fn find_dup_candidates(
 		.query_map(params![clip_date, window_days], |row| {
 			let id: i64 = row.get(0)?;
 			let source_title: String = row.get(1)?;
-			let blob: Vec<u8> = row.get(2)?;
+			let clip_date: String = row.get(2)?;
+			let blob: Vec<u8> = row.get(3)?;
 			let mut sig = [0u64; crate::types::MINHASH_SIZE];
 			for (i, chunk) in blob.chunks_exact(8).enumerate() {
 				if i < crate::types::MINHASH_SIZE {
 					sig[i] = u64::from_le_bytes(chunk.try_into().unwrap());
 				}
 			}
-			Ok(DupCandidate { id, source_title, document_minhash: sig })
+			Ok(DupCandidate { id, source_title, clip_date, document_minhash: sig })
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 	Ok(results)

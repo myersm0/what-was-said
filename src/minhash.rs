@@ -61,6 +61,53 @@ pub fn minhash_with_context(
 	minhash(&combined)
 }
 
+pub fn longest_shared_block_words(a: &str, b: &str) -> usize {
+	let shingles_a = tokenize(a);
+	let shingles_b = tokenize(b);
+	let run = longest_common_shingle_run(&shingles_a, &shingles_b);
+	if run == 0 {
+		0
+	} else {
+		run + 2
+	}
+}
+
+fn longest_common_shingle_run(a: &[String], b: &[String]) -> usize {
+	if a.is_empty() || b.is_empty() {
+		return 0;
+	}
+
+	let mut ids: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+	for shingle in a.iter().chain(b.iter()) {
+		let next = ids.len() as u32;
+		ids.entry(shingle.as_str()).or_insert(next);
+	}
+	let encoded_a: Vec<u32> = a.iter().map(|s| ids[s.as_str()]).collect();
+	let encoded_b: Vec<u32> = b.iter().map(|s| ids[s.as_str()]).collect();
+
+	let mut previous = vec![0u32; encoded_b.len()];
+	let mut current = vec![0u32; encoded_b.len()];
+	let mut best = 0u32;
+	for &token_a in &encoded_a {
+		for (j, &token_b) in encoded_b.iter().enumerate() {
+			current[j] = if token_a == token_b {
+				if j == 0 {
+					1
+				} else {
+					previous[j - 1] + 1
+				}
+			} else {
+				0
+			};
+			if current[j] > best {
+				best = current[j];
+			}
+		}
+		std::mem::swap(&mut previous, &mut current);
+	}
+	best as usize
+}
+
 pub fn jaccard(a: &MinHashSignature, b: &MinHashSignature) -> f64 {
 	let matches = a.iter().zip(b.iter()).filter(|(x, y)| x == y).count();
 	matches as f64 / MINHASH_SIZE as f64
