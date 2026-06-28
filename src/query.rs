@@ -313,19 +313,19 @@ mod tests {
 				chunk_id: 1, document_id: 1, source_title: "Doc A".into(),
 				clip_date: "2024-01-01".into(), body: "first".into(),
 				similarity: 0.9, author: None, entry_position: 0, chunk_index: 0,
-				doc_status: None, project: None,
+				doc_status: None, project: None, start_char: 0, end_char: 0,
 			},
 			storage::SimilarChunk {
 				chunk_id: 2, document_id: 1, source_title: "Doc A".into(),
 				clip_date: "2024-01-01".into(), body: "second".into(),
 				similarity: 0.7, author: None, entry_position: 1, chunk_index: 0,
-				doc_status: None, project: None,
+				doc_status: None, project: None, start_char: 0, end_char: 0,
 			},
 			storage::SimilarChunk {
 				chunk_id: 3, document_id: 2, source_title: "Doc B".into(),
 				clip_date: "2024-02-01".into(), body: "other".into(),
 				similarity: 0.8, author: None, entry_position: 0, chunk_index: 0,
-				doc_status: None, project: None,
+				doc_status: None, project: None, start_char: 0, end_char: 0,
 			},
 		];
 		let grouped = group_similar_results(chunks);

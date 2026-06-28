@@ -97,6 +97,8 @@ pub struct SimilarChunk {
 	pub chunk_index: u32,
 	pub doc_status: Option<String>,
 	pub project: Option<String>,
+	pub start_char: usize,
+	pub end_char: usize,
 }
 
 pub fn find_similar_chunks(
@@ -136,7 +138,7 @@ pub fn find_similar_chunks_filtered(
 		)
 		SELECT knn.chunk_id, knn.distance, c.body, e.document_id,
 		       e.source_title, e.clip_date, e.author, e.position, c.chunk_index,
-		       d.doc_status, d.project
+		       d.doc_status, d.project, c.start_char, c.end_char
 		FROM knn
 		JOIN chunks c ON c.id = knn.chunk_id
 		JOIN entries e ON e.id = c.entry_id
@@ -159,6 +161,8 @@ pub fn find_similar_chunks_filtered(
 				chunk_index: row.get(8)?,
 				doc_status: row.get(9)?,
 				project: row.get(10)?,
+				start_char: row.get(11)?,
+				end_char: row.get(12)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -180,6 +184,7 @@ pub fn find_similar_chunks_filtered(
 		results.retain(|r| r.clip_date.as_str() <= to);
 	}
 
+	let mut results = dedup_overlapping_chunks(results);
 	results.truncate(limit);
 	Ok(results)
 }
@@ -196,7 +201,7 @@ fn find_similar_chunks_in_project(
 	let mut stmt = connection.prepare(
 		"SELECT v.chunk_id, v.embedding, c.body, e.document_id,
 		        e.source_title, e.clip_date, e.author, e.position, c.chunk_index,
-		        d.doc_status, d.project
+		        d.doc_status, d.project, c.start_char, c.end_char
 		 FROM vec_chunks v
 		 JOIN chunks c ON c.id = v.chunk_id
 		 JOIN entries e ON e.id = c.entry_id
@@ -221,6 +226,8 @@ fn find_similar_chunks_in_project(
 				chunk_index: row.get(8)?,
 				doc_status: row.get(9)?,
 				project: row.get(10)?,
+				start_char: row.get(11)?,
+				end_char: row.get(12)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -240,11 +247,28 @@ fn find_similar_chunks_in_project(
 		results.retain(|r| r.clip_date.as_str() <= to);
 	}
 
-	results.sort_by(|a, b| {
-		b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal)
-	});
+	let mut results = dedup_overlapping_chunks(results);
 	results.truncate(limit);
 	Ok(results)
+}
+
+fn dedup_overlapping_chunks(mut chunks: Vec<SimilarChunk>) -> Vec<SimilarChunk> {
+	chunks.sort_by(|a, b| {
+		b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal)
+	});
+	let mut kept: Vec<SimilarChunk> = Vec::new();
+	for chunk in chunks {
+		let redundant = kept.iter().any(|k| {
+			k.document_id == chunk.document_id
+				&& k.entry_position == chunk.entry_position
+				&& chunk.start_char < k.end_char
+				&& k.start_char < chunk.end_char
+		});
+		if !redundant {
+			kept.push(chunk);
+		}
+	}
+	kept
 }
 
 fn decode_embedding(blob: &[u8]) -> Vec<f32> {
