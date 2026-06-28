@@ -37,7 +37,7 @@ Structured segmentation and metadata extraction for non-standard formats (e.g. p
 
 **Incremental merging** — Conversation-like sources (Slack, email) grow over time. Detects overlap and appends new content without duplication.
 
-**Near-duplicate handling** — Revisions of an already-clipped document are detected by MinHash/Jaccard and a longest-shared-block heuristic, then auto-superseded, kept, or resolved by an interactive prompt. Every decision is recorded as a queryable relation, and an LLM can summarize what changed between versions.
+**Near-duplicate handling** — Revisions of an already-clipped document are detected by MinHash/Jaccard and a longest-shared-block heuristic. Matching versions form a *version family*, and the latest by clip date is the current one; older members are tagged `superseded` (both are always kept). Borderline matches are resolved by an interactive prompt. Every decision is recorded as a queryable relation, and an LLM can summarize what changed between versions.
 
 **Provenance-first** — Every piece of text is traceable to its source and position within the original document.
 
@@ -103,10 +103,9 @@ See [Configuration](#configuration) for `llms.toml` setup.
 ```bash
 what-was-said ingest ~/inbox/clips/          # a directory, or a single file
 what-was-said ingest ~/inbox/clips/note.md   # prompts on gray-zone near-duplicates
-what-was-said ingest ~/inbox/clips/ --non-interactive   # never prompt; keep both, summarize at end
 ```
 
-Ingest accepts a file or a directory. Gray-zone near-duplicates (similar, but not clearly a revision) prompt you to supersede, keep both, view a text diff, view an LLM summary of the change, or quit. `--non-interactive` skips the prompts (auto-supersede above threshold, keep both below, with a review summary at the end).
+Ingest accepts a file or a directory. Gray-zone near-duplicates (similar, but not clearly a revision) prompt you to supersede, keep both, view a text diff, view an LLM summary of the change, or quit. Ingest is always interactive: if a gray-zone match arises with no controlling terminal (a piped or scripted run), ingest aborts on that file rather than guessing, naming the document pair.
 
 **Browse and search**
 ```bash
@@ -129,6 +128,8 @@ what-was-said extract --force    # re-extract all
 what-was-said extract --status   # check progress
 what-was-said diff               # summarize near-duplicate changes (missing or stale)
 what-was-said diff --force        # re-summarize all relations
+what-was-said relations repair    # recompute superseded tags across version families
+what-was-said relations repair --family 501   # repair only one family
 ```
 
 **Sync (curated project docs)**
@@ -301,9 +302,9 @@ Built-in themes are compiled into the binary. Custom themes are TOML files with 
 
 **Derived content** — LLM-generated summaries stored alongside documents. A detailed summary is generated first (prompt tier selected by document length: short/medium/long), then a brief summary is compressed from it. For short documents the brief summary is copied directly without an extra LLM call.
 
-**Near-duplicate detection** — Documents are fingerprinted at ingest time using MinHash over 3-word shingles, and compared against existing documents within a ±180-day window. Two signals drive the decision: Jaccard similarity over the signatures, and the longest contiguous block of shingles shared by the two documents (a structural signal that catches revisions which add or cut sections yet still share a large block). Jaccard ≥ 0.7 or a shared block ≥ 300 words auto-supersedes the older document (tagging it `superseded`). Jaccard between 0.4 and 0.7 with a smaller shared block is a gray zone: by default ingestion prompts you (supersede, keep both, view a text diff, view an LLM summary of the change, or quit), or with `--non-interactive` keeps both and lists the case in an end-of-run review summary. Jaccard below 0.4 is not a match. Every decision, including auto-supersedes, is recorded in `document_relations` (see below).
+**Near-duplicate detection** — Documents are fingerprinted at ingest time using MinHash over 3-word shingles, and compared against existing documents within a ±180-day window. Two signals drive the decision: Jaccard similarity over the signatures, and the longest contiguous block of shingles shared by the two documents (a structural signal that catches revisions which add or cut sections yet still share a large block). Jaccard ≥ 0.7, or a shared block ≥ 300 words, marks a candidate as the same version; the new document and *every* such candidate are linked into one version family, and the family's `superseded` tags are recomputed so that only the latest member by `(clip_date, id)` is current. Because "current" is a projection of clip date over the whole family rather than a side effect of insertion order, out-of-order ingestion still resolves correctly. Jaccard between 0.4 and 0.7 with a smaller shared block is a gray zone: ingestion prompts you (supersede, keep both, view a text diff, view an LLM summary of the change, or quit), offering the chronological predecessor as the comparison; with no controlling terminal it aborts on that file rather than guessing. Jaccard below 0.4 is not a match. Every decision is recorded in `document_relations` (see below).
 
-**Document relations** — Each near-duplicate decision is persisted as a row in `document_relations`, recording the two documents, the similarity, the shared block size, and the resolution (`superseded`, `kept_both`, or `pending` for deferred non-interactive cases). This is a queryable audit trail of supersession history, and the input to diff summaries. `what-was-said diff` generates an LLM description of what changed between each pair (from only the non-overlapping regions, not the full documents) and stores it on the relation, with the model and prompt hash for staleness detection — so changing the model or prompt re-summarizes automatically. The same summary can be generated on demand during an interactive ingest prompt via the `[v]iew LLM summary` option, which also stores it on the relation.
+**Document relations** — Each near-duplicate decision is persisted as a row in `document_relations`, recording the two documents, the similarity, the shared block size, and the resolution (`superseded` or `kept_both`). A row records only that two documents belong to one version family; it carries no direction and no current flag. Which member is current is *derived* by sorting the family by `(clip_date, id)` — so the `superseded` tag is a recomputed cache, rewritten wholesale for an affected family on every insert, never pointer-surgered. `what-was-said relations repair [--family DOC_ID]` re-runs that recomputation over every family (or one), which fixes any family left mis-tagged by older versions of the ingester. The relations table is also a queryable audit trail and the input to diff summaries: `what-was-said diff` generates an LLM description of what changed between each pair (from only the non-overlapping regions, not the full documents) and stores it on the relation, with the model and prompt hash for staleness detection — so changing the model or prompt re-summarizes automatically. The same summary can be generated on demand during an interactive ingest prompt via the `[v]iew LLM summary` option, which also stores it on the relation.
 
 **Claim extraction** — LLM-extracted atomic propositions from documents. Claims are not facts: they represent what was stated, with provenance and attribution preserved. Each claim records its source document, author (when known), the extraction model, and a prompt hash for staleness detection. An adaptive prompt handles all document types; source-format framings (email attribution, voice memo context) can be configured for structural hints. Claims are embedded into a separate `vec_claims` table for semantic search independent of chunks. Running `what-was-said extract` automatically detects documents needing extraction — including those whose claims were produced by a different model or prompt than what's currently configured.
 
