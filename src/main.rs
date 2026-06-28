@@ -83,6 +83,9 @@ enum Command {
 
 		#[arg(long, value_enum, default_value = "semantic", help = "Search method")]
 		method: SearchMethod,
+
+		#[arg(long, help = "Restrict to a project")]
+		project: Option<String>,
 	},
 
 	/// Show document by id
@@ -262,15 +265,17 @@ fn main() -> Result<()> {
 				ingest::print_gray_zone_summary(&gray_zones);
 			}
 		}
-		Some(Command::About { query, method }) => {
+		Some(Command::About { query, method, project }) => {
 			let query = query.join(" ");
 			if query.is_empty() {
 				anyhow::bail!("about requires a query");
 			}
 
+			let filters = query::SearchFilters { project, ..Default::default() };
+
 			match method {
 				SearchMethod::Exact => {
-					let results = query::search(&connection, &query, SearchSortColumn::Score)?;
+					let results = query::search_filtered(&connection, &query, SearchSortColumn::Score, &filters)?;
 					if json_output {
 						let mut results = results;
 						query::strip_fts_markers(&mut results);
@@ -305,7 +310,7 @@ fn main() -> Result<()> {
 
 					let backend = create_backend(&llms.backend)?;
 					let query_embedding = backend.embed(&query, &embed_model)?;
-					let results = query::find_similar_grouped(&connection, &query_embedding, 10)?;
+					let results = query::find_similar_grouped_filtered(&connection, &query_embedding, 10, &filters)?;
 
 					if json_output {
 						println!("{}", serde_json::to_string_pretty(&results)?);

@@ -95,6 +95,8 @@ pub struct SimilarChunk {
 	pub author: Option<String>,
 	pub entry_position: u32,
 	pub chunk_index: u32,
+	pub doc_status: Option<String>,
+	pub project: Option<String>,
 }
 
 pub fn find_similar_chunks(
@@ -102,7 +104,7 @@ pub fn find_similar_chunks(
 	query_embedding: &[f32],
 	limit: usize,
 ) -> Result<Vec<SimilarChunk>> {
-	find_similar_chunks_filtered(connection, query_embedding, limit, None, None, None)
+	find_similar_chunks_filtered(connection, query_embedding, limit, None, None, None, None)
 }
 
 pub fn find_similar_chunks_filtered(
@@ -112,8 +114,9 @@ pub fn find_similar_chunks_filtered(
 	author_like: Option<&str>,
 	date_from: Option<&str>,
 	date_to: Option<&str>,
+	project_filter: Option<&str>,
 ) -> Result<Vec<SimilarChunk>> {
-	let fetch_limit = if author_like.is_some() || date_from.is_some() || date_to.is_some() {
+	let fetch_limit = if author_like.is_some() || date_from.is_some() || date_to.is_some() || project_filter.is_some() {
 		limit * 5
 	} else {
 		limit
@@ -126,10 +129,12 @@ pub fn find_similar_chunks_filtered(
 			WHERE embedding MATCH ?1 AND k = ?2
 		)
 		SELECT knn.chunk_id, knn.distance, c.body, e.document_id,
-		       e.source_title, e.clip_date, e.author, e.position, c.chunk_index
+		       e.source_title, e.clip_date, e.author, e.position, c.chunk_index,
+		       d.doc_status, d.project
 		FROM knn
 		JOIN chunks c ON c.id = knn.chunk_id
 		JOIN entries e ON e.id = c.entry_id
+		JOIN documents d ON d.id = e.document_id
 		ORDER BY knn.distance"
 	)?;
 
@@ -146,6 +151,8 @@ pub fn find_similar_chunks_filtered(
 				author: row.get(6)?,
 				entry_position: row.get(7)?,
 				chunk_index: row.get(8)?,
+				doc_status: row.get(9)?,
+				project: row.get(10)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -165,6 +172,10 @@ pub fn find_similar_chunks_filtered(
 
 	if let Some(to) = date_to {
 		results.retain(|r| r.clip_date.as_str() <= to);
+	}
+
+	if let Some(project) = project_filter {
+		results.retain(|r| r.project.as_deref() == Some(project));
 	}
 
 	results.truncate(limit);

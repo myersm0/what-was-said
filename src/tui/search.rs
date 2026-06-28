@@ -97,6 +97,7 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 		author: if app.author_filter.is_empty() { None } else { Some(app.author_filter.clone()) },
 		date_from: if app.date_from.is_empty() { None } else { Some(app.date_from.clone()) },
 		date_to: if app.date_to.is_empty() { None } else { Some(app.date_to.clone()) },
+		project: None,
 	};
 
 	let allowed_doc_ids: std::collections::HashSet<i64> = app.documents.iter()
