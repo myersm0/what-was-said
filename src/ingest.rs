@@ -165,7 +165,6 @@ const dup_window_days: i64 = 180;
 
 pub struct IngestOptions<'a> {
 	pub force: bool,
-	pub interactive: bool,
 	pub backend: Option<&'a dyn LlmBackend>,
 	pub model: String,
 }
@@ -180,14 +179,6 @@ pub enum IngestOutcome {
 	Ingested,
 	Skipped,
 	Quit,
-}
-
-pub struct GrayZoneCase {
-	pub new_path: String,
-	pub existing_id: i64,
-	pub existing_path: String,
-	pub similarity: f64,
-	pub shared_block_words: usize,
 }
 
 enum GrayZoneResolution {
@@ -325,21 +316,34 @@ fn prompt_gray_zone(
 	}
 }
 
-pub fn print_gray_zone_summary(cases: &[GrayZoneCase]) {
-	if cases.is_empty() {
-		return;
+pub fn recompute_supersession(connection: &rusqlite::Connection, seed: i64) -> Result<()> {
+	let members = storage::superseded_family_ordered(connection, seed)?;
+	if members.is_empty() {
+		return Ok(());
 	}
-	eprintln!("\n{} gray-zone near-duplicate(s) kept for manual review:", cases.len());
-	for case in cases {
-		eprintln!(
-			"  {}\n    vs doc {} {} (similarity: {:.2}, shared block: ~{} words)",
-			case.new_path,
-			case.existing_id,
-			case.existing_path,
-			case.similarity,
-			case.shared_block_words,
-		);
+	if members.iter().any(|member| member.clip_date_source == "ingest_fallback") {
+		eprintln!("  warning: version family ordered by ingest-time fallback dates; latest-version may be unreliable");
 	}
+	let (current, superseded) = members.split_last().unwrap();
+	for member in superseded {
+		storage::add_tag(connection, member.id, "superseded")?;
+	}
+	storage::remove_tag(connection, current.id, "superseded")?;
+	eprintln!(
+		"  supersession: doc {} current; superseded {}",
+		current.id,
+		superseded.iter().map(|m| m.id.to_string()).collect::<Vec<_>>().join(", "),
+	);
+	Ok(())
+}
+
+fn predecessor_index(dates: &[&str], newcomer_date: &str) -> usize {
+	dates.iter()
+		.enumerate()
+		.filter(|(_, date)| **date < newcomer_date)
+		.map(|(index, _)| index)
+		.last()
+		.unwrap_or(0)
 }
 
 pub fn ingest_file(
@@ -347,7 +351,6 @@ pub fn ingest_file(
 	file_path: &Path,
 	config: &config::Config,
 	options: &IngestOptions<'_>,
-	gray_zones: &mut Vec<GrayZoneCase>,
 ) -> Result<IngestOutcome> {
 	let canonical_path = file_path.canonicalize()
 		.unwrap_or_else(|_| file_path.to_path_buf());
@@ -375,11 +378,12 @@ pub fn ingest_file(
 		text.clone()
 	};
 
-	let clip_date = file_path
+	let (clip_date, clip_date_source) = file_path
 		.file_name()
 		.and_then(|name| name.to_str())
 		.and_then(parse_clip_date)
-		.unwrap_or_else(|| chrono::Local::now().naive_local());
+		.map(|date| (date, "filename"))
+		.unwrap_or_else(|| (chrono::Local::now().naive_local(), "ingest_fallback"));
 	let clip_date_str = clip_date.format("%Y-%m-%d %H:%M:%S").to_string();
 
 	let file_extension = file_path
@@ -491,7 +495,7 @@ pub fn ingest_file(
 					total_chunks += chunks.len();
 				}
 
-				storage::update_document_clip_date(&transaction, existing_doc_id, &clip_date_str)?;
+				storage::update_document_clip_date(&transaction, existing_doc_id, &clip_date_str, clip_date_source)?;
 				transaction.commit()?;
 
 				eprintln!(
@@ -515,17 +519,11 @@ pub fn ingest_file(
 			.unwrap_or_else(|| candidate.source_title.clone())
 	};
 
-	enum Resolution {
-		Superseded,
-		KeptBoth,
-		Pending,
-	}
-	struct NearDupEvent {
+	struct RelationPlan {
 		existing_id: i64,
-		existing_path: String,
 		similarity: f64,
-		shared_block_words: Option<usize>,
-		resolution: Resolution,
+		shared_block_words: Option<i64>,
+		resolution: &'static str,
 		summary: Option<DiffSummary>,
 	}
 	struct GrayCandidate {
@@ -538,23 +536,20 @@ pub fn ingest_file(
 	}
 
 	let candidates = storage::find_dup_candidates(connection, &clip_date_str, dup_window_days)?;
-	let mut near_dup: Option<NearDupEvent> = None;
-	let mut strongest_gray: Option<GrayCandidate> = None;
+	let mut qualifying: Vec<RelationPlan> = Vec::new();
+	let mut gray_candidates: Vec<GrayCandidate> = Vec::new();
 
 	for candidate in &candidates {
-		let sim = minhash::jaccard(&doc_hash, &candidate.document_minhash);
-		if sim >= dup_jaccard_high {
-			near_dup = Some(NearDupEvent {
+		let similarity = minhash::jaccard(&doc_hash, &candidate.document_minhash);
+		if similarity >= dup_jaccard_high {
+			qualifying.push(RelationPlan {
 				existing_id: candidate.id,
-				existing_path: candidate_path(candidate),
-				similarity: sim,
+				similarity,
 				shared_block_words: None,
-				resolution: Resolution::Superseded,
+				resolution: "superseded",
 				summary: None,
 			});
-			break;
-		}
-		if sim >= dup_jaccard_low {
+		} else if similarity >= dup_jaccard_low {
 			let existing_entries = storage::get_entries_for_document(connection, candidate.id)?;
 			let existing_text = existing_entries.iter()
 				.map(|e| e.body.as_str())
@@ -562,25 +557,19 @@ pub fn ingest_file(
 				.join("\n");
 			let shared = minhash::longest_shared_block_words(&new_text, &existing_text);
 			if shared >= dup_shared_block_words {
-				near_dup = Some(NearDupEvent {
+				qualifying.push(RelationPlan {
 					existing_id: candidate.id,
-					existing_path: candidate_path(candidate),
-					similarity: sim,
-					shared_block_words: Some(shared),
-					resolution: Resolution::Superseded,
+					similarity,
+					shared_block_words: Some(shared as i64),
+					resolution: "superseded",
 					summary: None,
 				});
-				break;
-			}
-			let stronger = strongest_gray.as_ref()
-				.map(|g| (shared, sim) > (g.shared_block_words, g.similarity))
-				.unwrap_or(true);
-			if stronger {
-				strongest_gray = Some(GrayCandidate {
+			} else {
+				gray_candidates.push(GrayCandidate {
 					id: candidate.id,
 					path: candidate_path(candidate),
 					date: candidate.clip_date.clone(),
-					similarity: sim,
+					similarity,
 					shared_block_words: shared,
 					existing_text,
 				});
@@ -588,65 +577,70 @@ pub fn ingest_file(
 		}
 	}
 
-	if near_dup.is_none() {
-		if let Some(gray) = strongest_gray {
-			let (resolution, summary) = if options.interactive {
-				let (choice, summary) = prompt_gray_zone(
-					&new_path,
-					gray.id,
-					&gray.path,
-					&gray.date,
-					gray.similarity,
-					gray.shared_block_words,
-					&new_text,
-					&gray.existing_text,
-					options.backend,
-					&options.model,
-				);
-				let resolution = match choice {
-					GrayZoneResolution::Supersede => Resolution::Superseded,
-					GrayZoneResolution::KeepBoth => {
-						eprintln!(
-							"  keeping both: doc {} {} (similarity: {:.2}, shared block: ~{} words)",
-							gray.id, gray.path, gray.similarity, gray.shared_block_words,
-						);
-						Resolution::KeptBoth
-					}
-					GrayZoneResolution::Quit => {
-						eprintln!("  aborted at {}", new_path);
-						return Ok(IngestOutcome::Quit);
-					}
-				};
-				(resolution, summary)
-			} else {
+	let mut relations: Vec<RelationPlan> = Vec::new();
+	let mut recompute = false;
+
+	if !qualifying.is_empty() {
+		recompute = true;
+		relations = qualifying;
+	} else if !gray_candidates.is_empty() {
+		let dates: Vec<&str> = gray_candidates.iter().map(|g| g.date.as_str()).collect();
+		let gray = &gray_candidates[predecessor_index(&dates, &clip_date_str)];
+
+		use std::io::IsTerminal;
+		if !std::io::stdin().is_terminal() {
+			anyhow::bail!(
+				"gray-zone near-duplicate: {} vs doc {} {} (similarity {:.2}); refusing to decide without a TTY",
+				new_path, gray.id, gray.path, gray.similarity,
+			);
+		}
+
+		let (choice, summary) = prompt_gray_zone(
+			&new_path,
+			gray.id,
+			&gray.path,
+			&gray.date,
+			gray.similarity,
+			gray.shared_block_words,
+			&new_text,
+			&gray.existing_text,
+			options.backend,
+			&options.model,
+		);
+		match choice {
+			GrayZoneResolution::Supersede => {
+				recompute = true;
+				relations.push(RelationPlan {
+					existing_id: gray.id,
+					similarity: gray.similarity,
+					shared_block_words: Some(gray.shared_block_words as i64),
+					resolution: "superseded",
+					summary,
+				});
+			}
+			GrayZoneResolution::KeepBoth => {
 				eprintln!(
-					"  near-match: doc {} {} (similarity: {:.2}, shared block: ~{} words) — keeping both",
+					"  keeping both: doc {} {} (similarity: {:.2}, shared block: ~{} words)",
 					gray.id, gray.path, gray.similarity, gray.shared_block_words,
 				);
-				gray_zones.push(GrayZoneCase {
-					new_path: new_path.clone(),
+				relations.push(RelationPlan {
 					existing_id: gray.id,
-					existing_path: gray.path.clone(),
 					similarity: gray.similarity,
-					shared_block_words: gray.shared_block_words,
+					shared_block_words: Some(gray.shared_block_words as i64),
+					resolution: "kept_both",
+					summary,
 				});
-				(Resolution::Pending, None)
-			};
-			near_dup = Some(NearDupEvent {
-				existing_id: gray.id,
-				existing_path: gray.path,
-				similarity: gray.similarity,
-				shared_block_words: Some(gray.shared_block_words),
-				resolution,
-				summary,
-			});
+			}
+			GrayZoneResolution::Quit => {
+				eprintln!("  aborted at {}", new_path);
+				return Ok(IngestOutcome::Quit);
+			}
 		}
 	}
 
 	let transaction = connection.unchecked_transaction()?;
 
-	let document_id = storage::insert_document(
-		&transaction,
+	let mut document_params = storage::InsertDocumentParams::captured(
 		title.as_deref(),
 		&source_title,
 		doctype_name,
@@ -654,7 +648,9 @@ pub fn ingest_file(
 		Some(&file_path_str),
 		&clip_date_str,
 		Some(&doc_hash),
-	)?;
+	);
+	document_params.clip_date_source = clip_date_source;
+	let document_id = storage::insert_document_with_params(&transaction, &document_params)?;
 
 	let mut total_chunks = 0usize;
 	for (position, entry) in segmented.iter().enumerate() {
@@ -675,29 +671,17 @@ pub fn ingest_file(
 		total_chunks += chunks.len();
 	}
 
-	if let Some(event) = near_dup {
-		let resolution = match event.resolution {
-			Resolution::Superseded => "superseded",
-			Resolution::KeptBoth => "kept_both",
-			Resolution::Pending => "pending",
-		};
-		if resolution == "superseded" {
-			storage::add_tag(&transaction, event.existing_id, "superseded")?;
-			eprintln!(
-				"  tagged doc {} {} as superseded (similarity: {:.2})",
-				event.existing_id, event.existing_path, event.similarity,
-			);
-		}
+	for plan in &relations {
 		let relation_id = storage::insert_document_relation(
 			&transaction,
 			document_id.0,
-			event.existing_id,
+			plan.existing_id,
 			"near_duplicate",
-			event.similarity,
-			event.shared_block_words.map(|words| words as i64),
-			resolution,
+			plan.similarity,
+			plan.shared_block_words,
+			plan.resolution,
 		)?;
-		if let Some(summary) = event.summary {
+		if let Some(summary) = &plan.summary {
 			storage::set_relation_summary(
 				&transaction,
 				relation_id,
@@ -706,6 +690,10 @@ pub fn ingest_file(
 				&summary.prompt_hash,
 			)?;
 		}
+	}
+
+	if recompute {
+		recompute_supersession(&transaction, document_id.0)?;
 	}
 
 	transaction.commit()?;
@@ -740,10 +728,8 @@ pub fn ingest_directory(
 
 	eprintln!("found {} files in {}", paths.len(), directory.display());
 
-	let mut gray_zones = Vec::new();
-
 	for path in &paths {
-		match ingest_file(connection, path, config, options, &mut gray_zones) {
+		match ingest_file(connection, path, config, options) {
 			Ok(IngestOutcome::Ingested) => ingested += 1,
 			Ok(IngestOutcome::Skipped) => skipped += 1,
 			Ok(IngestOutcome::Quit) => {
@@ -754,7 +740,6 @@ pub fn ingest_directory(
 		}
 	}
 
-	print_gray_zone_summary(&gray_zones);
 	Ok((ingested, skipped))
 }
 
@@ -830,4 +815,17 @@ mod tests {
 		assert!(entries.is_empty());
 	}
 
+	#[test]
+	fn predecessor_prefers_closest_earlier() {
+		let dates = ["2024-01-01 00:00:00", "2024-02-01 00:00:00", "2024-04-01 00:00:00"];
+		assert_eq!(predecessor_index(&dates, "2024-03-01 00:00:00"), 1);
+		assert_eq!(predecessor_index(&dates, "2024-02-01 00:00:00"), 0);
+	}
+
+	#[test]
+	fn predecessor_falls_back_across_the_boundary() {
+		let dates = ["2024-01-01 00:00:00", "2024-02-01 00:00:00"];
+		assert_eq!(predecessor_index(&dates, "2024-05-01 00:00:00"), 1);
+		assert_eq!(predecessor_index(&dates, "2023-12-01 00:00:00"), 0);
+	}
 }

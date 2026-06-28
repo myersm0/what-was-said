@@ -634,10 +634,15 @@ pub fn get_max_entry_position(connection: &Connection, document_id: i64) -> Resu
 	Ok(max_pos.unwrap_or(0))
 }
 
-pub fn update_document_clip_date(connection: &Connection, document_id: i64, clip_date: &str) -> Result<()> {
+pub fn update_document_clip_date(
+	connection: &Connection,
+	document_id: i64,
+	clip_date: &str,
+	clip_date_source: &str,
+) -> Result<()> {
 	connection.execute(
-		"UPDATE documents SET clip_date = ?1 WHERE id = ?2",
-		params![clip_date, document_id],
+		"UPDATE documents SET clip_date = ?1, clip_date_source = ?2 WHERE id = ?3",
+		params![clip_date, clip_date_source, document_id],
 	)?;
 	Ok(())
 }
