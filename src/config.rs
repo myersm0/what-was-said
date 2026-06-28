@@ -95,7 +95,7 @@ fn parse_merge_strategy(value: &str) -> Result<MergeStrategy> {
 	}
 }
 
-fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
 	if path.starts_with("~/") {
 		if let Some(home) = dirs::home_dir() {
 			return home.join(&path[2..]).to_string_lossy().to_string();

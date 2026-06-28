@@ -35,6 +35,7 @@ struct SearchParams {
 	author: Option<String>,
 	date_from: Option<String>,
 	date_to: Option<String>,
+	project: Option<String>,
 }
 
 async fn search_handler(
@@ -49,6 +50,7 @@ async fn search_handler(
 		author: params.author,
 		date_from: params.date_from,
 		date_to: params.date_to,
+		project: params.project,
 	};
 	let connection = state.connection.lock().map_err(|e| err_500(e))?;
 	let mut results = query::search_filtered(&connection, &params.q, sort, &filters)
@@ -64,6 +66,7 @@ struct SimilarParams {
 	author: Option<String>,
 	date_from: Option<String>,
 	date_to: Option<String>,
+	project: Option<String>,
 }
 
 async fn similar_handler(
@@ -75,6 +78,7 @@ async fn similar_handler(
 		author: params.author,
 		date_from: params.date_from,
 		date_to: params.date_to,
+		project: params.project,
 	};
 	let query_embedding = state.backend.embed(&params.q, &state.embed_model)
 		.map_err(|e| err_500(e))?;

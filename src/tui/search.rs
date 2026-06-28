@@ -52,15 +52,17 @@ pub(super) fn handle_keys(
 				SearchField::Query => SearchField::Author,
 				SearchField::Author => SearchField::DateFrom,
 				SearchField::DateFrom => SearchField::DateTo,
-				SearchField::DateTo => SearchField::Query,
+				SearchField::DateTo => SearchField::Project,
+				SearchField::Project => SearchField::Query,
 			};
 		}
 		KeyCode::BackTab => {
 			app.search_field = match app.search_field {
-				SearchField::Query => SearchField::DateTo,
+				SearchField::Query => SearchField::Project,
 				SearchField::Author => SearchField::Query,
 				SearchField::DateFrom => SearchField::Author,
 				SearchField::DateTo => SearchField::DateFrom,
+				SearchField::Project => SearchField::DateTo,
 			};
 		}
 		KeyCode::Char(c) => {
@@ -69,6 +71,7 @@ pub(super) fn handle_keys(
 				SearchField::Author => app.author_filter.push(c),
 				SearchField::DateFrom => app.date_from.push(c),
 				SearchField::DateTo => app.date_to.push(c),
+				SearchField::Project => app.project_filter.push(c),
 			}
 			run_search(app, connection, search_config)?;
 		}
@@ -78,6 +81,7 @@ pub(super) fn handle_keys(
 				SearchField::Author => { app.author_filter.pop(); }
 				SearchField::DateFrom => { app.date_from.pop(); }
 				SearchField::DateTo => { app.date_to.pop(); }
+				SearchField::Project => { app.project_filter.pop(); }
 			}
 			run_search(app, connection, search_config)?;
 		}
@@ -97,6 +101,7 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 		author: if app.author_filter.is_empty() { None } else { Some(app.author_filter.clone()) },
 		date_from: if app.date_from.is_empty() { None } else { Some(app.date_from.clone()) },
 		date_to: if app.date_to.is_empty() { None } else { Some(app.date_to.clone()) },
+		project: if app.project_filter.is_empty() { None } else { Some(app.project_filter.clone()) },
 	};
 
 	let allowed_doc_ids: std::collections::HashSet<i64> = app.documents.iter()
@@ -218,6 +223,7 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 			Constraint::Length(20),
 			Constraint::Length(15),
 			Constraint::Length(15),
+			Constraint::Length(20),
 			Constraint::Min(1),
 		])
 		.split(input_layout[1]);
@@ -251,6 +257,9 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 
 	let date_to_text = format!(" To: {} ", app.date_to);
 	frame.render_widget(Paragraph::new(date_to_text).style(field_style(SearchField::DateTo)), filter_layout[2]);
+
+	let project_text = format!(" Project: {} ", app.project_filter);
+	frame.render_widget(Paragraph::new(project_text).style(field_style(SearchField::Project)), filter_layout[3]);
 
 	let mut lines: Vec<Line> = Vec::new();
 	let mut chunk_counter = 0usize;

@@ -95,6 +95,10 @@ pub struct SimilarChunk {
 	pub author: Option<String>,
 	pub entry_position: u32,
 	pub chunk_index: u32,
+	pub doc_status: Option<String>,
+	pub project: Option<String>,
+	pub start_char: usize,
+	pub end_char: usize,
 }
 
 pub fn find_similar_chunks(
@@ -102,7 +106,7 @@ pub fn find_similar_chunks(
 	query_embedding: &[f32],
 	limit: usize,
 ) -> Result<Vec<SimilarChunk>> {
-	find_similar_chunks_filtered(connection, query_embedding, limit, None, None, None)
+	find_similar_chunks_filtered(connection, query_embedding, limit, None, None, None, None)
 }
 
 pub fn find_similar_chunks_filtered(
@@ -112,7 +116,14 @@ pub fn find_similar_chunks_filtered(
 	author_like: Option<&str>,
 	date_from: Option<&str>,
 	date_to: Option<&str>,
+	project_filter: Option<&str>,
 ) -> Result<Vec<SimilarChunk>> {
+	if let Some(project) = project_filter {
+		return find_similar_chunks_in_project(
+			connection, query_embedding, limit, project, author_like, date_from, date_to,
+		);
+	}
+
 	let fetch_limit = if author_like.is_some() || date_from.is_some() || date_to.is_some() {
 		limit * 5
 	} else {
@@ -126,10 +137,12 @@ pub fn find_similar_chunks_filtered(
 			WHERE embedding MATCH ?1 AND k = ?2
 		)
 		SELECT knn.chunk_id, knn.distance, c.body, e.document_id,
-		       e.source_title, e.clip_date, e.author, e.position, c.chunk_index
+		       e.source_title, e.clip_date, e.author, e.position, c.chunk_index,
+		       d.doc_status, d.project, c.start_char, c.end_char
 		FROM knn
 		JOIN chunks c ON c.id = knn.chunk_id
 		JOIN entries e ON e.id = c.entry_id
+		JOIN documents d ON d.id = e.document_id
 		ORDER BY knn.distance"
 	)?;
 
@@ -146,6 +159,10 @@ pub fn find_similar_chunks_filtered(
 				author: row.get(6)?,
 				entry_position: row.get(7)?,
 				chunk_index: row.get(8)?,
+				doc_status: row.get(9)?,
+				project: row.get(10)?,
+				start_char: row.get(11)?,
+				end_char: row.get(12)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -167,8 +184,113 @@ pub fn find_similar_chunks_filtered(
 		results.retain(|r| r.clip_date.as_str() <= to);
 	}
 
+	let mut results = dedup_overlapping_chunks(results);
 	results.truncate(limit);
 	Ok(results)
+}
+
+fn find_similar_chunks_in_project(
+	connection: &Connection,
+	query_embedding: &[f32],
+	limit: usize,
+	project: &str,
+	author_like: Option<&str>,
+	date_from: Option<&str>,
+	date_to: Option<&str>,
+) -> Result<Vec<SimilarChunk>> {
+	let mut stmt = connection.prepare(
+		"SELECT v.chunk_id, v.embedding, c.body, e.document_id,
+		        e.source_title, e.clip_date, e.author, e.position, c.chunk_index,
+		        d.doc_status, d.project, c.start_char, c.end_char
+		 FROM vec_chunks v
+		 JOIN chunks c ON c.id = v.chunk_id
+		 JOIN entries e ON e.id = c.entry_id
+		 JOIN documents d ON d.id = e.document_id
+		 WHERE d.project = ?1"
+	)?;
+
+	let mut results: Vec<SimilarChunk> = stmt
+		.query_map(params![project], |row| {
+			let blob: Vec<u8> = row.get(1)?;
+			let embedding = decode_embedding(&blob);
+			let similarity = cosine_similarity(&embedding, query_embedding);
+			Ok(SimilarChunk {
+				chunk_id: row.get(0)?,
+				document_id: row.get(3)?,
+				source_title: row.get(4)?,
+				clip_date: row.get(5)?,
+				body: row.get(2)?,
+				similarity,
+				author: row.get(6)?,
+				entry_position: row.get(7)?,
+				chunk_index: row.get(8)?,
+				doc_status: row.get(9)?,
+				project: row.get(10)?,
+				start_char: row.get(11)?,
+				end_char: row.get(12)?,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+
+	if let Some(author_pattern) = author_like {
+		let pattern_lower = author_pattern.to_lowercase();
+		results.retain(|r| {
+			r.author.as_ref()
+				.map(|a| a.to_lowercase().contains(&pattern_lower))
+				.unwrap_or(false)
+		});
+	}
+	if let Some(from) = date_from {
+		results.retain(|r| r.clip_date.as_str() >= from);
+	}
+	if let Some(to) = date_to {
+		results.retain(|r| r.clip_date.as_str() <= to);
+	}
+
+	let mut results = dedup_overlapping_chunks(results);
+	results.truncate(limit);
+	Ok(results)
+}
+
+fn dedup_overlapping_chunks(mut chunks: Vec<SimilarChunk>) -> Vec<SimilarChunk> {
+	chunks.sort_by(|a, b| {
+		b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal)
+	});
+	let mut kept: Vec<SimilarChunk> = Vec::new();
+	for chunk in chunks {
+		let redundant = kept.iter().any(|k| {
+			k.document_id == chunk.document_id
+				&& k.entry_position == chunk.entry_position
+				&& chunk.start_char < k.end_char
+				&& k.start_char < chunk.end_char
+		});
+		if !redundant {
+			kept.push(chunk);
+		}
+	}
+	kept
+}
+
+fn decode_embedding(blob: &[u8]) -> Vec<f32> {
+	blob.chunks_exact(4)
+		.map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+		.collect()
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+	let len = a.len().min(b.len());
+	let mut dot = 0.0f32;
+	let mut norm_a = 0.0f32;
+	let mut norm_b = 0.0f32;
+	for i in 0..len {
+		dot += a[i] * b[i];
+		norm_a += a[i] * a[i];
+		norm_b += b[i] * b[i];
+	}
+	if norm_a == 0.0 || norm_b == 0.0 {
+		return 0.0;
+	}
+	dot / (norm_a.sqrt() * norm_b.sqrt())
 }
 
 // --- vec_claims ---

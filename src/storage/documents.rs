@@ -4,6 +4,107 @@ use serde::Serialize;
 
 use crate::types::*;
 
+pub struct InsertDocumentParams<'a> {
+	pub title: Option<&'a str>,
+	pub source_title: &'a str,
+	pub doctype_name: Option<&'a str>,
+	pub merge_strategy: MergeStrategy,
+	pub origin_path: Option<&'a str>,
+	pub clip_date: &'a str,
+	pub document_minhash: Option<&'a MinHashSignature>,
+	pub project: Option<&'a str>,
+	pub relative_path: Option<&'a str>,
+	pub content_hash: Option<&'a str>,
+	pub doc_status: Option<&'a str>,
+	pub doc_role: Option<&'a str>,
+	pub synced_at: Option<&'a str>,
+}
+
+impl<'a> InsertDocumentParams<'a> {
+	pub fn captured(
+		title: Option<&'a str>,
+		source_title: &'a str,
+		doctype_name: Option<&'a str>,
+		merge_strategy: MergeStrategy,
+		origin_path: Option<&'a str>,
+		clip_date: &'a str,
+		document_minhash: Option<&'a MinHashSignature>,
+	) -> Self {
+		Self {
+			title,
+			source_title,
+			doctype_name,
+			merge_strategy,
+			origin_path,
+			clip_date,
+			document_minhash,
+			project: None,
+			relative_path: None,
+			content_hash: None,
+			doc_status: None,
+			doc_role: None,
+			synced_at: None,
+		}
+	}
+
+	pub fn project(
+		project: &'a str,
+		relative_path: &'a str,
+		content_hash: &'a str,
+		doc_status: &'a str,
+		doc_role: Option<&'a str>,
+		synced_at: &'a str,
+	) -> Self {
+		Self {
+			title: None,
+			source_title: relative_path,
+			doctype_name: Some("project_markdown"),
+			merge_strategy: MergeStrategy::None,
+			origin_path: None,
+			clip_date: synced_at,
+			document_minhash: None,
+			project: Some(project),
+			relative_path: Some(relative_path),
+			content_hash: Some(content_hash),
+			doc_status: Some(doc_status),
+			doc_role,
+			synced_at: Some(synced_at),
+		}
+	}
+}
+
+pub fn insert_document_with_params(
+	connection: &Connection,
+	params: &InsertDocumentParams<'_>,
+) -> Result<DocumentId> {
+	let minhash_bytes: Option<Vec<u8>> = params.document_minhash.map(|sig| {
+		sig.iter().flat_map(|v| v.to_le_bytes()).collect()
+	});
+	connection.execute(
+		"INSERT INTO documents (
+			title, source_title, doctype_name, merge_strategy, origin_path,
+			clip_date, document_minhash, project, relative_path, content_hash,
+			doc_status, doc_role, synced_at
+		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+		params![
+			params.title,
+			params.source_title,
+			params.doctype_name,
+			super::merge_strategy_to_str(params.merge_strategy),
+			params.origin_path,
+			params.clip_date,
+			minhash_bytes,
+			params.project,
+			params.relative_path,
+			params.content_hash,
+			params.doc_status,
+			params.doc_role,
+			params.synced_at,
+		],
+	)?;
+	Ok(DocumentId(connection.last_insert_rowid()))
+}
+
 pub fn insert_document(
 	connection: &Connection,
 	title: Option<&str>,
@@ -14,23 +115,120 @@ pub fn insert_document(
 	clip_date: &str,
 	document_minhash: Option<&MinHashSignature>,
 ) -> Result<DocumentId> {
-	let minhash_bytes: Option<Vec<u8>> = document_minhash.map(|sig| {
-		sig.iter().flat_map(|v| v.to_le_bytes()).collect()
-	});
-	connection.execute(
-		"INSERT INTO documents (title, source_title, doctype_name, merge_strategy, origin_path, clip_date, document_minhash)
-		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-		params![
-			title,
-			source_title,
-			doctype_name,
-			super::merge_strategy_to_str(merge_strategy),
-			origin_path,
-			clip_date,
-			minhash_bytes,
-		],
+	insert_document_with_params(
+		connection,
+		&InsertDocumentParams::captured(
+			title, source_title, doctype_name, merge_strategy,
+			origin_path, clip_date, document_minhash,
+		),
+	)
+}
+
+pub fn insert_project_document(
+	connection: &Connection,
+	project: &str,
+	relative_path: &str,
+	content_hash: &str,
+	doc_status: &str,
+	doc_role: Option<&str>,
+	synced_at: &str,
+) -> Result<DocumentId> {
+	insert_document_with_params(
+		connection,
+		&InsertDocumentParams::project(
+			project, relative_path, content_hash, doc_status, doc_role, synced_at,
+		),
+	)
+}
+
+pub fn get_project_document(
+	connection: &Connection,
+	project: &str,
+	relative_path: &str,
+) -> Result<Option<(i64, Option<String>)>> {
+	let row = connection
+		.query_row(
+			"SELECT id, content_hash FROM documents WHERE project = ?1 AND relative_path = ?2",
+			params![project, relative_path],
+			|row| Ok((row.get(0)?, row.get(1)?)),
+		)
+		.optional()?;
+	Ok(row)
+}
+
+pub fn list_project_documents(connection: &Connection, project: &str) -> Result<Vec<(i64, String)>> {
+	let mut stmt = connection.prepare(
+		"SELECT id, relative_path FROM documents
+		 WHERE project = ?1 AND relative_path IS NOT NULL",
 	)?;
-	Ok(DocumentId(connection.last_insert_rowid()))
+	let rows = stmt
+		.query_map(params![project], |row| Ok((row.get(0)?, row.get(1)?)))?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(rows)
+}
+
+pub fn replace_document_children(connection: &Connection, document_id: i64) -> Result<()> {
+	if super::vec_table_exists(connection) {
+		let chunk_ids = chunk_ids_for_document(connection, document_id)?;
+		let mut stmt = connection.prepare("DELETE FROM vec_chunks WHERE chunk_id = ?1")?;
+		for id in chunk_ids {
+			stmt.execute(params![id])?;
+		}
+	}
+	if super::vec_claims_table_exists(connection) {
+		let claim_ids = claim_ids_for_document(connection, document_id)?;
+		let mut stmt = connection.prepare("DELETE FROM vec_claims WHERE claim_id = ?1")?;
+		for id in claim_ids {
+			stmt.execute(params![id])?;
+		}
+	}
+	connection.execute("DELETE FROM claims WHERE document_id = ?1", params![document_id])?;
+	connection.execute("DELETE FROM entries WHERE document_id = ?1", params![document_id])?;
+	connection.execute("DELETE FROM derived_content WHERE document_id = ?1", params![document_id])?;
+	Ok(())
+}
+
+fn chunk_ids_for_document(connection: &Connection, document_id: i64) -> Result<Vec<i64>> {
+	let mut stmt = connection.prepare(
+		"SELECT c.id FROM chunks c JOIN entries e ON e.id = c.entry_id WHERE e.document_id = ?1",
+	)?;
+	let ids = stmt
+		.query_map(params![document_id], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<i64>, _>>()?;
+	Ok(ids)
+}
+
+fn claim_ids_for_document(connection: &Connection, document_id: i64) -> Result<Vec<i64>> {
+	let mut stmt = connection.prepare("SELECT id FROM claims WHERE document_id = ?1")?;
+	let ids = stmt
+		.query_map(params![document_id], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<i64>, _>>()?;
+	Ok(ids)
+}
+
+pub fn update_project_document(
+	connection: &Connection,
+	document_id: i64,
+	content_hash: &str,
+	doc_status: &str,
+	doc_role: Option<&str>,
+	synced_at: &str,
+) -> Result<()> {
+	connection.execute(
+		"UPDATE documents
+		 SET content_hash = ?1, doc_status = ?2, doc_role = ?3, synced_at = ?4
+		 WHERE id = ?5",
+		params![content_hash, doc_status, doc_role, synced_at, document_id],
+	)?;
+	Ok(())
+}
+
+pub fn set_document_missing(connection: &Connection, document_id: i64, synced_at: &str) -> Result<()> {
+	connection.execute(
+		"UPDATE documents SET doc_status = 'missing', synced_at = ?1 WHERE id = ?2",
+		params![synced_at, document_id],
+	)?;
+	Ok(())
 }
 
 pub fn update_document_title(connection: &Connection, document_id: DocumentId, title: &str) -> Result<()> {
@@ -190,6 +388,10 @@ pub struct DocumentSummary {
 	pub first_line: Option<String>,
 	pub brief_summary: Option<String>,
 	pub tags: Vec<String>,
+	pub project: Option<String>,
+	pub doc_status: Option<String>,
+	pub doc_role: Option<String>,
+	pub relative_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +427,8 @@ pub fn list_documents(
 		        COUNT(c.id) as chunk_count,
 		        (SELECT SUBSTR(body, 1, 100) FROM entries WHERE document_id = d.id AND LENGTH(TRIM(body)) > 0 ORDER BY position LIMIT 1) as first_line,
 		        (SELECT GROUP_CONCAT(tag, ',') FROM document_tags WHERE document_id = d.id) as tags,
-		        (SELECT SUBSTR(dc.body, 1, 200) FROM derived_content dc WHERE dc.document_id = d.id AND dc.content_type = 'brief' AND dc.quality = 'ok') as brief_summary
+		        (SELECT SUBSTR(dc.body, 1, 200) FROM derived_content dc WHERE dc.document_id = d.id AND dc.content_type = 'brief' AND dc.quality = 'ok') as brief_summary,
+		        d.project, d.doc_status, d.doc_role, d.relative_path
 		 FROM documents d
 		 LEFT JOIN entries e ON e.document_id = d.id
 		 LEFT JOIN chunks c ON c.entry_id = e.id
@@ -251,6 +454,10 @@ pub fn list_documents(
 				first_line: row.get(7)?,
 				tags,
 				brief_summary: row.get(9)?,
+				project: row.get(10)?,
+				doc_status: row.get(11)?,
+				doc_role: row.get(12)?,
+				relative_path: row.get(13)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -264,6 +471,10 @@ pub struct DocumentContent {
 	pub source_title: String,
 	pub doctype_name: Option<String>,
 	pub clip_date: String,
+	pub project: Option<String>,
+	pub doc_status: Option<String>,
+	pub doc_role: Option<String>,
+	pub relative_path: Option<String>,
 	pub entries: Vec<EntryContent>,
 }
 
@@ -289,15 +500,15 @@ pub struct ChunkContent {
 }
 
 pub fn get_document(connection: &Connection, document_id: i64) -> Result<Option<DocumentContent>> {
-	let doc_row: Option<(i64, Option<String>, String, Option<String>, String)> = connection
+	let doc_row: Option<(i64, Option<String>, String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>)> = connection
 		.query_row(
-			"SELECT id, title, source_title, doctype_name, clip_date FROM documents WHERE id = ?1",
+			"SELECT id, title, source_title, doctype_name, clip_date, project, doc_status, doc_role, relative_path FROM documents WHERE id = ?1",
 			params![document_id],
-			|row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+			|row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
 		)
 		.optional()?;
 
-	let Some((id, title, source_title, doctype_name, clip_date)) = doc_row else {
+	let Some((id, title, source_title, doctype_name, clip_date, project, doc_status, doc_role, relative_path)) = doc_row else {
 		return Ok(None);
 	};
 
@@ -352,6 +563,10 @@ pub fn get_document(connection: &Connection, document_id: i64) -> Result<Option<
 		source_title,
 		doctype_name,
 		clip_date,
+		project,
+		doc_status,
+		doc_role,
+		relative_path,
 		entries,
 	}))
 }

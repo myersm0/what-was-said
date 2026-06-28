@@ -215,7 +215,14 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 			}
 			spans.push(Span::styled(format!("{:<43}", source), Style::default().fg(theme.text)));
 			spans.push(Span::styled("│ ", Style::default().fg(theme.border)));
-			spans.push(Span::styled(format!("{:<10}", truncate_str(doctype, 8)), Style::default().fg(theme.text_muted)));
+			spans.push(Span::styled(
+				format!("{:<10}", truncate_str(doc.project.as_deref().unwrap_or(doctype), 8)),
+				if doc.project.is_some() {
+					Style::default().fg(theme.text_accent)
+				} else {
+					Style::default().fg(theme.text_muted)
+				},
+			));
 			spans.push(Span::styled("│ ", Style::default().fg(theme.border)));
 			spans.push(Span::styled(format!("{:<12}", date), Style::default().fg(theme.text_muted)));
 			spans.push(Span::styled("│ ", Style::default().fg(theme.border)));

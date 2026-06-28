@@ -14,6 +14,7 @@ pub struct ChunkSearchResult {
 	pub clip_date: String,
 	pub heading_title: Option<String>,
 	pub rank: f64,
+	pub doc_status: Option<String>,
 }
 
 pub fn raw_fts_search(
@@ -22,6 +23,7 @@ pub fn raw_fts_search(
 	author_like: Option<&str>,
 	date_from: Option<&str>,
 	date_to: Option<&str>,
+	project_filter: Option<&str>,
 ) -> Result<Vec<ChunkSearchResult>> {
 	let prefix_query: String = query
 		.split_whitespace()
@@ -44,14 +46,20 @@ pub fn raw_fts_search(
 		conditions.push(format!("e.clip_date <= ?{}", param_values.len() + 1));
 		param_values.push(Box::new(to.to_string()));
 	}
+	if let Some(project) = project_filter {
+		conditions.push(format!("d.project = ?{}", param_values.len() + 1));
+		param_values.push(Box::new(project.to_string()));
+	}
 
 	let sql = format!(
 		"SELECT c.id, c.entry_id, e.document_id, c.body, c.chunk_index, e.position,
 		        e.author, e.source_title, e.clip_date, e.heading_title, f.rank,
-		        snippet(chunks_fts, 0, '\x02', '\x03', '\x01', 12)
+		        snippet(chunks_fts, 0, '\x02', '\x03', '\x01', 12),
+		        d.doc_status
 		 FROM chunks_fts f
 		 JOIN chunks c ON c.id = f.rowid
 		 JOIN entries e ON e.id = c.entry_id
+		 JOIN documents d ON d.id = e.document_id
 		 WHERE {}
 		 ORDER BY f.rank
 		 LIMIT 200",
@@ -75,6 +83,7 @@ pub fn raw_fts_search(
 				heading_title: row.get(9)?,
 				rank: row.get(10)?,
 				snippet: row.get(11)?,
+				doc_status: row.get(12)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;

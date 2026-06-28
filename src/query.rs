@@ -37,6 +37,7 @@ pub struct SearchFilters {
 	pub author: Option<String>,
 	pub date_from: Option<String>,
 	pub date_to: Option<String>,
+	pub project: Option<String>,
 }
 
 impl SearchFilters {
@@ -48,6 +49,9 @@ impl SearchFilters {
 	}
 	fn date_to_ref(&self) -> Option<&str> {
 		self.date_to.as_deref()
+	}
+	fn project_ref(&self) -> Option<&str> {
+		self.project.as_deref()
 	}
 }
 
@@ -67,6 +71,7 @@ pub fn search_filtered(
 ) -> Result<Vec<GroupedSearchResult>> {
 	let rows = storage::raw_fts_search(
 		connection, query, filters.author_ref(), filters.date_from_ref(), filters.date_to_ref(),
+		filters.project_ref(),
 	)?;
 	Ok(group_fts_results(rows, sort_by))
 }
@@ -88,6 +93,7 @@ pub fn find_similar_grouped_filtered(
 	let chunks = storage::find_similar_chunks_filtered(
 		connection, query_embedding, limit,
 		filters.author_ref(), filters.date_from_ref(), filters.date_to_ref(),
+		filters.project_ref(),
 	)?;
 	Ok(group_similar_results(chunks))
 }
@@ -106,6 +112,8 @@ pub fn group_fts_results(
 ) -> Vec<GroupedSearchResult> {
 	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
 	for row in rows {
+		let weight = status_weight(row.doc_status.as_deref());
+		let weighted_rank = row.rank * weight;
 		let hit = ChunkHit {
 			entry_id: row.entry_id,
 			entry_position: row.entry_position,
@@ -126,8 +134,8 @@ pub fn group_fts_results(
 					doc.chunks.retain(|c| {
 						!snippets_similar(&hit.snippet, &c.snippet) || hit.rank >= c.rank
 					});
-					if hit.rank < doc.best_rank {
-						doc.best_rank = hit.rank;
+					if weighted_rank < doc.best_rank {
+						doc.best_rank = weighted_rank;
 					}
 					doc.chunks.push(hit);
 				}
@@ -136,7 +144,7 @@ pub fn group_fts_results(
 				document_id: row.document_id,
 				source_title: row.source_title,
 				clip_date: row.clip_date,
-				best_rank: hit.rank,
+				best_rank: weighted_rank,
 				chunks: vec![hit],
 			}),
 		}
@@ -166,6 +174,8 @@ pub fn group_similar_results(
 	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
 	for chunk in chunks {
 		let rank = -(chunk.similarity as f64);
+		let weight = status_weight(chunk.doc_status.as_deref());
+		let weighted_rank = rank * weight;
 		let hit = ChunkHit {
 			entry_id: 0,
 			entry_position: chunk.entry_position,
@@ -179,8 +189,8 @@ pub fn group_similar_results(
 
 		match grouped.iter_mut().find(|d| d.document_id == chunk.document_id) {
 			Some(doc) => {
-				if rank < doc.best_rank {
-					doc.best_rank = rank;
+				if weighted_rank < doc.best_rank {
+					doc.best_rank = weighted_rank;
 				}
 				doc.chunks.push(hit);
 			}
@@ -188,7 +198,7 @@ pub fn group_similar_results(
 				document_id: chunk.document_id,
 				source_title: chunk.source_title,
 				clip_date: chunk.clip_date,
-				best_rank: rank,
+				best_rank: weighted_rank,
 				chunks: vec![hit],
 			}),
 		}
@@ -204,6 +214,15 @@ pub fn group_similar_results(
 	});
 
 	grouped
+}
+
+fn status_weight(status: Option<&str>) -> f64 {
+	match status {
+		Some("provisional") => 0.8,
+		Some("archived") => 0.5,
+		Some("missing") => 0.3,
+		_ => 1.0,
+	}
 }
 
 fn snippets_similar(a: &str, b: &str) -> bool {
@@ -245,6 +264,7 @@ mod tests {
 			clip_date: date.to_string(),
 			heading_title: None,
 			rank,
+			doc_status: None,
 		}
 	}
 
@@ -293,16 +313,19 @@ mod tests {
 				chunk_id: 1, document_id: 1, source_title: "Doc A".into(),
 				clip_date: "2024-01-01".into(), body: "first".into(),
 				similarity: 0.9, author: None, entry_position: 0, chunk_index: 0,
+				doc_status: None, project: None, start_char: 0, end_char: 0,
 			},
 			storage::SimilarChunk {
 				chunk_id: 2, document_id: 1, source_title: "Doc A".into(),
 				clip_date: "2024-01-01".into(), body: "second".into(),
 				similarity: 0.7, author: None, entry_position: 1, chunk_index: 0,
+				doc_status: None, project: None, start_char: 0, end_char: 0,
 			},
 			storage::SimilarChunk {
 				chunk_id: 3, document_id: 2, source_title: "Doc B".into(),
 				clip_date: "2024-02-01".into(), body: "other".into(),
 				similarity: 0.8, author: None, entry_position: 0, chunk_index: 0,
+				doc_status: None, project: None, start_char: 0, end_char: 0,
 			},
 		];
 		let grouped = group_similar_results(chunks);

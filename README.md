@@ -114,6 +114,7 @@ what-was-said browse
 what-was-said browse --theme gruvbox
 what-was-said about "semantic query"
 what-was-said about "keyword query" --method exact
+what-was-said about "query" --project game   # restrict to one project
 what-was-said in 42
 ```
 
@@ -129,6 +130,14 @@ what-was-said extract --status   # check progress
 what-was-said diff               # summarize near-duplicate changes (missing or stale)
 what-was-said diff --force        # re-summarize all relations
 ```
+
+**Sync (curated project docs)**
+```bash
+what-was-said sync                       # sync all registered projects
+what-was-said sync --project game        # sync one project
+```
+
+Sync ingests curated project documents from their on-disk source of truth (see [Project sync](#project-sync)). Project docs are not embedded by sync; run `embed` (and `derive`/`extract`) afterward, as with captured clips.
 
 **Serve**
 ```bash
@@ -204,8 +213,8 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 | Endpoint | Description |
 |---|---|
-| `GET /search?q=...&sort=score\|date&author=...&date_from=...&date_to=...` | FTS5 keyword search, results grouped by document |
-| `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...` | Semantic search via embeddings, results grouped by document |
+| `GET /search?q=...&sort=score\|date&author=...&date_from=...&date_to=...&project=...` | FTS5 keyword search, results grouped by document |
+| `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...&project=...` | Semantic search via embeddings, results grouped by document |
 | `GET /get/:id` | Full document with entries and chunks |
 | `GET /entries/:doc_id` | Entries for a document |
 | `GET /claims/doc/:doc_id` | Claims extracted from a document |
@@ -300,6 +309,48 @@ Built-in themes are compiled into the binary. Custom themes are TOML files with 
 
 ---
 
+## Project sync
+
+The system handles two kinds of text. **Captured** documents are evidence — clips, emails, Slack threads, transcripts — preserved with provenance and never edited in place. **Curated** project documents are state you actively maintain — a README, a design doc, working notes — where the system should track the *current* version rather than accumulate snapshots. Project sync keeps curated docs in step with their on-disk source of truth.
+
+A curated doc's identity is its position, `(project, relative_path)` — not its content. Editing a file updates the same logical document in place; near-duplicate detection does **not** run for project docs.
+
+**Registering projects.** Add a `projects.toml` to the config directory:
+
+```toml
+[[project]]
+name = "game"
+manifest = "~/projects/game/documents.toml"
+# root = "~/projects/game"   # optional; defaults to the manifest's directory
+```
+
+**Manifests.** Each project has a `documents.toml` mapping file globs to a status and an optional role. Rules are matched top-to-bottom, first match wins; files matching no rule are skipped (inclusion is explicit):
+
+```toml
+[[docs]]
+glob = "README.md"
+status = "canonical"
+role = "overview"
+
+[[docs]]
+glob = "ideas/*.md"
+status = "provisional"
+role = "idea"
+
+[[docs]]
+glob = "logs/*.md"
+status = "archived"
+role = "log"
+```
+
+Manifest statuses are `canonical`, `provisional`, and `archived`. A fourth status, `missing`, is set only by sync (never declared in a manifest) when a previously-synced file disappears from disk; such docs are tombstoned rather than deleted, since the file may reappear and the old content stays useful for search.
+
+**Syncing.** `what-was-said sync [--project NAME]` walks each project's root, matches files against the manifest, and upserts by `(project, relative_path)`: new files are parsed (markdown) and inserted; changed files (detected by content hash) have their entries, chunks, claims, embeddings, and summaries replaced under the same document id; unchanged files are skipped. Vanished files are marked `missing`. It prints a `N new, N updated, N unchanged, N missing` summary. Project docs are not embedded by sync — run `embed` (and `derive`/`extract` for summaries and claims) afterward.
+
+**Searching projects.** `what-was-said about "..." --project NAME` restricts results to one project. For semantic search this does an exact nearest-neighbor scan over just that project's chunks, so recall is unaffected by the size of the captured corpus. Across all searches, document status nudges ranking: `canonical` results outrank `provisional`, which outrank `archived` and `missing`. Captured docs are unaffected (neutral weight). In the TUI, the project name appears in the browse Type column and the read view header; the search filter row includes a Project field.
+
+---
+
 ## Configuration
 
 All config lives in `~/.config/what-was-said/` (override with `--config`):
@@ -307,6 +358,7 @@ All config lives in `~/.config/what-was-said/` (override with `--config`):
 - `config.toml` — doctype definitions and parsing rules
 - `llms.toml` — all LLM configuration: backend selection, authentication, model defaults, and per-task (derive/extract/diff) overrides
 - `tags.toml` — tag hierarchy, default exclusions, tag colors
+- `projects.toml` — registry of curated projects to sync (see [Project sync](#project-sync)); absent by default
 
 `llms.toml` replaces the older `backend.toml`, `derive.toml`, and `extract.toml`. If `llms.toml` is absent, those legacy files are still read as a fallback, so existing setups keep working until you migrate.
 
