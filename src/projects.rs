@@ -44,6 +44,8 @@ struct ProjectsToml {
 struct ProjectEntryToml {
 	name: String,
 	manifest: String,
+	#[serde(default)]
+	root: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,12 +70,15 @@ fn parse_registry(text: &str) -> Result<Vec<ProjectRegistration>> {
 	let mut registrations = Vec::new();
 	for entry in raw.project {
 		let manifest_path = PathBuf::from(expand_tilde(&entry.manifest));
-		let root = manifest_path
-			.parent()
-			.map(Path::to_path_buf)
-			.with_context(|| {
-				format!("manifest path for project '{}' has no parent directory", entry.name)
-			})?;
+		let root = match &entry.root {
+			Some(root) => PathBuf::from(expand_tilde(root)),
+			None => manifest_path
+				.parent()
+				.map(Path::to_path_buf)
+				.with_context(|| {
+					format!("manifest path for project '{}' has no parent directory", entry.name)
+				})?,
+		};
 		registrations.push(ProjectRegistration {
 			name: entry.name,
 			manifest_path,

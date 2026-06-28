@@ -256,18 +256,29 @@ pub(super) fn draw(frame: &mut Frame, app: &App, area: Rect) {
 
 	let date_str = &doc.clip_date[..10.min(doc.clip_date.len())];
 
+	let project_info = match doc.project.as_deref() {
+		Some(project) => format!(
+			" | [{}] {}/{}",
+			project,
+			doc.doc_status.as_deref().unwrap_or("-"),
+			doc.doc_role.as_deref().unwrap_or("-"),
+		),
+		None => String::new(),
+	};
+
 	let paragraph = Paragraph::new(Text::from(visible_lines))
 		.block(
 			Block::default()
 				.title(Span::styled(
 					format!(
-						" {} | {} | chunk {}/{}{}{}",
+						" {} | {} | chunk {}/{}{}{}{}",
 						truncate_str(&display_title, 35),
 						date_str,
 						app.current_chunk_index + 1,
 						app.total_chunks.max(1),
 						tags_info,
 						group_info,
+						project_info,
 					),
 					Style::default().fg(theme.title),
 				))

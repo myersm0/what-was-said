@@ -62,6 +62,7 @@ pub(super) enum SearchField {
 	Author,
 	DateFrom,
 	DateTo,
+	Project,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +92,7 @@ pub(super) struct App {
 	pub(super) author_filter: String,
 	pub(super) date_from: String,
 	pub(super) date_to: String,
+	pub(super) project_filter: String,
 	pub(super) should_quit: bool,
 	pub(super) status_message: Option<String>,
 	pub(super) group_docs: Vec<i64>,
@@ -137,6 +139,7 @@ impl App {
 			author_filter: String::new(),
 			date_from: String::new(),
 			date_to: String::new(),
+			project_filter: String::new(),
 			should_quit: false,
 			status_message: None,
 			group_docs: Vec::new(),
