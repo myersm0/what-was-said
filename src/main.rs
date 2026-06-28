@@ -53,6 +53,15 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum RelationsAction {
+	/// Recompute superseded tags across version families
+	Repair {
+		#[arg(long, value_name = "DOC_ID", help = "Repair only the family containing this document")]
+		family: Option<i64>,
+	},
+}
+
+#[derive(Subcommand)]
 enum Command {
 	/// Interactive TUI
 	Browse {
@@ -72,6 +81,12 @@ enum Command {
 
 		#[arg(long, help = "Re-ingest files even if already in database")]
 		force: bool,
+	},
+
+	/// Inspect and repair document relations
+	Relations {
+		#[command(subcommand)]
+		action: RelationsAction,
 	},
 
 	/// Search the collection
@@ -259,6 +274,11 @@ fn main() -> Result<()> {
 				}
 			}
 		}
+		Some(Command::Relations { action }) => match action {
+			RelationsAction::Repair { family } => {
+				ingest::repair_relations(&connection, family)?;
+			}
+		},
 		Some(Command::About { query, method, project }) => {
 			let query = query.join(" ");
 			if query.is_empty() {

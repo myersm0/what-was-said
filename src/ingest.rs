@@ -316,10 +316,15 @@ fn prompt_gray_zone(
 	}
 }
 
-pub fn recompute_supersession(connection: &rusqlite::Connection, seed: i64) -> Result<()> {
+pub struct SupersessionOutcome {
+	pub current: i64,
+	pub superseded: Vec<i64>,
+}
+
+pub fn recompute_supersession(connection: &rusqlite::Connection, seed: i64) -> Result<SupersessionOutcome> {
 	let members = storage::superseded_family_ordered(connection, seed)?;
 	if members.is_empty() {
-		return Ok(());
+		return Ok(SupersessionOutcome { current: seed, superseded: Vec::new() });
 	}
 	if members.iter().any(|member| member.clip_date_source == "ingest_fallback") {
 		eprintln!("  warning: version family ordered by ingest-time fallback dates; latest-version may be unreliable");
@@ -329,10 +334,64 @@ pub fn recompute_supersession(connection: &rusqlite::Connection, seed: i64) -> R
 		storage::add_tag(connection, member.id, "superseded")?;
 	}
 	storage::remove_tag(connection, current.id, "superseded")?;
+	Ok(SupersessionOutcome {
+		current: current.id,
+		superseded: superseded.iter().map(|member| member.id).collect(),
+	})
+}
+
+pub fn repair_relations(connection: &rusqlite::Connection, family: Option<i64>) -> Result<()> {
+	let seeds = match family {
+		Some(id) => vec![id],
+		None => storage::superseded_relation_document_ids(connection)?,
+	};
+
+	let transaction = connection.unchecked_transaction()?;
+	let mut family_of: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+	let mut families_repaired = 0usize;
+	let mut documents_tagged = 0usize;
+
+	for seed in seeds {
+		if family_of.contains_key(&seed) {
+			continue;
+		}
+		let component = storage::connected_component(&transaction, seed)?;
+		if component.len() < 2 {
+			if family.is_some() {
+				eprintln!("doc {} is not part of a version family (no superseded relations)", seed);
+			}
+			continue;
+		}
+		let index = families_repaired;
+		for id in &component {
+			family_of.insert(*id, index);
+		}
+		let outcome = recompute_supersession(&transaction, seed)?;
+		families_repaired += 1;
+		documents_tagged += outcome.superseded.len();
+		eprintln!(
+			"family of {} docs: doc {} current; superseded {}",
+			component.len(),
+			outcome.current,
+			outcome.superseded.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "),
+		);
+	}
+
+	for (left, right) in storage::kept_both_pairs(&transaction)? {
+		if family_of.get(&left) == family_of.get(&right) && family_of.contains_key(&left) {
+			eprintln!(
+				"inconsistent: docs {} and {} are kept_both yet share a superseded family — manual review",
+				left, right,
+			);
+		}
+	}
+
+	transaction.commit()?;
 	eprintln!(
-		"  supersession: doc {} current; superseded {}",
-		current.id,
-		superseded.iter().map(|m| m.id.to_string()).collect::<Vec<_>>().join(", "),
+		"repaired {} version famil{} ({} documents tagged superseded)",
+		families_repaired,
+		if families_repaired == 1 { "y" } else { "ies" },
+		documents_tagged,
 	);
 	Ok(())
 }
@@ -693,7 +752,14 @@ pub fn ingest_file(
 	}
 
 	if recompute {
-		recompute_supersession(&transaction, document_id.0)?;
+		let outcome = recompute_supersession(&transaction, document_id.0)?;
+		if !outcome.superseded.is_empty() {
+			eprintln!(
+				"  supersession: doc {} current; superseded {}",
+				outcome.current,
+				outcome.superseded.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "),
+			);
+		}
 	}
 
 	transaction.commit()?;
@@ -827,5 +893,44 @@ mod tests {
 		let dates = ["2024-01-01 00:00:00", "2024-02-01 00:00:00"];
 		assert_eq!(predecessor_index(&dates, "2024-05-01 00:00:00"), 1);
 		assert_eq!(predecessor_index(&dates, "2023-12-01 00:00:00"), 0);
+	}
+
+	fn setup_db() -> rusqlite::Connection {
+		unsafe {
+			rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+				sqlite_vec::sqlite3_vec_init as *const (),
+			)));
+		}
+		let connection = rusqlite::Connection::open_in_memory().unwrap();
+		storage::initialize(&connection).unwrap();
+		connection
+	}
+
+	fn insert_version(connection: &rusqlite::Connection, clip_date: &str) -> i64 {
+		storage::insert_document(
+			connection, None, "v", Some("test"), MergeStrategy::None,
+			Some("/test"), clip_date, None,
+		).unwrap().0
+	}
+
+	#[test]
+	fn repair_relabels_connected_star() {
+		let db = setup_db();
+		let v0 = insert_version(&db, "2024-01-01 00:00:00");
+		let v1 = insert_version(&db, "2024-02-01 00:00:00");
+		let v2 = insert_version(&db, "2024-03-01 00:00:00");
+		let v3 = insert_version(&db, "2024-04-01 00:00:00");
+		for newer in [v1, v2, v3] {
+			storage::insert_document_relation(&db, newer, v0, "near_duplicate", 0.8, None, "superseded").unwrap();
+		}
+		storage::add_tag(&db, v0, "superseded").unwrap();
+
+		repair_relations(&db, None).unwrap();
+
+		let tagged = |id: i64| {
+			storage::get_tags_for_document(&db, id).unwrap().contains(&"superseded".to_string())
+		};
+		assert!(tagged(v0) && tagged(v1) && tagged(v2));
+		assert!(!tagged(v3));
 	}
 }

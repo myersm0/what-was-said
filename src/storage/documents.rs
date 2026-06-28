@@ -773,6 +773,29 @@ const family_cte: &str = "
 		WHERE relation.resolution = 'superseded'
 	)";
 
+pub fn kept_both_pairs(connection: &Connection) -> Result<Vec<(i64, i64)>> {
+	let mut stmt = connection.prepare(
+		"SELECT from_document_id, to_document_id FROM document_relations WHERE resolution = 'kept_both'",
+	)?;
+	let pairs = stmt
+		.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+		.collect::<std::result::Result<Vec<(i64, i64)>, _>>()?;
+	Ok(pairs)
+}
+
+pub fn superseded_relation_document_ids(connection: &Connection) -> Result<Vec<i64>> {
+	let mut stmt = connection.prepare(
+		"SELECT from_document_id FROM document_relations WHERE resolution = 'superseded'
+		 UNION
+		 SELECT to_document_id FROM document_relations WHERE resolution = 'superseded'
+		 ORDER BY 1",
+	)?;
+	let ids = stmt
+		.query_map([], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<i64>, _>>()?;
+	Ok(ids)
+}
+
 pub fn connected_component(connection: &Connection, seed: i64) -> Result<Vec<i64>> {
 	let mut stmt = connection.prepare(&format!("{} SELECT id FROM family ORDER BY id", family_cte))?;
 	let members = stmt
