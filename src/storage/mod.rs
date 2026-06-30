@@ -17,6 +17,28 @@ use rusqlite::Connection;
 
 use crate::types::MergeStrategy;
 
+fn backfill_shingle_counts(connection: &Connection) -> Result<()> {
+	let mut stmt = connection
+		.prepare("SELECT id FROM documents WHERE document_minhash IS NOT NULL")?;
+	let ids: Vec<i64> = stmt
+		.query_map([], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	for id in ids {
+		let entries = get_entries_for_document(connection, id)?;
+		let body = entries
+			.iter()
+			.map(|e| e.body.as_str())
+			.collect::<Vec<_>>()
+			.join("\n");
+		let count = crate::minhash::distinct_shingle_count(&body) as i64;
+		connection.execute(
+			"UPDATE documents SET document_shingle_count = ?1 WHERE id = ?2",
+			rusqlite::params![count, id],
+		)?;
+	}
+	Ok(())
+}
+
 pub fn initialize(connection: &Connection) -> Result<()> {
 	connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 	connection.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -38,7 +60,8 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			doc_role TEXT,
 			synced_at TEXT,
 			clip_date_source TEXT NOT NULL DEFAULT 'ingest_fallback'
-				CHECK (clip_date_source IN ('filename', 'content', 'metadata', 'ingest_fallback'))
+				CHECK (clip_date_source IN ('filename', 'content', 'metadata', 'ingest_fallback')),
+			document_shingle_count INTEGER
 		);
 
 		CREATE TABLE IF NOT EXISTS entries (
@@ -212,6 +235,12 @@ fn migrate(connection: &Connection) -> Result<()> {
 			"ALTER TABLE documents ADD COLUMN clip_date_source TEXT NOT NULL DEFAULT 'ingest_fallback'
 				CHECK (clip_date_source IN ('filename', 'content', 'metadata', 'ingest_fallback'));",
 		)?;
+	}
+	if !doc_sql.contains("document_shingle_count") {
+		connection.execute_batch(
+			"ALTER TABLE documents ADD COLUMN document_shingle_count INTEGER;",
+		)?;
+		backfill_shingle_counts(connection)?;
 	}
 	connection.execute_batch(
 		"CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_project_path

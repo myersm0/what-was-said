@@ -160,8 +160,10 @@ pub fn parse_copilot_email_summary(text: &str) -> Vec<SegmentedEntry> {
 const merge_min_chars: usize = 150;
 const dup_jaccard_high: f64 = 0.7;
 const dup_jaccard_low: f64 = 0.4;
-const dup_shared_block_words: usize = 300;
 const dup_window_days: i64 = 180;
+const containment_threshold: f64 = 0.8;
+const containment_prefilter: f64 = 0.5;
+const containment_min_shingles: usize = 48;
 
 pub struct IngestOptions<'a> {
 	pub force: bool,
@@ -240,6 +242,14 @@ fn join_entry_bodies(entries: &[SegmentedEntry]) -> String {
 		.join("\n")
 }
 
+fn fetch_existing_text(connection: &rusqlite::Connection, document_id: i64) -> Result<String> {
+	let entries = storage::get_entries_for_document(connection, document_id)?;
+	Ok(entries.iter()
+		.map(|e| e.body.as_str())
+		.collect::<Vec<_>>()
+		.join("\n"))
+}
+
 fn print_block_diff(new_text: &str, existing_text: &str, existing_id: i64) {
 	let (added, removed) = util::diff_regions(new_text, existing_text);
 	eprintln!("  --- only in new file ---");
@@ -259,6 +269,7 @@ fn prompt_gray_zone(
 	existing_date: &str,
 	similarity: f64,
 	shared_block_words: usize,
+	containment: Option<f64>,
 	new_text: &str,
 	existing_text: &str,
 	backend: Option<&dyn LlmBackend>,
@@ -270,6 +281,12 @@ fn prompt_gray_zone(
 	eprintln!("  existing: {} (doc {}, ingested {})", existing_path, existing_id, existing_date);
 	eprintln!("  new:      {} (current file)", new_path);
 	eprintln!("  similarity: {:.2}, shared block: ~{} words", similarity, shared_block_words);
+	if let Some(overlap) = containment {
+		eprintln!(
+			"  containment: {:.0}% of the smaller document is shared (low similarity reflects a large size difference, not unrelatedness)",
+			overlap * 100.0,
+		);
+	}
 
 	let mut summary: Option<DiffSummary> = None;
 	loop {
@@ -571,6 +588,7 @@ pub fn ingest_file(
 
 	let doc_hash = minhash::minhash_document(&segmented);
 	let new_text = join_entry_bodies(&segmented);
+	let newcomer_shingle_count = minhash::distinct_shingle_count(&new_text);
 	let new_path = file_path_str.to_string();
 
 	let candidate_path = |candidate: &storage::DupCandidate| -> String {
@@ -591,6 +609,7 @@ pub fn ingest_file(
 		date: String,
 		similarity: f64,
 		shared_block_words: usize,
+		containment: Option<f64>,
 		existing_text: String,
 	}
 
@@ -609,27 +628,38 @@ pub fn ingest_file(
 				summary: None,
 			});
 		} else if similarity >= dup_jaccard_low {
-			let existing_entries = storage::get_entries_for_document(connection, candidate.id)?;
-			let existing_text = existing_entries.iter()
-				.map(|e| e.body.as_str())
-				.collect::<Vec<_>>()
-				.join("\n");
+			let existing_text = fetch_existing_text(connection, candidate.id)?;
 			let shared = minhash::longest_shared_block_words(&new_text, &existing_text);
-			if shared >= dup_shared_block_words {
-				qualifying.push(RelationPlan {
-					existing_id: candidate.id,
-					similarity,
-					shared_block_words: Some(shared as i64),
-					resolution: "superseded",
-					summary: None,
-				});
-			} else {
+			gray_candidates.push(GrayCandidate {
+				id: candidate.id,
+				path: candidate_path(candidate),
+				date: candidate.clip_date.clone(),
+				similarity,
+				shared_block_words: shared,
+				containment: None,
+				existing_text,
+			});
+		} else if let Some(candidate_count) = candidate.shingle_count {
+			let candidate_count = candidate_count as usize;
+			if newcomer_shingle_count.min(candidate_count) < containment_min_shingles {
+				continue;
+			}
+			let overlap_estimate =
+				minhash::estimated_overlap(similarity, newcomer_shingle_count, candidate_count);
+			if overlap_estimate < containment_prefilter {
+				continue;
+			}
+			let existing_text = fetch_existing_text(connection, candidate.id)?;
+			let containment = minhash::exact_containment(&new_text, &existing_text);
+			if containment >= containment_threshold {
+				let shared = minhash::longest_shared_block_words(&new_text, &existing_text);
 				gray_candidates.push(GrayCandidate {
 					id: candidate.id,
 					path: candidate_path(candidate),
 					date: candidate.clip_date.clone(),
 					similarity,
 					shared_block_words: shared,
+					containment: Some(containment),
 					existing_text,
 				});
 			}
@@ -661,6 +691,7 @@ pub fn ingest_file(
 			&gray.date,
 			gray.similarity,
 			gray.shared_block_words,
+			gray.containment,
 			&new_text,
 			&gray.existing_text,
 			options.backend,
@@ -709,6 +740,7 @@ pub fn ingest_file(
 		Some(&doc_hash),
 	);
 	document_params.clip_date_source = clip_date_source;
+	document_params.shingle_count = Some(newcomer_shingle_count as i64);
 	let document_id = storage::insert_document_with_params(&transaction, &document_params)?;
 
 	let mut total_chunks = 0usize;

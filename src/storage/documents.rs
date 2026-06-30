@@ -13,6 +13,7 @@ pub struct InsertDocumentParams<'a> {
 	pub clip_date: &'a str,
 	pub clip_date_source: &'a str,
 	pub document_minhash: Option<&'a MinHashSignature>,
+	pub shingle_count: Option<i64>,
 	pub project: Option<&'a str>,
 	pub relative_path: Option<&'a str>,
 	pub content_hash: Option<&'a str>,
@@ -40,6 +41,7 @@ impl<'a> InsertDocumentParams<'a> {
 			clip_date,
 			clip_date_source: "ingest_fallback",
 			document_minhash,
+			shingle_count: None,
 			project: None,
 			relative_path: None,
 			content_hash: None,
@@ -66,6 +68,7 @@ impl<'a> InsertDocumentParams<'a> {
 			clip_date: synced_at,
 			clip_date_source: "metadata",
 			document_minhash: None,
+			shingle_count: None,
 			project: Some(project),
 			relative_path: Some(relative_path),
 			content_hash: Some(content_hash),
@@ -87,8 +90,8 @@ pub fn insert_document_with_params(
 		"INSERT INTO documents (
 			title, source_title, doctype_name, merge_strategy, origin_path,
 			clip_date, clip_date_source, document_minhash, project, relative_path, content_hash,
-			doc_status, doc_role, synced_at
-		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+			doc_status, doc_role, synced_at, document_shingle_count
+		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
 		params![
 			params.title,
 			params.source_title,
@@ -104,6 +107,7 @@ pub fn insert_document_with_params(
 			params.doc_status,
 			params.doc_role,
 			params.synced_at,
+			params.shingle_count,
 		],
 	)?;
 	Ok(DocumentId(connection.last_insert_rowid()))
@@ -653,6 +657,7 @@ pub struct DupCandidate {
 	pub origin_path: Option<String>,
 	pub clip_date: String,
 	pub document_minhash: MinHashSignature,
+	pub shingle_count: Option<i64>,
 }
 
 pub fn find_dup_candidates(
@@ -661,7 +666,7 @@ pub fn find_dup_candidates(
 	window_days: i64,
 ) -> Result<Vec<DupCandidate>> {
 	let mut stmt = connection.prepare(
-		"SELECT id, source_title, origin_path, clip_date, document_minhash FROM documents
+		"SELECT id, source_title, origin_path, clip_date, document_minhash, document_shingle_count FROM documents
 		 WHERE document_minhash IS NOT NULL
 		 AND ABS(julianday(?1) - julianday(clip_date)) < ?2
 		 ORDER BY clip_date, id"
@@ -673,13 +678,14 @@ pub fn find_dup_candidates(
 			let origin_path: Option<String> = row.get(2)?;
 			let clip_date: String = row.get(3)?;
 			let blob: Vec<u8> = row.get(4)?;
+			let shingle_count: Option<i64> = row.get(5)?;
 			let mut sig = [0u64; crate::types::MINHASH_SIZE];
 			for (i, chunk) in blob.chunks_exact(8).enumerate() {
 				if i < crate::types::MINHASH_SIZE {
 					sig[i] = u64::from_le_bytes(chunk.try_into().unwrap());
 				}
 			}
-			Ok(DupCandidate { id, source_title, origin_path, clip_date, document_minhash: sig })
+			Ok(DupCandidate { id, source_title, origin_path, clip_date, document_minhash: sig, shingle_count })
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 	Ok(results)

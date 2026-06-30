@@ -113,6 +113,33 @@ pub fn jaccard(a: &MinHashSignature, b: &MinHashSignature) -> f64 {
 	matches as f64 / MINHASH_SIZE as f64
 }
 
+pub fn distinct_shingle_count(text: &str) -> usize {
+	tokenize(text)
+		.into_iter()
+		.collect::<std::collections::HashSet<String>>()
+		.len()
+}
+
+pub fn estimated_overlap(jaccard: f64, card_a: usize, card_b: usize) -> f64 {
+	let smaller = card_a.min(card_b);
+	if smaller == 0 {
+		return 0.0;
+	}
+	let intersection = jaccard * (card_a + card_b) as f64 / (1.0 + jaccard);
+	(intersection / smaller as f64).min(1.0)
+}
+
+pub fn exact_containment(a: &str, b: &str) -> f64 {
+	use std::collections::HashSet;
+	let set_a: HashSet<String> = tokenize(a).into_iter().collect();
+	let set_b: HashSet<String> = tokenize(b).into_iter().collect();
+	let smaller = set_a.len().min(set_b.len());
+	if smaller == 0 {
+		return 0.0;
+	}
+	set_a.intersection(&set_b).count() as f64 / smaller as f64
+}
+
 pub fn is_short_entry(text: &str) -> bool {
 	text.len() < 50
 }
