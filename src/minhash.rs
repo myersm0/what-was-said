@@ -129,6 +129,10 @@ pub fn estimated_overlap(jaccard: f64, card_a: usize, card_b: usize) -> f64 {
 	(intersection / smaller as f64).min(1.0)
 }
 
+pub fn shingle_set(text: &str) -> std::collections::HashSet<String> {
+	tokenize(text).into_iter().collect()
+}
+
 pub fn exact_containment(a: &str, b: &str) -> f64 {
 	use std::collections::HashSet;
 	let set_a: HashSet<String> = tokenize(a).into_iter().collect();

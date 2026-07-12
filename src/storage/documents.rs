@@ -779,6 +779,42 @@ const family_cte: &str = "
 		WHERE relation.resolution = 'superseded'
 	)";
 
+pub struct ScanDocument {
+	pub id: i64,
+	pub source_title: String,
+	pub origin_path: Option<String>,
+	pub clip_date: String,
+}
+
+pub fn scan_candidate_documents(connection: &Connection) -> Result<Vec<ScanDocument>> {
+	let mut stmt = connection.prepare(
+		"SELECT id, source_title, origin_path, clip_date FROM documents
+		 WHERE project IS NULL AND merge_strategy != 'positional'
+		 ORDER BY clip_date, id",
+	)?;
+	let documents = stmt
+		.query_map([], |row| {
+			Ok(ScanDocument {
+				id: row.get(0)?,
+				source_title: row.get(1)?,
+				origin_path: row.get(2)?,
+				clip_date: row.get(3)?,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(documents)
+}
+
+pub fn all_relation_pairs(connection: &Connection) -> Result<Vec<(i64, i64, String)>> {
+	let mut stmt = connection.prepare(
+		"SELECT from_document_id, to_document_id, resolution FROM document_relations",
+	)?;
+	let pairs = stmt
+		.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(pairs)
+}
+
 pub fn kept_both_pairs(connection: &Connection) -> Result<Vec<(i64, i64)>> {
 	let mut stmt = connection.prepare(
 		"SELECT from_document_id, to_document_id FROM document_relations WHERE resolution = 'kept_both'",

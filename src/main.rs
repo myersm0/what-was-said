@@ -59,6 +59,8 @@ enum RelationsAction {
 		#[arg(long, value_name = "DOC_ID", help = "Repair only the family containing this document")]
 		family: Option<i64>,
 	},
+	/// Retroactively detect near-duplicates across the whole collection using exact text similarity
+	Scan,
 }
 
 #[derive(Subcommand)]
@@ -277,6 +279,10 @@ fn main() -> Result<()> {
 		Some(Command::Relations { action }) => match action {
 			RelationsAction::Repair { family } => {
 				ingest::repair_relations(&connection, family)?;
+			}
+			RelationsAction::Scan => {
+				let llm = create_backend(&llms.backend).ok();
+				ingest::scan_relations(&connection, llm.as_deref(), &llms.diff.model)?;
 			}
 		},
 		Some(Command::About { query, method, project }) => {

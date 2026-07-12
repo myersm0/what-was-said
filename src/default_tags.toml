@@ -6,7 +6,7 @@
 # Default exclusions - these tags are filtered out unless you use --include-all
 # or explicitly include them with --tags
 [defaults]
-exclude = ["junk", "archived"]
+exclude = ["junk", "archived", "superseded"]
 
 # Parent tags can include child tags. When you filter by a parent,
 # documents tagged with any of its children will also be shown.
