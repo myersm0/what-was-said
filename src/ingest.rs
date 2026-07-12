@@ -164,7 +164,7 @@ const dup_window_days: i64 = 180;
 const containment_threshold: f64 = 0.8;
 const containment_prefilter: f64 = 0.5;
 const containment_min_shingles: usize = 48;
-const title_jaccard_floor: f64 = 0.15;
+const title_jaccard_floor: f64 = 0.10;
 const block_prompt_words: usize = 300;
 
 #[derive(Debug, PartialEq)]
@@ -1068,12 +1068,12 @@ mod tests {
 
 	#[test]
 	fn classify_same_title_below_floor_falls_through() {
-		assert_eq!(classify_by_signature(0.10, 100, Some(100), true), CandidateVerdict::NoMatch);
+		assert_eq!(classify_by_signature(0.05, 100, Some(100), true), CandidateVerdict::NoMatch);
 	}
 
 	#[test]
 	fn classify_same_title_below_floor_still_reaches_containment_path() {
-		assert_eq!(classify_by_signature(0.10, 500, Some(60), true), CandidateVerdict::NeedsContainmentCheck);
+		assert_eq!(classify_by_signature(0.08, 500, Some(60), true), CandidateVerdict::NeedsContainmentCheck);
 	}
 
 	#[test]
