@@ -53,6 +53,15 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum RelationsAction {
+	/// Recompute superseded tags across version families
+	Repair {
+		#[arg(long, value_name = "DOC_ID", help = "Repair only the family containing this document")]
+		family: Option<i64>,
+	},
+}
+
+#[derive(Subcommand)]
 enum Command {
 	/// Interactive TUI
 	Browse {
@@ -72,9 +81,12 @@ enum Command {
 
 		#[arg(long, help = "Re-ingest files even if already in database")]
 		force: bool,
+	},
 
-		#[arg(long, help = "Never prompt on gray-zone near-duplicates; keep both")]
-		non_interactive: bool,
+	/// Inspect and repair document relations
+	Relations {
+		#[command(subcommand)]
+		action: RelationsAction,
 	},
 
 	/// Search the collection
@@ -237,11 +249,10 @@ fn main() -> Result<()> {
 		.unwrap_or_else(|| "qwen3-embedding:8b".to_string());
 
 	match cli.command {
-		Some(Command::Ingest { path, force, non_interactive }) => {
+		Some(Command::Ingest { path, force }) => {
 			let llm = create_backend(&llms.backend).ok();
 			let options = ingest::IngestOptions {
 				force,
-				interactive: !non_interactive,
 				backend: llm.as_deref(),
 				model: llms.diff.model.clone(),
 			};
@@ -255,16 +266,19 @@ fn main() -> Result<()> {
 					eprintln!("ingested {} files", ingested);
 				}
 			} else {
-				let mut gray_zones = Vec::new();
-				let outcome = ingest::ingest_file(&connection, &path, &config, &options, &mut gray_zones)?;
+				let outcome = ingest::ingest_file(&connection, &path, &config, &options)?;
 				match outcome {
 					ingest::IngestOutcome::Ingested => eprintln!("ingested 1 file"),
 					ingest::IngestOutcome::Skipped => eprintln!("skipped 1 file"),
 					ingest::IngestOutcome::Quit => eprintln!("aborted"),
 				}
-				ingest::print_gray_zone_summary(&gray_zones);
 			}
 		}
+		Some(Command::Relations { action }) => match action {
+			RelationsAction::Repair { family } => {
+				ingest::repair_relations(&connection, family)?;
+			}
+		},
 		Some(Command::About { query, method, project }) => {
 			let query = query.join(" ");
 			if query.is_empty() {

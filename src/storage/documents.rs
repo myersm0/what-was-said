@@ -11,7 +11,9 @@ pub struct InsertDocumentParams<'a> {
 	pub merge_strategy: MergeStrategy,
 	pub origin_path: Option<&'a str>,
 	pub clip_date: &'a str,
+	pub clip_date_source: &'a str,
 	pub document_minhash: Option<&'a MinHashSignature>,
+	pub shingle_count: Option<i64>,
 	pub project: Option<&'a str>,
 	pub relative_path: Option<&'a str>,
 	pub content_hash: Option<&'a str>,
@@ -37,7 +39,9 @@ impl<'a> InsertDocumentParams<'a> {
 			merge_strategy,
 			origin_path,
 			clip_date,
+			clip_date_source: "ingest_fallback",
 			document_minhash,
+			shingle_count: None,
 			project: None,
 			relative_path: None,
 			content_hash: None,
@@ -62,7 +66,9 @@ impl<'a> InsertDocumentParams<'a> {
 			merge_strategy: MergeStrategy::None,
 			origin_path: None,
 			clip_date: synced_at,
+			clip_date_source: "metadata",
 			document_minhash: None,
+			shingle_count: None,
 			project: Some(project),
 			relative_path: Some(relative_path),
 			content_hash: Some(content_hash),
@@ -83,9 +89,9 @@ pub fn insert_document_with_params(
 	connection.execute(
 		"INSERT INTO documents (
 			title, source_title, doctype_name, merge_strategy, origin_path,
-			clip_date, document_minhash, project, relative_path, content_hash,
-			doc_status, doc_role, synced_at
-		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+			clip_date, clip_date_source, document_minhash, project, relative_path, content_hash,
+			doc_status, doc_role, synced_at, document_shingle_count
+		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
 		params![
 			params.title,
 			params.source_title,
@@ -93,6 +99,7 @@ pub fn insert_document_with_params(
 			super::merge_strategy_to_str(params.merge_strategy),
 			params.origin_path,
 			params.clip_date,
+			params.clip_date_source,
 			minhash_bytes,
 			params.project,
 			params.relative_path,
@@ -100,6 +107,7 @@ pub fn insert_document_with_params(
 			params.doc_status,
 			params.doc_role,
 			params.synced_at,
+			params.shingle_count,
 		],
 	)?;
 	Ok(DocumentId(connection.last_insert_rowid()))
@@ -630,10 +638,15 @@ pub fn get_max_entry_position(connection: &Connection, document_id: i64) -> Resu
 	Ok(max_pos.unwrap_or(0))
 }
 
-pub fn update_document_clip_date(connection: &Connection, document_id: i64, clip_date: &str) -> Result<()> {
+pub fn update_document_clip_date(
+	connection: &Connection,
+	document_id: i64,
+	clip_date: &str,
+	clip_date_source: &str,
+) -> Result<()> {
 	connection.execute(
-		"UPDATE documents SET clip_date = ?1 WHERE id = ?2",
-		params![clip_date, document_id],
+		"UPDATE documents SET clip_date = ?1, clip_date_source = ?2 WHERE id = ?3",
+		params![clip_date, clip_date_source, document_id],
 	)?;
 	Ok(())
 }
@@ -644,6 +657,7 @@ pub struct DupCandidate {
 	pub origin_path: Option<String>,
 	pub clip_date: String,
 	pub document_minhash: MinHashSignature,
+	pub shingle_count: Option<i64>,
 }
 
 pub fn find_dup_candidates(
@@ -652,9 +666,10 @@ pub fn find_dup_candidates(
 	window_days: i64,
 ) -> Result<Vec<DupCandidate>> {
 	let mut stmt = connection.prepare(
-		"SELECT id, source_title, origin_path, clip_date, document_minhash FROM documents
+		"SELECT id, source_title, origin_path, clip_date, document_minhash, document_shingle_count FROM documents
 		 WHERE document_minhash IS NOT NULL
-		 AND ABS(julianday(?1) - julianday(clip_date)) < ?2"
+		 AND ABS(julianday(?1) - julianday(clip_date)) < ?2
+		 ORDER BY clip_date, id"
 	)?;
 	let results = stmt
 		.query_map(params![clip_date, window_days], |row| {
@@ -663,13 +678,14 @@ pub fn find_dup_candidates(
 			let origin_path: Option<String> = row.get(2)?;
 			let clip_date: String = row.get(3)?;
 			let blob: Vec<u8> = row.get(4)?;
+			let shingle_count: Option<i64> = row.get(5)?;
 			let mut sig = [0u64; crate::types::MINHASH_SIZE];
 			for (i, chunk) in blob.chunks_exact(8).enumerate() {
 				if i < crate::types::MINHASH_SIZE {
 					sig[i] = u64::from_le_bytes(chunk.try_into().unwrap());
 				}
 			}
-			Ok(DupCandidate { id, source_title, origin_path, clip_date, document_minhash: sig })
+			Ok(DupCandidate { id, source_title, origin_path, clip_date, document_minhash: sig, shingle_count })
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 	Ok(results)
@@ -748,6 +764,76 @@ pub fn get_relations_needing_summary(
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 	Ok(rows)
+}
+
+const family_cte: &str = "
+	WITH RECURSIVE family(id) AS (
+		SELECT ?1
+		UNION
+		SELECT CASE WHEN relation.from_document_id = family.id
+		            THEN relation.to_document_id
+		            ELSE relation.from_document_id END
+		FROM document_relations relation
+		JOIN family ON relation.from_document_id = family.id
+		            OR relation.to_document_id = family.id
+		WHERE relation.resolution = 'superseded'
+	)";
+
+pub fn kept_both_pairs(connection: &Connection) -> Result<Vec<(i64, i64)>> {
+	let mut stmt = connection.prepare(
+		"SELECT from_document_id, to_document_id FROM document_relations WHERE resolution = 'kept_both'",
+	)?;
+	let pairs = stmt
+		.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+		.collect::<std::result::Result<Vec<(i64, i64)>, _>>()?;
+	Ok(pairs)
+}
+
+pub fn superseded_relation_document_ids(connection: &Connection) -> Result<Vec<i64>> {
+	let mut stmt = connection.prepare(
+		"SELECT from_document_id FROM document_relations WHERE resolution = 'superseded'
+		 UNION
+		 SELECT to_document_id FROM document_relations WHERE resolution = 'superseded'
+		 ORDER BY 1",
+	)?;
+	let ids = stmt
+		.query_map([], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<i64>, _>>()?;
+	Ok(ids)
+}
+
+pub fn connected_component(connection: &Connection, seed: i64) -> Result<Vec<i64>> {
+	let mut stmt = connection.prepare(&format!("{} SELECT id FROM family ORDER BY id", family_cte))?;
+	let members = stmt
+		.query_map(params![seed], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<i64>, _>>()?;
+	Ok(members)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FamilyMember {
+	pub id: i64,
+	pub clip_date: String,
+	pub clip_date_source: String,
+}
+
+pub fn superseded_family_ordered(connection: &Connection, seed: i64) -> Result<Vec<FamilyMember>> {
+	let mut stmt = connection.prepare(&format!(
+		"{} SELECT document.id, document.clip_date, document.clip_date_source
+		 FROM documents document JOIN family ON document.id = family.id
+		 ORDER BY document.clip_date, document.id",
+		family_cte,
+	))?;
+	let members = stmt
+		.query_map(params![seed], |row| {
+			Ok(FamilyMember {
+				id: row.get(0)?,
+				clip_date: row.get(1)?,
+				clip_date_source: row.get(2)?,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(members)
 }
 
 pub fn get_document_full_text(connection: &Connection, document_id: i64) -> Result<String> {

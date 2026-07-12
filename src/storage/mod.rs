@@ -17,6 +17,28 @@ use rusqlite::Connection;
 
 use crate::types::MergeStrategy;
 
+fn backfill_shingle_counts(connection: &Connection) -> Result<()> {
+	let mut stmt = connection
+		.prepare("SELECT id FROM documents WHERE document_minhash IS NOT NULL")?;
+	let ids: Vec<i64> = stmt
+		.query_map([], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	for id in ids {
+		let entries = get_entries_for_document(connection, id)?;
+		let body = entries
+			.iter()
+			.map(|e| e.body.as_str())
+			.collect::<Vec<_>>()
+			.join("\n");
+		let count = crate::minhash::distinct_shingle_count(&body) as i64;
+		connection.execute(
+			"UPDATE documents SET document_shingle_count = ?1 WHERE id = ?2",
+			rusqlite::params![count, id],
+		)?;
+	}
+	Ok(())
+}
+
 pub fn initialize(connection: &Connection) -> Result<()> {
 	connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 	connection.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -36,7 +58,10 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			content_hash TEXT,
 			doc_status TEXT,
 			doc_role TEXT,
-			synced_at TEXT
+			synced_at TEXT,
+			clip_date_source TEXT NOT NULL DEFAULT 'ingest_fallback'
+				CHECK (clip_date_source IN ('filename', 'content', 'metadata', 'ingest_fallback')),
+			document_shingle_count INTEGER
 		);
 
 		CREATE TABLE IF NOT EXISTS entries (
@@ -133,7 +158,7 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			relation TEXT NOT NULL,
 			similarity REAL,
 			shared_block_words INTEGER,
-			resolution TEXT NOT NULL CHECK (resolution IN ('superseded', 'kept_both', 'pending')),
+			resolution TEXT NOT NULL CHECK (resolution IN ('superseded', 'kept_both')),
 			summary TEXT,
 			summary_model TEXT,
 			summary_prompt_hash TEXT,
@@ -205,6 +230,18 @@ fn migrate(connection: &Connection) -> Result<()> {
 			connection.execute_batch(&format!("ALTER TABLE documents ADD COLUMN {};", column))?;
 		}
 	}
+	if !doc_sql.contains("clip_date_source") {
+		connection.execute_batch(
+			"ALTER TABLE documents ADD COLUMN clip_date_source TEXT NOT NULL DEFAULT 'ingest_fallback'
+				CHECK (clip_date_source IN ('filename', 'content', 'metadata', 'ingest_fallback'));",
+		)?;
+	}
+	if !doc_sql.contains("document_shingle_count") {
+		connection.execute_batch(
+			"ALTER TABLE documents ADD COLUMN document_shingle_count INTEGER;",
+		)?;
+		backfill_shingle_counts(connection)?;
+	}
 	connection.execute_batch(
 		"CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_project_path
 		 ON documents(project, relative_path)
@@ -271,6 +308,39 @@ fn migrate(connection: &Connection) -> Result<()> {
 			for column in ["summary TEXT", "summary_model TEXT", "summary_prompt_hash TEXT", "summarized_at TEXT"] {
 				connection.execute_batch(&format!("ALTER TABLE document_relations ADD COLUMN {};", column))?;
 			}
+		}
+		if relations_sql.contains("'pending'") {
+			eprintln!("migrating document_relations to retire the 'pending' resolution");
+			connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+			connection.execute_batch(
+				"
+				ALTER TABLE document_relations RENAME TO document_relations_old;
+				CREATE TABLE document_relations (
+					id INTEGER PRIMARY KEY,
+					from_document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+					to_document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+					relation TEXT NOT NULL,
+					similarity REAL,
+					shared_block_words INTEGER,
+					resolution TEXT NOT NULL CHECK (resolution IN ('superseded', 'kept_both')),
+					summary TEXT,
+					summary_model TEXT,
+					summary_prompt_hash TEXT,
+					summarized_at TEXT,
+					created_at TEXT NOT NULL,
+					UNIQUE (from_document_id, to_document_id)
+				);
+				INSERT INTO document_relations
+					SELECT id, from_document_id, to_document_id, relation, similarity, shared_block_words,
+						CASE WHEN resolution = 'pending' THEN 'kept_both' ELSE resolution END,
+						summary, summary_model, summary_prompt_hash, summarized_at, created_at
+					FROM document_relations_old;
+				DROP TABLE document_relations_old;
+				CREATE INDEX IF NOT EXISTS document_relations_from ON document_relations(from_document_id);
+				CREATE INDEX IF NOT EXISTS document_relations_to ON document_relations(to_document_id);
+				",
+			)?;
+			connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 		}
 	}
 	Ok(())
@@ -634,5 +704,90 @@ mod tests {
 		assert_eq!(results.len(), 2);
 		assert_eq!(results[0].claim_id, c1);
 		assert!(results[0].similarity > results[1].similarity);
+	}
+
+	fn insert_dated_document(connection: &rusqlite::Connection, title: &str, clip_date: &str) -> i64 {
+		insert_document(
+			connection, None, title, Some("test"), MergeStrategy::None,
+			Some("/test"), clip_date, None,
+		).unwrap().0
+	}
+
+	fn link_superseded(connection: &rusqlite::Connection, newer: i64, older: i64) {
+		insert_document_relation(connection, newer, older, "near_duplicate", 0.8, None, "superseded").unwrap();
+	}
+
+	#[test]
+	fn connected_component_spans_transitive_family() {
+		let db = setup_db();
+		let v0 = insert_dated_document(&db, "v0", "2024-01-01 00:00:00");
+		let v1 = insert_dated_document(&db, "v1", "2024-02-01 00:00:00");
+		let v2 = insert_dated_document(&db, "v2", "2024-03-01 00:00:00");
+		let v3 = insert_dated_document(&db, "v3", "2024-04-01 00:00:00");
+		link_superseded(&db, v1, v0);
+		link_superseded(&db, v2, v0);
+		link_superseded(&db, v3, v0);
+
+		let mut expected = vec![v0, v1, v2, v3];
+		expected.sort();
+		assert_eq!(connected_component(&db, v0).unwrap(), expected);
+		assert_eq!(connected_component(&db, v2).unwrap(), expected);
+	}
+
+	#[test]
+	fn kept_both_does_not_join_family() {
+		let db = setup_db();
+		let a = insert_dated_document(&db, "a", "2024-01-01 00:00:00");
+		let b = insert_dated_document(&db, "b", "2024-02-01 00:00:00");
+		insert_document_relation(&db, b, a, "near_duplicate", 0.5, Some(120), "kept_both").unwrap();
+
+		assert_eq!(connected_component(&db, a).unwrap(), vec![a]);
+		assert_eq!(connected_component(&db, b).unwrap(), vec![b]);
+	}
+
+	#[test]
+	fn superseded_family_ordered_yields_chronological_order() {
+		let db = setup_db();
+		let v0 = insert_dated_document(&db, "v0", "2024-01-01 00:00:00");
+		let v2 = insert_dated_document(&db, "v2", "2024-03-01 00:00:00");
+		let v1 = insert_dated_document(&db, "v1", "2024-02-01 00:00:00");
+		link_superseded(&db, v2, v0);
+		link_superseded(&db, v1, v0);
+		link_superseded(&db, v1, v2);
+
+		let ordered = superseded_family_ordered(&db, v1).unwrap();
+		assert_eq!(ordered.iter().map(|m| m.id).collect::<Vec<_>>(), vec![v0, v1, v2]);
+		assert_eq!(ordered.last().unwrap().id, v2);
+		assert!(ordered.iter().all(|m| m.clip_date_source == "ingest_fallback"));
+	}
+
+	#[test]
+	fn backfill_populates_null_shingle_counts() {
+		let db = setup_db();
+		let body = "alpha beta gamma delta epsilon zeta eta theta";
+		let sig = minhash::minhash(body);
+		let doc_id = insert_document(
+			&db, None, "Doc", Some("test"), MergeStrategy::None,
+			Some("/test"), "2024-01-01 00:00:00", Some(&sig),
+		).unwrap();
+		let entry = make_entry(body, None);
+		let entry_hash = minhash::minhash(body);
+		insert_entry(
+			&db, doc_id, &entry, 0, "Doc", "2024-01-01 00:00:00", "/test", &entry_hash,
+		).unwrap();
+
+		let before: Option<i64> = db.query_row(
+			"SELECT document_shingle_count FROM documents WHERE id = ?1",
+			[doc_id.0], |row| row.get(0),
+		).unwrap();
+		assert_eq!(before, None);
+
+		backfill_shingle_counts(&db).unwrap();
+
+		let after: Option<i64> = db.query_row(
+			"SELECT document_shingle_count FROM documents WHERE id = ?1",
+			[doc_id.0], |row| row.get(0),
+		).unwrap();
+		assert_eq!(after, Some(minhash::distinct_shingle_count(body) as i64));
 	}
 }

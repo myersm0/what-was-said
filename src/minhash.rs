@@ -113,6 +113,33 @@ pub fn jaccard(a: &MinHashSignature, b: &MinHashSignature) -> f64 {
 	matches as f64 / MINHASH_SIZE as f64
 }
 
+pub fn distinct_shingle_count(text: &str) -> usize {
+	tokenize(text)
+		.into_iter()
+		.collect::<std::collections::HashSet<String>>()
+		.len()
+}
+
+pub fn estimated_overlap(jaccard: f64, card_a: usize, card_b: usize) -> f64 {
+	let smaller = card_a.min(card_b);
+	if smaller == 0 {
+		return 0.0;
+	}
+	let intersection = jaccard * (card_a + card_b) as f64 / (1.0 + jaccard);
+	(intersection / smaller as f64).min(1.0)
+}
+
+pub fn exact_containment(a: &str, b: &str) -> f64 {
+	use std::collections::HashSet;
+	let set_a: HashSet<String> = tokenize(a).into_iter().collect();
+	let set_b: HashSet<String> = tokenize(b).into_iter().collect();
+	let smaller = set_a.len().min(set_b.len());
+	if smaller == 0 {
+		return 0.0;
+	}
+	set_a.intersection(&set_b).count() as f64 / smaller as f64
+}
+
 pub fn is_short_entry(text: &str) -> bool {
 	text.len() < 50
 }
@@ -160,5 +187,31 @@ mod tests {
 	fn short_entry_detection() {
 		assert!(is_short_entry("hi"));
 		assert!(!is_short_entry(&"word ".repeat(20)));
+	}
+
+	#[test]
+	fn distinct_shingle_count_counts_unique_shingles() {
+		assert_eq!(distinct_shingle_count("alpha beta gamma delta"), 2);
+		assert_eq!(distinct_shingle_count("one two one two one"), 2);
+	}
+
+	#[test]
+	fn exact_containment_detects_subset() {
+		let small = "alpha beta gamma";
+		let large = "alpha beta gamma delta epsilon";
+		assert!((exact_containment(small, large) - 1.0).abs() < 1e-9);
+		assert!((exact_containment(large, small) - 1.0).abs() < 1e-9);
+	}
+
+	#[test]
+	fn exact_containment_zero_when_disjoint() {
+		assert_eq!(exact_containment("alpha beta gamma", "delta epsilon zeta"), 0.0);
+	}
+
+	#[test]
+	fn estimated_overlap_high_when_small_set_contained() {
+		assert!((estimated_overlap(0.2, 50, 250) - 1.0).abs() < 1e-9);
+		assert_eq!(estimated_overlap(0.0, 10, 20), 0.0);
+		assert_eq!(estimated_overlap(0.5, 0, 5), 0.0);
 	}
 }
