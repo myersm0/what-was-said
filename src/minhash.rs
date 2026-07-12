@@ -188,4 +188,30 @@ mod tests {
 		assert!(is_short_entry("hi"));
 		assert!(!is_short_entry(&"word ".repeat(20)));
 	}
+
+	#[test]
+	fn distinct_shingle_count_counts_unique_shingles() {
+		assert_eq!(distinct_shingle_count("alpha beta gamma delta"), 2);
+		assert_eq!(distinct_shingle_count("one two one two one"), 2);
+	}
+
+	#[test]
+	fn exact_containment_detects_subset() {
+		let small = "alpha beta gamma";
+		let large = "alpha beta gamma delta epsilon";
+		assert!((exact_containment(small, large) - 1.0).abs() < 1e-9);
+		assert!((exact_containment(large, small) - 1.0).abs() < 1e-9);
+	}
+
+	#[test]
+	fn exact_containment_zero_when_disjoint() {
+		assert_eq!(exact_containment("alpha beta gamma", "delta epsilon zeta"), 0.0);
+	}
+
+	#[test]
+	fn estimated_overlap_high_when_small_set_contained() {
+		assert!((estimated_overlap(0.2, 50, 250) - 1.0).abs() < 1e-9);
+		assert_eq!(estimated_overlap(0.0, 10, 20), 0.0);
+		assert_eq!(estimated_overlap(0.5, 0, 5), 0.0);
+	}
 }

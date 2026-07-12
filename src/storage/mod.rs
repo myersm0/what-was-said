@@ -760,4 +760,34 @@ mod tests {
 		assert_eq!(ordered.last().unwrap().id, v2);
 		assert!(ordered.iter().all(|m| m.clip_date_source == "ingest_fallback"));
 	}
+
+	#[test]
+	fn backfill_populates_null_shingle_counts() {
+		let db = setup_db();
+		let body = "alpha beta gamma delta epsilon zeta eta theta";
+		let sig = minhash::minhash(body);
+		let doc_id = insert_document(
+			&db, None, "Doc", Some("test"), MergeStrategy::None,
+			Some("/test"), "2024-01-01 00:00:00", Some(&sig),
+		).unwrap();
+		let entry = make_entry(body, None);
+		let entry_hash = minhash::minhash(body);
+		insert_entry(
+			&db, doc_id, &entry, 0, "Doc", "2024-01-01 00:00:00", "/test", &entry_hash,
+		).unwrap();
+
+		let before: Option<i64> = db.query_row(
+			"SELECT document_shingle_count FROM documents WHERE id = ?1",
+			[doc_id.0], |row| row.get(0),
+		).unwrap();
+		assert_eq!(before, None);
+
+		backfill_shingle_counts(&db).unwrap();
+
+		let after: Option<i64> = db.query_row(
+			"SELECT document_shingle_count FROM documents WHERE id = ?1",
+			[doc_id.0], |row| row.get(0),
+		).unwrap();
+		assert_eq!(after, Some(minhash::distinct_shingle_count(body) as i64));
+	}
 }
