@@ -130,6 +130,7 @@ what-was-said diff               # summarize near-duplicate changes (missing or 
 what-was-said diff --force        # re-summarize all relations
 what-was-said relations repair    # recompute superseded tags across version families
 what-was-said relations repair --family 501   # repair only one family
+what-was-said relations scan      # retroactively detect near-duplicates across the collection
 ```
 
 **Sync (curated project docs)**

@@ -304,6 +304,7 @@ fn print_block_diff(new_text: &str, existing_text: &str, existing_id: i64) {
 
 fn prompt_gray_zone(
 	new_path: &str,
+	new_context: &str,
 	existing_id: i64,
 	existing_path: &str,
 	existing_date: &str,
@@ -320,7 +321,7 @@ fn prompt_gray_zone(
 
 	eprintln!("Near-duplicate detected:");
 	eprintln!("  existing: {} (doc {}, ingested {})", existing_path, existing_id, existing_date);
-	eprintln!("  new:      {} (current file)", new_path);
+	eprintln!("  new:      {} ({})", new_path, new_context);
 	eprintln!("  similarity: {:.2}, shared block: ~{} words", similarity, shared_block_words);
 	if same_title {
 		eprintln!("  same source title (likely a re-clip of the same page or conversation)");
@@ -453,6 +454,232 @@ pub fn repair_relations(connection: &rusqlite::Connection, family: Option<i64>) 
 		families_repaired,
 		if families_repaired == 1 { "y" } else { "ies" },
 		documents_tagged,
+	);
+	Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+enum ExactVerdict {
+	AutoSupersede,
+	Prompt,
+	PromptIfBlock,
+	NoMatch,
+}
+
+fn classify_exact(
+	jaccard: f64,
+	containment: f64,
+	smaller_shingle_count: usize,
+	shared_shingle_count: usize,
+	same_title: bool,
+) -> ExactVerdict {
+	if jaccard >= dup_jaccard_high {
+		return ExactVerdict::AutoSupersede;
+	}
+	if jaccard >= dup_jaccard_low {
+		return ExactVerdict::Prompt;
+	}
+	if same_title && jaccard >= title_jaccard_floor {
+		return ExactVerdict::Prompt;
+	}
+	if smaller_shingle_count >= containment_min_shingles && containment >= containment_threshold {
+		return ExactVerdict::Prompt;
+	}
+	if shared_shingle_count + 2 >= block_prompt_words {
+		return ExactVerdict::PromptIfBlock;
+	}
+	ExactVerdict::NoMatch
+}
+
+pub fn scan_relations(
+	connection: &rusqlite::Connection,
+	backend: Option<&dyn LlmBackend>,
+	model: &str,
+) -> Result<()> {
+	let documents = storage::scan_candidate_documents(connection)?;
+	let mut texts: Vec<String> = Vec::with_capacity(documents.len());
+	let mut shingle_sets: Vec<std::collections::HashSet<String>> = Vec::with_capacity(documents.len());
+	let mut title_keys: Vec<String> = Vec::with_capacity(documents.len());
+	for document in &documents {
+		let text = fetch_existing_text(connection, document.id)?;
+		shingle_sets.push(minhash::shingle_set(&text));
+		texts.push(text);
+		title_keys.push(util::strip_source_suffix(&document.source_title));
+	}
+
+	let index_of: std::collections::HashMap<i64, usize> = documents
+		.iter()
+		.enumerate()
+		.map(|(index, document)| (document.id, index))
+		.collect();
+	let mut parent: Vec<usize> = (0..documents.len()).collect();
+	fn find(parent: &mut Vec<usize>, node: usize) -> usize {
+		if parent[node] != node {
+			parent[node] = find(parent, parent[node]);
+		}
+		parent[node]
+	}
+	let mut related: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+	for (from, to, resolution) in storage::all_relation_pairs(connection)? {
+		related.insert((from.min(to), from.max(to)));
+		if resolution == "superseded" {
+			if let (Some(&a), Some(&b)) = (index_of.get(&from), index_of.get(&to)) {
+				let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+				parent[ra] = rb;
+			}
+		}
+	}
+
+	let document_path = |index: usize| -> String {
+		documents[index].origin_path.clone()
+			.unwrap_or_else(|| documents[index].source_title.clone())
+	};
+
+	let mut pairs_examined = 0usize;
+	let mut auto_linked = 0usize;
+	let mut prompted_superseded = 0usize;
+	let mut prompted_kept = 0usize;
+	let mut skipped_related = 0usize;
+	let mut skipped_family = 0usize;
+	let mut quit = false;
+
+	'outer: for newer in 1..documents.len() {
+		for older in (0..newer).rev() {
+			let pair_key = (
+				documents[older].id.min(documents[newer].id),
+				documents[older].id.max(documents[newer].id),
+			);
+			if related.contains(&pair_key) {
+				skipped_related += 1;
+				continue;
+			}
+			if find(&mut parent, older) == find(&mut parent, newer) {
+				skipped_family += 1;
+				continue;
+			}
+			pairs_examined += 1;
+
+			let shared = shingle_sets[older].intersection(&shingle_sets[newer]).count();
+			if shared == 0 {
+				continue;
+			}
+			let union = shingle_sets[older].len() + shingle_sets[newer].len() - shared;
+			let jaccard = shared as f64 / union as f64;
+			let smaller = shingle_sets[older].len().min(shingle_sets[newer].len());
+			let containment = shared as f64 / smaller as f64;
+			let same_title = !title_keys[newer].is_empty() && title_keys[older] == title_keys[newer];
+
+			let verdict = classify_exact(jaccard, containment, smaller, shared, same_title);
+			if verdict == ExactVerdict::NoMatch {
+				continue;
+			}
+
+			if verdict == ExactVerdict::AutoSupersede {
+				let transaction = connection.unchecked_transaction()?;
+				storage::insert_document_relation(
+					&transaction,
+					documents[newer].id,
+					documents[older].id,
+					"near_duplicate",
+					jaccard,
+					None,
+					"superseded",
+				)?;
+				let outcome = recompute_supersession(&transaction, documents[newer].id)?;
+				transaction.commit()?;
+				eprintln!(
+					"auto-linked docs {} and {} (similarity {:.2}); doc {} current",
+					documents[older].id, documents[newer].id, jaccard, outcome.current,
+				);
+				let (ra, rb) = (find(&mut parent, older), find(&mut parent, newer));
+				parent[ra] = rb;
+				auto_linked += 1;
+				continue;
+			}
+
+			let block = minhash::longest_shared_block_words(&texts[newer], &texts[older]);
+			if verdict == ExactVerdict::PromptIfBlock && block < block_prompt_words {
+				continue;
+			}
+
+			use std::io::IsTerminal;
+			if !std::io::stdin().is_terminal() {
+				anyhow::bail!(
+					"scan found a candidate pair: docs {} and {} (similarity {:.2}); refusing to decide without a TTY",
+					documents[older].id, documents[newer].id, jaccard,
+				);
+			}
+
+			let shown_containment = if jaccard < dup_jaccard_low { Some(containment) } else { None };
+			let (choice, summary) = prompt_gray_zone(
+				&document_path(newer),
+				&format!("doc {}, ingested {}", documents[newer].id, documents[newer].clip_date),
+				documents[older].id,
+				&document_path(older),
+				&documents[older].clip_date,
+				jaccard,
+				block,
+				shown_containment,
+				same_title,
+				&texts[newer],
+				&texts[older],
+				backend,
+				model,
+			);
+			match choice {
+				GrayZoneResolution::Supersede | GrayZoneResolution::KeepBoth => {
+					let resolution = match choice {
+						GrayZoneResolution::Supersede => "superseded",
+						_ => "kept_both",
+					};
+					let transaction = connection.unchecked_transaction()?;
+					let relation_id = storage::insert_document_relation(
+						&transaction,
+						documents[newer].id,
+						documents[older].id,
+						"near_duplicate",
+						jaccard,
+						Some(block as i64),
+						resolution,
+					)?;
+					if let Some(summary) = &summary {
+						storage::set_relation_summary(
+							&transaction,
+							relation_id,
+							&summary.text,
+							&summary.model,
+							&summary.prompt_hash,
+						)?;
+					}
+					if resolution == "superseded" {
+						let outcome = recompute_supersession(&transaction, documents[newer].id)?;
+						eprintln!(
+							"  supersession: doc {} current; superseded {}",
+							outcome.current,
+							outcome.superseded.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "),
+						);
+						let (ra, rb) = (find(&mut parent, older), find(&mut parent, newer));
+						parent[ra] = rb;
+						prompted_superseded += 1;
+					} else {
+						eprintln!("  keeping both");
+						prompted_kept += 1;
+					}
+					transaction.commit()?;
+				}
+				GrayZoneResolution::Quit => {
+					quit = true;
+					break 'outer;
+				}
+			}
+		}
+	}
+
+	eprintln!(
+		"scan{}: {} documents, {} pairs examined; {} auto-linked, {} superseded and {} kept both at prompt; skipped {} already related, {} same family",
+		if quit { " (aborted)" } else { "" },
+		documents.len(), pairs_examined, auto_linked,
+		prompted_superseded, prompted_kept, skipped_related, skipped_family,
 	);
 	Ok(())
 }
@@ -738,6 +965,7 @@ pub fn ingest_file(
 
 		let (choice, summary) = prompt_gray_zone(
 			&new_path,
+			"current file",
 			gray.id,
 			&gray.path,
 			&gray.date,
@@ -1079,5 +1307,31 @@ mod tests {
 	#[test]
 	fn classify_different_title_unaffected_between_floors() {
 		assert_eq!(classify_by_signature(0.2, 100, Some(100), false), CandidateVerdict::NoMatch);
+	}
+
+	#[test]
+	fn classify_exact_auto_at_high_band() {
+		assert_eq!(classify_exact(0.85, 1.0, 100, 90, false), ExactVerdict::AutoSupersede);
+	}
+
+	#[test]
+	fn classify_exact_prompts_in_gray_band_and_title_route() {
+		assert_eq!(classify_exact(0.55, 0.6, 100, 60, false), ExactVerdict::Prompt);
+		// feb-14 pairs at their exact entry-body values: revised+truncated, and near-floor
+		assert_eq!(classify_exact(0.201, 0.400, 140, 56, true), ExactVerdict::Prompt);
+		assert_eq!(classify_exact(0.26, 0.63, 194, 122, true), ExactVerdict::Prompt);
+	}
+
+	#[test]
+	fn classify_exact_prompts_on_containment() {
+		assert_eq!(classify_exact(0.2, 0.9, 100, 90, false), ExactVerdict::Prompt);
+		assert_eq!(classify_exact(0.2, 0.9, 20, 18, false), ExactVerdict::NoMatch);
+	}
+
+	#[test]
+	fn classify_exact_defers_to_block_check_on_large_shared_set() {
+		// feb-22 pair shape: moderate everything, 586-word shared block
+		assert_eq!(classify_exact(0.35, 0.66, 1348, 894, false), ExactVerdict::PromptIfBlock);
+		assert_eq!(classify_exact(0.05, 0.2, 1000, 200, false), ExactVerdict::NoMatch);
 	}
 }
