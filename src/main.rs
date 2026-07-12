@@ -100,6 +100,9 @@ enum Command {
 
 		#[arg(long, help = "Restrict to a project")]
 		project: Option<String>,
+
+		#[arg(long, help = "Ignore default tag exclusions")]
+		include_all: bool,
 	},
 
 	/// Show document by id
@@ -285,13 +288,18 @@ fn main() -> Result<()> {
 				ingest::scan_relations(&connection, llm.as_deref(), &llms.diff.model)?;
 			}
 		},
-		Some(Command::About { query, method, project }) => {
+		Some(Command::About { query, method, project, include_all }) => {
 			let query = query.join(" ");
 			if query.is_empty() {
 				anyhow::bail!("about requires a query");
 			}
 
-			let filters = query::SearchFilters { project, ..Default::default() };
+			let excluded_tags = if include_all {
+				Vec::new()
+			} else {
+				config::load_tag_config(&config_dir).expanded_default_exclude()
+			};
+			let filters = query::SearchFilters { project, excluded_tags, ..Default::default() };
 
 			match method {
 				SearchMethod::Exact => {
@@ -492,6 +500,12 @@ fn main() -> Result<()> {
 					doc.doctype_name.as_deref().unwrap_or("unknown"),
 					doc.clip_date,
 				);
+				if doc.superseded {
+					match doc.current_document_id {
+						Some(current) => println!("superseded — current version is document {}", current),
+						None => println!("superseded"),
+					}
+				}
 				println!();
 				for entry in &doc.entries {
 					if let Some(heading) = &entry.heading_title {
@@ -513,7 +527,8 @@ fn main() -> Result<()> {
 		}
 		Some(Command::Serve { port }) => {
 			let backend = create_backend(&llms.backend)?;
-			serve::run(connection, backend, embed_model, port)?;
+			let default_excluded_tags = config::load_tag_config(&config_dir).expanded_default_exclude();
+			serve::run(connection, backend, embed_model, port, default_excluded_tags)?;
 		}
 		Some(Command::Browse { tags, exclude, include_all }) => {
 			let backend = create_backend(&llms.backend)?;
@@ -526,7 +541,7 @@ fn main() -> Result<()> {
 				embed_model: embed_model.clone(),
 				backend: backend.as_ref(),
 			};
-			tui::run(&connection, filter, search_config, cli.theme.as_deref())?;
+			tui::run(&connection, filter, search_config, cli.theme.as_deref(), config::load_tag_config(&config_dir))?;
 		}
 		None => {
 			let backend = create_backend(&llms.backend)?;
@@ -535,7 +550,7 @@ fn main() -> Result<()> {
 				embed_model: embed_model.clone(),
 				backend: backend.as_ref(),
 			};
-			tui::run(&connection, filter, search_config, cli.theme.as_deref())?;
+			tui::run(&connection, filter, search_config, cli.theme.as_deref(), config::load_tag_config(&config_dir))?;
 		}
 	}
 

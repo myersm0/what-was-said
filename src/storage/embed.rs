@@ -4,6 +4,7 @@ use serde::Serialize;
 use zerocopy::IntoBytes;
 
 use super::documents::chunk_count;
+use super::tag_exclusion_clause;
 
 #[derive(Debug)]
 pub struct ChunkForEmbedding {
@@ -106,7 +107,7 @@ pub fn find_similar_chunks(
 	query_embedding: &[f32],
 	limit: usize,
 ) -> Result<Vec<SimilarChunk>> {
-	find_similar_chunks_filtered(connection, query_embedding, limit, None, None, None, None)
+	find_similar_chunks_filtered(connection, query_embedding, limit, None, None, None, None, &[])
 }
 
 pub fn find_similar_chunks_filtered(
@@ -117,20 +118,21 @@ pub fn find_similar_chunks_filtered(
 	date_from: Option<&str>,
 	date_to: Option<&str>,
 	project_filter: Option<&str>,
+	excluded_tags: &[String],
 ) -> Result<Vec<SimilarChunk>> {
 	if let Some(project) = project_filter {
 		return find_similar_chunks_in_project(
 			connection, query_embedding, limit, project, author_like, date_from, date_to,
+			excluded_tags,
 		);
 	}
 
-	let fetch_limit = if author_like.is_some() || date_from.is_some() || date_to.is_some() {
-		limit * 5
-	} else {
-		limit
-	};
+	let has_post_knn_filter = author_like.is_some() || date_from.is_some() || date_to.is_some()
+		|| !excluded_tags.is_empty();
+	let fetch_limit = if has_post_knn_filter { limit * 5 } else { limit };
 
-	let mut stmt = connection.prepare(
+	let exclusion_clause = tag_exclusion_clause(excluded_tags, 3);
+	let sql = format!(
 		"WITH knn AS (
 			SELECT chunk_id, distance
 			FROM vec_chunks
@@ -143,11 +145,21 @@ pub fn find_similar_chunks_filtered(
 		JOIN chunks c ON c.id = knn.chunk_id
 		JOIN entries e ON e.id = c.entry_id
 		JOIN documents d ON d.id = e.document_id
-		ORDER BY knn.distance"
-	)?;
+		{}
+		ORDER BY knn.distance",
+		exclusion_clause.where_fragment("WHERE"),
+	);
+	let mut stmt = connection.prepare(&sql)?;
+
+	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+		Box::new(query_embedding.as_bytes().to_vec()),
+		Box::new(fetch_limit as i64),
+	];
+	exclusion_clause.push_params(&mut param_values);
+	let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
 
 	let mut results: Vec<SimilarChunk> = stmt
-		.query_map(params![query_embedding.as_bytes(), fetch_limit as i64], |row| {
+		.query_map(param_refs.as_slice(), |row| {
 			let distance: f32 = row.get(1)?;
 			Ok(SimilarChunk {
 				chunk_id: row.get(0)?,
@@ -197,8 +209,10 @@ fn find_similar_chunks_in_project(
 	author_like: Option<&str>,
 	date_from: Option<&str>,
 	date_to: Option<&str>,
+	excluded_tags: &[String],
 ) -> Result<Vec<SimilarChunk>> {
-	let mut stmt = connection.prepare(
+	let exclusion_clause = tag_exclusion_clause(excluded_tags, 2);
+	let sql = format!(
 		"SELECT v.chunk_id, v.embedding, c.body, e.document_id,
 		        e.source_title, e.clip_date, e.author, e.position, c.chunk_index,
 		        d.doc_status, d.project, c.start_char, c.end_char
@@ -206,11 +220,17 @@ fn find_similar_chunks_in_project(
 		 JOIN chunks c ON c.id = v.chunk_id
 		 JOIN entries e ON e.id = c.entry_id
 		 JOIN documents d ON d.id = e.document_id
-		 WHERE d.project = ?1"
-	)?;
+		 WHERE d.project = ?1 {}",
+		exclusion_clause.where_fragment("AND"),
+	);
+	let mut stmt = connection.prepare(&sql)?;
+
+	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(project.to_string())];
+	exclusion_clause.push_params(&mut param_values);
+	let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
 
 	let mut results: Vec<SimilarChunk> = stmt
-		.query_map(params![project], |row| {
+		.query_map(param_refs.as_slice(), |row| {
 			let blob: Vec<u8> = row.get(1)?;
 			let embedding = decode_embedding(&blob);
 			let similarity = cosine_similarity(&embedding, query_embedding);
@@ -380,14 +400,20 @@ pub struct SimilarClaim {
 	pub content: String,
 	pub author: Option<String>,
 	pub similarity: f32,
+	pub superseded: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub current_document_id: Option<i64>,
 }
 
 pub fn find_similar_claims(
 	connection: &Connection,
 	query_embedding: &[f32],
 	limit: usize,
+	excluded_tags: &[String],
 ) -> Result<Vec<SimilarClaim>> {
-	let mut stmt = connection.prepare(
+	let fetch_limit = if excluded_tags.is_empty() { limit } else { limit * 5 };
+	let exclusion_clause = tag_exclusion_clause(excluded_tags, 3);
+	let sql = format!(
 		"WITH knn AS (
 			SELECT claim_id, distance
 			FROM vec_claims
@@ -398,11 +424,21 @@ pub fn find_similar_claims(
 		FROM knn
 		JOIN claims c ON c.id = knn.claim_id
 		JOIN documents d ON d.id = c.document_id
-		ORDER BY knn.distance"
-	)?;
+		{}
+		ORDER BY knn.distance",
+		exclusion_clause.where_fragment("WHERE"),
+	);
+	let mut stmt = connection.prepare(&sql)?;
 
-	let results: Vec<SimilarClaim> = stmt
-		.query_map(params![query_embedding.as_bytes(), limit as i64], |row| {
+	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+		Box::new(query_embedding.as_bytes().to_vec()),
+		Box::new(fetch_limit as i64),
+	];
+	exclusion_clause.push_params(&mut param_values);
+	let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+
+	let mut results: Vec<SimilarClaim> = stmt
+		.query_map(param_refs.as_slice(), |row| {
 			let distance: f32 = row.get(1)?;
 			Ok(SimilarClaim {
 				claim_id: row.get(0)?,
@@ -411,9 +447,18 @@ pub fn find_similar_claims(
 				content: row.get(2)?,
 				author: row.get(3)?,
 				similarity: 1.0 - distance,
+				superseded: false,
+				current_document_id: None,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
+	results.truncate(limit);
+
+	for claim in &mut results {
+		let status = super::supersession_status(connection, claim.document_id)?;
+		claim.superseded = status.superseded;
+		claim.current_document_id = status.current_document_id;
+	}
 
 	Ok(results)
 }

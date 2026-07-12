@@ -147,14 +147,16 @@ Translates the `format: Some("json")` parameter to OpenAI's `response_format: {"
 Axum-based localhost JSON API server. Holds an `AppState` with `Mutex<Connection>` and `Box<dyn LlmBackend>`.
 
 Endpoints:
-- `GET /search?q=...&sort=score|date&author=...&date_from=...&date_to=...` — FTS5 search via `query::search_filtered`, results grouped by document
-- `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...` — semantic search via `query::find_similar_grouped_filtered`, results grouped by document
+- `GET /search?q=...&sort=score|date&author=...&date_from=...&date_to=...&include_hidden=true|false` — FTS5 search via `query::search_filtered`, results grouped by document
+- `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...&include_hidden=true|false` — semantic search via `query::find_similar_grouped_filtered`, results grouped by document
 - `GET /get/:id` — full document with entries and chunks
-- `GET /entries/:doc_id` — entries for a document
-- `GET /claims/doc/:doc_id` — claims extracted from a document
-- `GET /claims/similar?q=...&limit=N` — semantic search over claims via `vec_claims`
+- `GET /entries/:doc_id` — entries for a document, wrapped as `{document_id, superseded, current_document_id?, entries}`
+- `GET /claims/doc/:doc_id` — claims extracted from a document, wrapped as `{document_id, superseded, current_document_id?, claims}`
+- `GET /claims/similar?q=...&limit=N&include_hidden=true|false` — semantic search over claims via `vec_claims`
 - `GET /stats` — document/entry/chunk/embedding/claim counts
 - `GET /derive/status` — derivation progress
+
+Search endpoints hide documents carrying a default-excluded tag (from `tags.toml`, expanded through `[includes]` at startup) unless `include_hidden=true`; `/claims/similar` applies the same exclusion to a claim's source document. Direct fetches (`/get`, `/entries`, `/claims/doc`) always return, annotated. Every document-shaped response carries `superseded: bool`, with `current_document_id` present only when true.
 
 Creates a tokio runtime internally so the rest of the binary stays synchronous.
 
@@ -162,10 +164,10 @@ Creates a tokio runtime internally so the rest of the binary stays synchronous.
 Shared query layer between storage and the UI layers (tui, serve, CLI). Owns search result grouping, deduplication, and ranking, including a status-weight multiplier applied to each document's best rank (curated docs by status; captured docs neutral). No `Connection` parameter on the pure domain functions, making them testable with synthetic data.
 
 **Types**:
-- `GroupedSearchResult`: Documents with nested `ChunkHit` vectors
+- `GroupedSearchResult`: Documents with nested `ChunkHit` vectors, carrying the supersession annotation (`superseded`, `current_document_id`)
 - `ChunkHit`: A single search hit within a document
 - `SearchSortColumn`: Score or Date
-- `SearchFilters`: Author, date_from, date_to, project — shared by TUI and serve
+- `SearchFilters`: Author, date_from, date_to, project, excluded_tags — shared by TUI, serve, and CLI. `excluded_tags` is an already-expanded tag list (via `TagConfig::expand_filter_tags`) pushed into storage SQL as a `NOT EXISTS` against `document_tags`; empty means no tag-based hiding
 
 **Composed functions** (call storage, then group):
 - `search()` / `search_filtered()`: FTS5 search via `storage::raw_fts_search`, then group/dedup/sort
@@ -693,6 +695,18 @@ The embed command processes chunks first, then claims, with separate progress re
 24. **All LLM config in one llms.toml**: Backend, auth, default models, and per-task (`[derive]`/`[extract]`/`[diff]`) overrides live in a single file, with each per-task model falling back to a top-level default. This removes the footgun where a task without its own configured model silently fell through to an unrelated global default. Legacy `backend.toml`/`derive.toml`/`extract.toml` are still read when `llms.toml` is absent, so migration is optional.
 
 25. **Exact similarity offline, estimates online**: The MinHash estimate exists to make ingest-time detection O(candidates) with no text fetches; its noise (standard error ≈ 0.04 at k=128, and a hard quantization grid of 1/k) is the price of that speed, and every detection band inherits it. `relations scan`, being offline and infrequent, refuses to pay that price for nothing: it computes exact Jaccard and containment from per-document shingle sets built once, so a scan miss can only mean the pair is genuinely below every band — never an unlucky draw. Recorded human judgments are terminal for scan: an existing `kept_both` or `superseded` pair is never re-asked, and transitive family membership (union-find over `superseded` edges, updated as the scan links) reduces healing a family to its minimum number of decisions.
+
+## Superseded visibility
+
+Two guarantees: (1) documents carrying a default-excluded tag are hidden from every search surface through the generic `[defaults] exclude` mechanism, and (2) whenever an excluded document does surface (opt-in inclusion or direct fetch), the response is annotated with `superseded: bool` and, when true, `current_document_id` — the family maximum by `(clip_date, id)`, derived at query time via `supersession_status` (which wraps the `superseded_family_ordered` family walk and is the only reader allowed to name the `superseded` tag; `recompute_supersession` remains its only writer).
+
+**Mechanism.** Hiding is one SQL fragment in one place: `tag_exclusion_clause` in `storage/mod.rs` emits `NOT EXISTS (... document_tags ... tag IN (...))`, consumed by `raw_fts_search`, `find_similar_chunks_filtered` (both branches), and `find_similar_claims`. The tag list travels in `SearchFilters.excluded_tags` and is expanded from `TagConfig` (parents in `[includes]` expand to their children, mirroring `doc_matches_filter`) before it reaches SQL. No query path hard-codes the string `superseded` for hiding; hiding a doc tagged `junk` uses the identical path. Post-KNN filtering consumes result slots, so a non-empty exclusion bumps the KNN fetch limit the same way author/date filters do.
+
+**Overrides.** CLI `about --include-all` and the serve query parameter `include_hidden=true` clear the exclusion list for that request. Direct fetches (`in`, `dump`, `/get/:id`, `/entries/:doc_id`, `/claims/doc/:id`) never filter and always annotate.
+
+**Phase 0 audit** (state before this work): TUI browse and TUI search honored default excludes (search post-hoc via `passes_global_filter`, at the cost of excluded docs consuming semantic result slots); CLI `about`, CLI `dump`, and every serve endpoint applied no tag filtering at all — serve never loaded `TagConfig`. `query.rs`, `storage/search.rs`, and `storage/embed.rs` contained no tag logic. Additionally, `load_tag_config(None)` read `tags.toml` from the data directory rather than the config directory, and the shipped `src/default_tags.toml` was referenced by nothing — so a fresh install had an empty exclude list everywhere.
+
+**Session decisions.** Serve override parameter: `include_hidden` boolean. Annotation convention: `superseded: false` is always serialized; `current_document_id` is omitted unless superseded. Filtering choke point: storage SQL behind `SearchFilters`, since the KNN limit interaction lives there and all three consumers share the struct. `dump` annotates. `tags.toml` resolution order: config directory, then the legacy data-directory path, then the compiled-in `default_tags.toml`.
 
 ## Adding a New CLI Command
 

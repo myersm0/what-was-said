@@ -340,6 +340,9 @@ pub struct DumpDocument {
 	pub document_id: i64,
 	pub source_title: String,
 	pub merge_strategy: String,
+	pub superseded: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub current_document_id: Option<i64>,
 	pub entries: Vec<DumpEntry>,
 }
 
@@ -377,9 +380,16 @@ pub fn dump_document(connection: &Connection, title_filter: Option<&str>) -> Res
 				document_id: doc_id,
 				source_title,
 				merge_strategy,
+				superseded: false,
+				current_document_id: None,
 				entries: vec![entry],
 			}),
 		}
+	}
+	for document in &mut documents {
+		let supersession = supersession_status(connection, document.document_id)?;
+		document.superseded = supersession.superseded;
+		document.current_document_id = supersession.current_document_id;
 	}
 	Ok(documents)
 }
@@ -483,6 +493,9 @@ pub struct DocumentContent {
 	pub doc_status: Option<String>,
 	pub doc_role: Option<String>,
 	pub relative_path: Option<String>,
+	pub superseded: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub current_document_id: Option<i64>,
 	pub entries: Vec<EntryContent>,
 }
 
@@ -565,6 +578,8 @@ pub fn get_document(connection: &Connection, document_id: i64) -> Result<Option<
 		});
 	}
 
+	let supersession = supersession_status(connection, document_id)?;
+
 	Ok(Some(DocumentContent {
 		id,
 		title,
@@ -575,6 +590,8 @@ pub fn get_document(connection: &Connection, document_id: i64) -> Result<Option<
 		doc_status,
 		doc_role,
 		relative_path,
+		superseded: supersession.superseded,
+		current_document_id: supersession.current_document_id,
 		entries,
 	}))
 }
@@ -870,6 +887,30 @@ pub fn superseded_family_ordered(connection: &Connection, seed: i64) -> Result<V
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 	Ok(members)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SupersessionStatus {
+	pub superseded: bool,
+	pub current_document_id: Option<i64>,
+}
+
+/// The Phase 2 annotation: whether a document carries the `superseded` tag,
+/// and if so, the id of its family's current member — the maximum by
+/// `(clip_date, id)`, derived at query time via the family walk. This is the
+/// one place outside `recompute_supersession` allowed to name the tag.
+pub fn supersession_status(connection: &Connection, document_id: i64) -> Result<SupersessionStatus> {
+	let tagged: bool = connection.query_row(
+		"SELECT EXISTS(SELECT 1 FROM document_tags WHERE document_id = ?1 AND tag = 'superseded')",
+		params![document_id],
+		|row| row.get(0),
+	)?;
+	if !tagged {
+		return Ok(SupersessionStatus { superseded: false, current_document_id: None });
+	}
+	let family = superseded_family_ordered(connection, document_id)?;
+	let current_document_id = family.last().map(|member| member.id);
+	Ok(SupersessionStatus { superseded: true, current_document_id })
 }
 
 pub fn get_document_full_text(connection: &Connection, document_id: i64) -> Result<String> {

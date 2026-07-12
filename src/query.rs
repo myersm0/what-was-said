@@ -17,6 +17,9 @@ pub struct GroupedSearchResult {
 	pub source_title: String,
 	pub clip_date: String,
 	pub best_rank: f64,
+	pub superseded: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub current_document_id: Option<i64>,
 	pub chunks: Vec<ChunkHit>,
 }
 
@@ -38,6 +41,10 @@ pub struct SearchFilters {
 	pub date_from: Option<String>,
 	pub date_to: Option<String>,
 	pub project: Option<String>,
+	/// Document tags to hide from results, already expanded through
+	/// `TagConfig::expand_filter_tags`. Empty means no tag-based hiding
+	/// (the `--include-all` / `include_hidden=true` case).
+	pub excluded_tags: Vec<String>,
 }
 
 impl SearchFilters {
@@ -71,9 +78,11 @@ pub fn search_filtered(
 ) -> Result<Vec<GroupedSearchResult>> {
 	let rows = storage::raw_fts_search(
 		connection, query, filters.author_ref(), filters.date_from_ref(), filters.date_to_ref(),
-		filters.project_ref(),
+		filters.project_ref(), &filters.excluded_tags,
 	)?;
-	Ok(group_fts_results(rows, sort_by))
+	let mut results = group_fts_results(rows, sort_by);
+	annotate_supersession(connection, &mut results)?;
+	Ok(results)
 }
 
 pub fn find_similar_grouped(
@@ -93,9 +102,23 @@ pub fn find_similar_grouped_filtered(
 	let chunks = storage::find_similar_chunks_filtered(
 		connection, query_embedding, limit,
 		filters.author_ref(), filters.date_from_ref(), filters.date_to_ref(),
-		filters.project_ref(),
+		filters.project_ref(), &filters.excluded_tags,
 	)?;
-	Ok(group_similar_results(chunks))
+	let mut results = group_similar_results(chunks);
+	annotate_supersession(connection, &mut results)?;
+	Ok(results)
+}
+
+fn annotate_supersession(
+	connection: &Connection,
+	results: &mut [GroupedSearchResult],
+) -> Result<()> {
+	for result in results.iter_mut() {
+		let status = storage::supersession_status(connection, result.document_id)?;
+		result.superseded = status.superseded;
+		result.current_document_id = status.current_document_id;
+	}
+	Ok(())
 }
 
 pub fn strip_fts_markers(results: &mut [GroupedSearchResult]) {
@@ -145,6 +168,8 @@ pub fn group_fts_results(
 				source_title: row.source_title,
 				clip_date: row.clip_date,
 				best_rank: weighted_rank,
+				superseded: false,
+				current_document_id: None,
 				chunks: vec![hit],
 			}),
 		}
@@ -199,6 +224,8 @@ pub fn group_similar_results(
 				source_title: chunk.source_title,
 				clip_date: chunk.clip_date,
 				best_rank: weighted_rank,
+				superseded: false,
+				current_document_id: None,
 				chunks: vec![hit],
 			}),
 		}
@@ -358,5 +385,164 @@ mod tests {
 	#[test]
 	fn snippets_similar_short_strings() {
 		assert!(!snippets_similar("hello", "hello world"));
+	}
+}
+
+#[cfg(test)]
+mod visibility_tests {
+	use super::*;
+	use crate::chunking;
+	use crate::minhash;
+	use crate::types::{MergeStrategy, SegmentedEntry};
+
+	fn setup_db() -> Connection {
+		unsafe {
+			rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+				sqlite_vec::sqlite3_vec_init as *const (),
+			)));
+		}
+		let connection = Connection::open_in_memory().unwrap();
+		storage::initialize(&connection).unwrap();
+		connection
+	}
+
+	fn insert_document(connection: &Connection, title: &str, body: &str, clip_date: &str) -> i64 {
+		let entry = SegmentedEntry {
+			start_line: 1,
+			end_line: 1,
+			body: body.to_string(),
+			author: None,
+			timestamp: None,
+			is_quote: false,
+			heading_level: None,
+			heading_title: None,
+		};
+		let hash = minhash::minhash(body);
+		let document_id = storage::insert_document(
+			connection, None, title, Some("test"), MergeStrategy::None,
+			Some("/test"), clip_date, None,
+		).unwrap();
+		let entry_id = storage::insert_entry(
+			connection, document_id, &entry, 0, title, clip_date, "/test", &hash,
+		).unwrap();
+		storage::insert_chunks(connection, entry_id, &chunking::chunk_text(body)).unwrap();
+		document_id.0
+	}
+
+	fn make_family(connection: &Connection, newer: i64, older: i64) {
+		storage::insert_document_relation(
+			connection, newer, older, "near_duplicate", 0.9, None, "superseded",
+		).unwrap();
+		storage::add_tag(connection, older, "superseded").unwrap();
+	}
+
+	fn excluded(tags: &[&str]) -> SearchFilters {
+		SearchFilters {
+			excluded_tags: tags.iter().map(|t| t.to_string()).collect(),
+			..Default::default()
+		}
+	}
+
+	#[test]
+	fn fts_search_hides_superseded_by_default_and_annotates_when_included() {
+		let db = setup_db();
+		let old_version = insert_document(&db, "note v1", "walrus migration patterns", "2024-01-01 00:00:00");
+		let new_version = insert_document(&db, "note v2", "walrus migration patterns revised", "2024-02-01 00:00:00");
+		make_family(&db, new_version, old_version);
+
+		let hidden = search_filtered(&db, "walrus", SearchSortColumn::Score, &excluded(&["superseded"])).unwrap();
+		assert_eq!(hidden.len(), 1);
+		assert_eq!(hidden[0].document_id, new_version);
+		assert!(!hidden[0].superseded);
+		assert!(hidden[0].current_document_id.is_none());
+
+		let shown = search_filtered(&db, "walrus", SearchSortColumn::Score, &excluded(&[])).unwrap();
+		assert_eq!(shown.len(), 2);
+		let old_result = shown.iter().find(|r| r.document_id == old_version).unwrap();
+		assert!(old_result.superseded);
+		assert_eq!(old_result.current_document_id, Some(new_version));
+		let new_result = shown.iter().find(|r| r.document_id == new_version).unwrap();
+		assert!(!new_result.superseded);
+		assert!(new_result.current_document_id.is_none());
+	}
+
+	#[test]
+	fn semantic_search_hides_superseded_by_default_and_annotates_when_included() {
+		let db = setup_db();
+		let old_version = insert_document(&db, "note v1", "short body", "2024-01-01 00:00:00");
+		let new_version = insert_document(&db, "note v2", "short body revised", "2024-02-01 00:00:00");
+		make_family(&db, new_version, old_version);
+
+		storage::ensure_vec_table(&db, 4).unwrap();
+		let mut chunk_ids = db.prepare(
+			"SELECT c.id, e.document_id FROM chunks c JOIN entries e ON e.id = c.entry_id",
+		).unwrap()
+			.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+			.unwrap()
+			.collect::<std::result::Result<Vec<_>, _>>()
+			.unwrap();
+		chunk_ids.sort();
+		for (chunk_id, document_id) in &chunk_ids {
+			let embedding = if *document_id == old_version {
+				vec![1.0, 0.0, 0.0, 0.0]
+			} else {
+				vec![0.9, 0.1, 0.0, 0.0]
+			};
+			storage::insert_embedding(&db, *chunk_id, &embedding).unwrap();
+		}
+		let query_embedding = vec![1.0, 0.0, 0.0, 0.0];
+
+		let hidden = find_similar_grouped_filtered(&db, &query_embedding, 10, &excluded(&["superseded"])).unwrap();
+		assert_eq!(hidden.len(), 1);
+		assert_eq!(hidden[0].document_id, new_version);
+
+		let shown = find_similar_grouped_filtered(&db, &query_embedding, 10, &excluded(&[])).unwrap();
+		assert_eq!(shown.len(), 2);
+		let old_result = shown.iter().find(|r| r.document_id == old_version).unwrap();
+		assert!(old_result.superseded);
+		assert_eq!(old_result.current_document_id, Some(new_version));
+	}
+
+	#[test]
+	fn any_excluded_tag_hides_documents_through_the_same_mechanism() {
+		let db = setup_db();
+		let junk_document = insert_document(&db, "junk note", "pelican sighting log", "2024-01-01 00:00:00");
+		let kept_document = insert_document(&db, "real note", "pelican sighting report", "2024-02-01 00:00:00");
+		storage::add_tag(&db, junk_document, "junk").unwrap();
+
+		let results = search_filtered(&db, "pelican", SearchSortColumn::Score, &excluded(&["junk"])).unwrap();
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].document_id, kept_document);
+		assert!(!results[0].superseded);
+	}
+
+	#[test]
+	fn project_scoped_semantic_search_applies_exclusion() {
+		let db = setup_db();
+		let hidden_doc = insert_document(&db, "proj a", "heron notes", "2024-01-01 00:00:00");
+		let shown_doc = insert_document(&db, "proj b", "heron notes more", "2024-02-01 00:00:00");
+		db.execute("UPDATE documents SET project = 'birds'", []).unwrap();
+		storage::add_tag(&db, hidden_doc, "junk").unwrap();
+
+		storage::ensure_vec_table(&db, 4).unwrap();
+		let chunk_rows: Vec<(i64, i64)> = db.prepare(
+			"SELECT c.id, e.document_id FROM chunks c JOIN entries e ON e.id = c.entry_id",
+		).unwrap()
+			.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+			.unwrap()
+			.collect::<std::result::Result<Vec<_>, _>>()
+			.unwrap();
+		for (chunk_id, _) in &chunk_rows {
+			storage::insert_embedding(&db, *chunk_id, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+		}
+
+		let filters = SearchFilters {
+			project: Some("birds".to_string()),
+			excluded_tags: vec!["junk".to_string()],
+			..Default::default()
+		};
+		let results = find_similar_grouped_filtered(&db, &[1.0, 0.0, 0.0, 0.0], 10, &filters).unwrap();
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].document_id, shown_doc);
 	}
 }

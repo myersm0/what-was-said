@@ -24,6 +24,7 @@ pub fn raw_fts_search(
 	date_from: Option<&str>,
 	date_to: Option<&str>,
 	project_filter: Option<&str>,
+	excluded_tags: &[String],
 ) -> Result<Vec<ChunkSearchResult>> {
 	let prefix_query: String = query
 		.split_whitespace()
@@ -49,6 +50,11 @@ pub fn raw_fts_search(
 	if let Some(project) = project_filter {
 		conditions.push(format!("d.project = ?{}", param_values.len() + 1));
 		param_values.push(Box::new(project.to_string()));
+	}
+	let exclusion_clause = super::tag_exclusion_clause(excluded_tags, param_values.len() + 1);
+	if let Some(condition) = exclusion_clause.condition() {
+		conditions.push(condition);
+		exclusion_clause.push_params(&mut param_values);
 	}
 
 	let sql = format!(

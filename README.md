@@ -37,7 +37,7 @@ Structured segmentation and metadata extraction for non-standard formats (e.g. p
 
 **Incremental merging** — Conversation-like sources (Slack, email) grow over time. Detects overlap and appends new content without duplication.
 
-**Near-duplicate handling** — Revisions of an already-clipped document are detected by MinHash/Jaccard and a longest-shared-block heuristic. Matching versions form a *version family*, and the latest by clip date is the current one; older members are tagged `superseded` (both are always kept). `superseded` is an ordinary tag: browse and search hide it through the `[defaults] exclude` list in tags.toml (present in the shipped default; add it to an existing config by hand), and `--include-all` or an explicit tag filter brings old versions back. Borderline matches are resolved by an interactive prompt. Every decision is recorded as a queryable relation, and an LLM can summarize what changed between versions.
+**Near-duplicate handling** — Revisions of an already-clipped document are detected by MinHash/Jaccard and a longest-shared-block heuristic. Matching versions form a *version family*, and the latest by clip date is the current one; older members are tagged `superseded` (both are always kept). `superseded` is an ordinary tag: browse and search — TUI, CLI, and the serve API alike — hide it through the `[defaults] exclude` list in tags.toml (the compiled-in default applies when no tags.toml exists), and `--include-all` (or `include_hidden=true` on the API) brings old versions back, annotated with a pointer to the current version. Borderline matches are resolved by an interactive prompt. Every decision is recorded as a queryable relation, and an LLM can summarize what changed between versions.
 
 **Provenance-first** — Every piece of text is traceable to its source and position within the original document.
 
@@ -114,6 +114,7 @@ what-was-said browse --theme gruvbox
 what-was-said about "semantic query"
 what-was-said about "keyword query" --method exact
 what-was-said about "query" --project game   # restrict to one project
+what-was-said about "query" --include-all    # include superseded/junk/etc.
 what-was-said in 42
 ```
 
@@ -215,16 +216,18 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 | Endpoint | Description |
 |---|---|
-| `GET /search?q=...&sort=score\|date&author=...&date_from=...&date_to=...&project=...` | FTS5 keyword search, results grouped by document |
-| `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...&project=...` | Semantic search via embeddings, results grouped by document |
+| `GET /search?q=...&sort=score\|date&author=...&date_from=...&date_to=...&project=...&include_hidden=true` | FTS5 keyword search, results grouped by document |
+| `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...&project=...&include_hidden=true` | Semantic search via embeddings, results grouped by document |
 | `GET /get/:id` | Full document with entries and chunks |
 | `GET /entries/:doc_id` | Entries for a document |
 | `GET /claims/doc/:doc_id` | Claims extracted from a document |
-| `GET /claims/similar?q=...&limit=N` | Semantic search over claims |
+| `GET /claims/similar?q=...&limit=N&include_hidden=true` | Semantic search over claims |
 | `GET /stats` | Database statistics |
 | `GET /derive/status` | Derivation progress |
 
 All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP status codes.
+
+Search endpoints hide documents tagged with a default-excluded tag (`superseded`, `junk`, etc. per `tags.toml`) unless `include_hidden=true`. Direct fetches always return the requested document. Whenever a superseded document appears in a response — by opt-in, direct fetch, or a claim sourced from it — it carries `superseded: true` and `current_document_id` pointing at the family's current version, so a consumer can always route to the live document. Non-superseded documents carry `superseded: false`.
 
 ---
 
@@ -359,7 +362,7 @@ All config lives in `~/.config/what-was-said/` (override with `--config`):
 
 - `config.toml` — doctype definitions and parsing rules
 - `llms.toml` — all LLM configuration: backend selection, authentication, model defaults, and per-task (derive/extract/diff) overrides
-- `tags.toml` — tag hierarchy, default exclusions, tag colors
+- `tags.toml` — tag hierarchy, default exclusions, tag colors. Read from the config directory; the legacy data-directory location is still honored, and the compiled-in default (which excludes `junk`, `archived`, `superseded`) applies when neither file exists
 - `projects.toml` — registry of curated projects to sync (see [Project sync](#project-sync)); absent by default
 
 `llms.toml` replaces the older `backend.toml`, `derive.toml`, and `extract.toml`. If `llms.toml` is absent, those legacy files are still read as a fallback, so existing setups keep working until you migrate.

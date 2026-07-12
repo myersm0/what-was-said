@@ -326,6 +326,7 @@ pub fn run(
 	filter: GlobalFilter,
 	search_config: SearchConfig,
 	theme_name: Option<&str>,
+	tag_config: TagConfig,
 ) -> Result<()> {
 	enable_raw_mode()?;
 	let mut stdout = io::stdout();
@@ -335,7 +336,7 @@ pub fn run(
 	terminal.clear()?;
 
 	let mut app = App::new(theme::load_theme(theme_name));
-	app.tag_config = crate::config::load_tag_config(None);
+	app.tag_config = tag_config;
 
 	app.global_include = filter.include;
 	app.global_exclude = if filter.include_all {

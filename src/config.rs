@@ -353,6 +353,31 @@ impl TagConfig {
 		})
 	}
 
+	/// Expands filter tags into the flat set of document tags they match,
+	/// mirroring `doc_matches_filter`: each tag matches itself, and an
+	/// `[includes]` parent additionally matches its children. The result is
+	/// suitable for SQL membership tests against `document_tags`.
+	pub fn expand_filter_tags(&self, filter_tags: &[String]) -> Vec<String> {
+		let mut expanded: Vec<String> = Vec::new();
+		for tag in filter_tags {
+			if !expanded.contains(tag) {
+				expanded.push(tag.clone());
+			}
+			if let Some(children) = self.includes.get(tag) {
+				for child in children {
+					if !expanded.contains(child) {
+						expanded.push(child.clone());
+					}
+				}
+			}
+		}
+		expanded
+	}
+
+	pub fn expanded_default_exclude(&self) -> Vec<String> {
+		self.expand_filter_tags(&self.default_exclude)
+	}
+
 	pub fn doc_matches_filter(&self, doc_tags: &[String], filter_tag: &str) -> bool {
 		if doc_tags.iter().any(|t| t == filter_tag) {
 			return true;
@@ -364,20 +389,36 @@ impl TagConfig {
 	}
 }
 
-fn default_tags_config_path() -> PathBuf {
+fn legacy_tags_config_path() -> PathBuf {
 	dirs::data_dir()
 		.unwrap_or_else(|| PathBuf::from("."))
 		.join("what-was-said")
 		.join("tags.toml")
 }
 
-pub fn load_tag_config(path: Option<&Path>) -> TagConfig {
-	let path = path.map(PathBuf::from).unwrap_or_else(default_tags_config_path);
-	if path.exists() {
-		TagConfig::load(&path).unwrap_or_default()
-	} else {
-		TagConfig::default()
+fn builtin_tag_config() -> TagConfig {
+	let toml: TagConfigToml = toml::from_str(include_str!("default_tags.toml"))
+		.expect("built-in default_tags.toml must parse");
+	TagConfig {
+		includes: toml.includes,
+		default_exclude: toml.defaults.exclude,
+		colors: toml.colors,
 	}
+}
+
+/// Resolution order: `tags.toml` in the config directory, then the legacy
+/// data-directory location, then the compiled-in default (which carries the
+/// shipped exclude list, including `superseded`).
+pub fn load_tag_config(config_dir: &Path) -> TagConfig {
+	let config_path = config_dir.join("tags.toml");
+	if config_path.exists() {
+		return TagConfig::load(&config_path).unwrap_or_else(|_| builtin_tag_config());
+	}
+	let legacy_path = legacy_tags_config_path();
+	if legacy_path.exists() {
+		return TagConfig::load(&legacy_path).unwrap_or_else(|_| builtin_tag_config());
+	}
+	builtin_tag_config()
 }
 
 #[derive(Debug, Deserialize)]
@@ -831,5 +872,38 @@ impl LlmsConfig {
 			model: backend.model.clone().unwrap_or_else(default_detailed_model),
 		};
 		Ok(LlmsConfig { backend, derive, extract, diff })
+	}
+}
+
+#[cfg(test)]
+mod tag_filter_tests {
+	use super::*;
+
+	#[test]
+	fn expand_filter_tags_includes_children_of_parent_tags() {
+		let mut includes = HashMap::new();
+		includes.insert(
+			"project-x".to_string(),
+			vec!["x-frontend".to_string(), "x-backend".to_string()],
+		);
+		let tag_config = TagConfig {
+			includes,
+			default_exclude: vec!["junk".to_string(), "project-x".to_string()],
+			colors: HashMap::new(),
+		};
+		let expanded = tag_config.expanded_default_exclude();
+		assert_eq!(expanded, vec!["junk", "project-x", "x-frontend", "x-backend"]);
+	}
+
+	#[test]
+	fn expand_filter_tags_deduplicates() {
+		let mut includes = HashMap::new();
+		includes.insert("parent".to_string(), vec!["child".to_string()]);
+		let tag_config = TagConfig {
+			includes,
+			default_exclude: vec!["parent".to_string(), "child".to_string()],
+			colors: HashMap::new(),
+		};
+		assert_eq!(tag_config.expanded_default_exclude(), vec!["parent", "child"]);
 	}
 }

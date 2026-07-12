@@ -17,6 +17,45 @@ use rusqlite::Connection;
 
 use crate::types::MergeStrategy;
 
+/// The single SQL form of tag-based hiding, shared by every search path:
+/// a `NOT EXISTS` against `document_tags` over an already-expanded tag list.
+pub(crate) struct TagExclusion {
+	tags: Vec<String>,
+	first_param: usize,
+}
+
+pub(crate) fn tag_exclusion_clause(excluded_tags: &[String], first_param: usize) -> TagExclusion {
+	TagExclusion { tags: excluded_tags.to_vec(), first_param }
+}
+
+impl TagExclusion {
+	pub(crate) fn condition(&self) -> Option<String> {
+		if self.tags.is_empty() {
+			return None;
+		}
+		let placeholders: Vec<String> = (0..self.tags.len())
+			.map(|offset| format!("?{}", self.first_param + offset))
+			.collect();
+		Some(format!(
+			"NOT EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id = d.id AND dt.tag IN ({}))",
+			placeholders.join(", "),
+		))
+	}
+
+	pub(crate) fn where_fragment(&self, prefix: &str) -> String {
+		match self.condition() {
+			Some(condition) => format!("{} {}", prefix, condition),
+			None => String::new(),
+		}
+	}
+
+	pub(crate) fn push_params(&self, params: &mut Vec<Box<dyn rusqlite::types::ToSql>>) {
+		for tag in &self.tags {
+			params.push(Box::new(tag.clone()));
+		}
+	}
+}
+
 fn resign_stale_minhash_signatures(connection: &Connection) -> Result<()> {
 	let signature_bytes = (crate::types::MINHASH_SIZE * 8) as i64;
 	let mut stmt = connection.prepare(
@@ -740,7 +779,7 @@ mod tests {
 		insert_claim_embedding(&db, c2, &emb_b).unwrap();
 
 		let query: Vec<f32> = vec![0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-		let results = find_similar_claims(&db, &query, 2).unwrap();
+		let results = find_similar_claims(&db, &query, 2, &[]).unwrap();
 		assert_eq!(results.len(), 2);
 		assert_eq!(results[0].claim_id, c1);
 		assert!(results[0].similarity > results[1].similarity);
@@ -755,6 +794,100 @@ mod tests {
 
 	fn link_superseded(connection: &rusqlite::Connection, newer: i64, older: i64) {
 		insert_document_relation(connection, newer, older, "near_duplicate", 0.8, None, "superseded").unwrap();
+	}
+
+	#[test]
+	fn supersession_status_reports_current_family_member() {
+		let db = setup_db();
+		let old_version = insert_dated_document(&db, "v1", "2024-01-01 00:00:00");
+		let new_version = insert_dated_document(&db, "v2", "2024-02-01 00:00:00");
+		link_superseded(&db, new_version, old_version);
+		add_tag(&db, old_version, "superseded").unwrap();
+
+		let old_status = supersession_status(&db, old_version).unwrap();
+		assert!(old_status.superseded);
+		assert_eq!(old_status.current_document_id, Some(new_version));
+
+		let new_status = supersession_status(&db, new_version).unwrap();
+		assert!(!new_status.superseded);
+		assert!(new_status.current_document_id.is_none());
+	}
+
+	#[test]
+	fn supersession_status_derives_current_from_clip_date_not_insertion_order() {
+		let db = setup_db();
+		let newest_inserted_first = insert_dated_document(&db, "v2", "2024-06-01 00:00:00");
+		let oldest_inserted_last = insert_dated_document(&db, "v1", "2024-01-01 00:00:00");
+		link_superseded(&db, oldest_inserted_last, newest_inserted_first);
+		add_tag(&db, oldest_inserted_last, "superseded").unwrap();
+
+		let status = supersession_status(&db, oldest_inserted_last).unwrap();
+		assert!(status.superseded);
+		assert_eq!(status.current_document_id, Some(newest_inserted_first));
+	}
+
+	#[test]
+	fn get_document_carries_supersession_annotation() {
+		let db = setup_db();
+		let old_version = insert_test_document(&db, "v1", "walrus content").0;
+		let new_version = insert_test_document(&db, "v2", "walrus content revised").0;
+		db.execute("UPDATE documents SET clip_date = '2024-02-01 00:00:00' WHERE id = ?1", [new_version]).unwrap();
+		link_superseded(&db, new_version, old_version);
+		add_tag(&db, old_version, "superseded").unwrap();
+
+		let old_document = get_document(&db, old_version).unwrap().unwrap();
+		assert!(old_document.superseded);
+		assert_eq!(old_document.current_document_id, Some(new_version));
+		assert!(!old_document.entries.is_empty());
+
+		let new_document = get_document(&db, new_version).unwrap().unwrap();
+		assert!(!new_document.superseded);
+		assert!(new_document.current_document_id.is_none());
+	}
+
+	#[test]
+	fn dump_documents_carry_supersession_annotation() {
+		let db = setup_db();
+		let old_version = insert_test_document(&db, "v1", "walrus content").0;
+		let new_version = insert_test_document(&db, "v2", "walrus content revised").0;
+		db.execute("UPDATE documents SET clip_date = '2024-02-01 00:00:00' WHERE id = ?1", [new_version]).unwrap();
+		link_superseded(&db, new_version, old_version);
+		add_tag(&db, old_version, "superseded").unwrap();
+
+		let dumped = dump_document(&db, None).unwrap();
+		let old_dump = dumped.iter().find(|d| d.document_id == old_version).unwrap();
+		assert!(old_dump.superseded);
+		assert_eq!(old_dump.current_document_id, Some(new_version));
+		let new_dump = dumped.iter().find(|d| d.document_id == new_version).unwrap();
+		assert!(!new_dump.superseded);
+	}
+
+	#[test]
+	fn similar_claims_hide_excluded_source_documents_and_annotate_when_included() {
+		let db = setup_db();
+		let old_version = insert_test_document(&db, "v1", "walrus content").0;
+		let new_version = insert_test_document(&db, "v2", "walrus content revised").0;
+		db.execute("UPDATE documents SET clip_date = '2024-02-01 00:00:00' WHERE id = ?1", [new_version]).unwrap();
+		link_superseded(&db, new_version, old_version);
+		add_tag(&db, old_version, "superseded").unwrap();
+
+		let old_claim = insert_claim(&db, old_version, None, None, "Walruses migrate.", "m", "h").unwrap();
+		let new_claim = insert_claim(&db, new_version, None, None, "Walruses migrate seasonally.", "m", "h").unwrap();
+		ensure_vec_claims_table(&db, 4).unwrap();
+		insert_claim_embedding(&db, old_claim, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+		insert_claim_embedding(&db, new_claim, &[0.9, 0.1, 0.0, 0.0]).unwrap();
+		let query = vec![1.0, 0.0, 0.0, 0.0];
+
+		let hidden = find_similar_claims(&db, &query, 10, &["superseded".to_string()]).unwrap();
+		assert_eq!(hidden.len(), 1);
+		assert_eq!(hidden[0].claim_id, new_claim);
+		assert!(!hidden[0].superseded);
+
+		let shown = find_similar_claims(&db, &query, 10, &[]).unwrap();
+		assert_eq!(shown.len(), 2);
+		let old_hit = shown.iter().find(|c| c.claim_id == old_claim).unwrap();
+		assert!(old_hit.superseded);
+		assert_eq!(old_hit.current_document_id, Some(new_version));
 	}
 
 	#[test]

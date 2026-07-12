@@ -16,6 +16,17 @@ struct AppState {
 	connection: Mutex<rusqlite::Connection>,
 	backend: Box<dyn LlmBackend>,
 	embed_model: String,
+	default_excluded_tags: Vec<String>,
+}
+
+impl AppState {
+	fn excluded_tags(&self, include_hidden: Option<bool>) -> Vec<String> {
+		if include_hidden.unwrap_or(false) {
+			Vec::new()
+		} else {
+			self.default_excluded_tags.clone()
+		}
+	}
 }
 
 type SharedState = Arc<AppState>;
@@ -36,6 +47,7 @@ struct SearchParams {
 	date_from: Option<String>,
 	date_to: Option<String>,
 	project: Option<String>,
+	include_hidden: Option<bool>,
 }
 
 async fn search_handler(
@@ -51,6 +63,7 @@ async fn search_handler(
 		date_from: params.date_from,
 		date_to: params.date_to,
 		project: params.project,
+		excluded_tags: state.excluded_tags(params.include_hidden),
 	};
 	let connection = state.connection.lock().map_err(|e| err_500(e))?;
 	let mut results = query::search_filtered(&connection, &params.q, sort, &filters)
@@ -67,6 +80,7 @@ struct SimilarParams {
 	date_from: Option<String>,
 	date_to: Option<String>,
 	project: Option<String>,
+	include_hidden: Option<bool>,
 }
 
 async fn similar_handler(
@@ -79,6 +93,7 @@ async fn similar_handler(
 		date_from: params.date_from,
 		date_to: params.date_to,
 		project: params.project,
+		excluded_tags: state.excluded_tags(params.include_hidden),
 	};
 	let query_embedding = state.backend.embed(&params.q, &state.embed_model)
 		.map_err(|e| err_500(e))?;
@@ -111,7 +126,15 @@ async fn entries_handler(
 	let doc = storage::get_document(&connection, doc_id)
 		.map_err(|e| err_500(e))?
 		.ok_or_else(|| err_404(format!("no document with id {}", doc_id)))?;
-	Ok(Json(doc.entries))
+	let mut response = serde_json::json!({
+		"document_id": doc.id,
+		"superseded": doc.superseded,
+		"entries": doc.entries,
+	});
+	if let Some(current) = doc.current_document_id {
+		response["current_document_id"] = serde_json::json!(current);
+	}
+	Ok(Json(response))
 }
 
 async fn stats_handler(
@@ -150,7 +173,17 @@ async fn claims_handler(
 	let connection = state.connection.lock().map_err(|e| err_500(e))?;
 	let claims = storage::get_claims_for_document(&connection, doc_id)
 		.map_err(|e| err_500(e))?;
-	Ok(Json(claims))
+	let supersession = storage::supersession_status(&connection, doc_id)
+		.map_err(|e| err_500(e))?;
+	let mut response = serde_json::json!({
+		"document_id": doc_id,
+		"superseded": supersession.superseded,
+		"claims": claims,
+	});
+	if let Some(current) = supersession.current_document_id {
+		response["current_document_id"] = serde_json::json!(current);
+	}
+	Ok(Json(response))
 }
 
 async fn similar_claims_handler(
@@ -158,13 +191,14 @@ async fn similar_claims_handler(
 	Query(params): Query<SimilarParams>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
 	let limit = params.limit.unwrap_or(10);
+	let excluded_tags = state.excluded_tags(params.include_hidden);
 	let query_embedding = state.backend.embed(&params.q, &state.embed_model)
 		.map_err(|e| err_500(e))?;
 	let connection = state.connection.lock().map_err(|e| err_500(e))?;
 	if !storage::vec_claims_table_exists(&connection) {
 		return Err(err_500("no claim embeddings yet - run 'what-was-said extract' then 'what-was-said embed'"));
 	}
-	let results = storage::find_similar_claims(&connection, &query_embedding, limit)
+	let results = storage::find_similar_claims(&connection, &query_embedding, limit, &excluded_tags)
 		.map_err(|e| err_500(e))?;
 	Ok(Json(results))
 }
@@ -174,11 +208,13 @@ pub fn run(
 	backend: Box<dyn LlmBackend>,
 	embed_model: String,
 	port: u16,
+	default_excluded_tags: Vec<String>,
 ) -> Result<()> {
 	let state = Arc::new(AppState {
 		connection: Mutex::new(connection),
 		backend,
 		embed_model,
+		default_excluded_tags,
 	});
 
 	let app = Router::new()
