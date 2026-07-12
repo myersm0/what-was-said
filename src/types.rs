@@ -1,7 +1,7 @@
 use chrono::NaiveDateTime;
 use std::path::PathBuf;
 
-pub const MINHASH_SIZE: usize = 32;
+pub const MINHASH_SIZE: usize = 128;
 pub type MinHashSignature = [u64; MINHASH_SIZE];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

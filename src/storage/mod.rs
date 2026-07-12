@@ -17,6 +17,45 @@ use rusqlite::Connection;
 
 use crate::types::MergeStrategy;
 
+fn resign_stale_minhash_signatures(connection: &Connection) -> Result<()> {
+	let signature_bytes = (crate::types::MINHASH_SIZE * 8) as i64;
+	let mut stmt = connection.prepare(
+		"SELECT id FROM documents WHERE document_minhash IS NOT NULL AND length(document_minhash) != ?1",
+	)?;
+	let document_ids: Vec<i64> = stmt
+		.query_map([signature_bytes], |row| row.get(0))?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	for id in document_ids {
+		let entries = get_entries_for_document(connection, id)?;
+		let body = entries
+			.iter()
+			.map(|e| e.body.as_str())
+			.collect::<Vec<_>>()
+			.join("\n");
+		let signature = crate::minhash::minhash(&body);
+		let blob: Vec<u8> = signature.iter().flat_map(|v| v.to_le_bytes()).collect();
+		connection.execute(
+			"UPDATE documents SET document_minhash = ?1 WHERE id = ?2",
+			rusqlite::params![blob, id],
+		)?;
+	}
+	let mut stmt = connection.prepare(
+		"SELECT id, body FROM entries WHERE minhash IS NOT NULL AND length(minhash) != ?1",
+	)?;
+	let entry_rows: Vec<(i64, String)> = stmt
+		.query_map([signature_bytes], |row| Ok((row.get(0)?, row.get(1)?)))?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	for (id, body) in entry_rows {
+		let signature = crate::minhash::minhash(&body);
+		let blob: Vec<u8> = signature.iter().flat_map(|v| v.to_le_bytes()).collect();
+		connection.execute(
+			"UPDATE entries SET minhash = ?1 WHERE id = ?2",
+			rusqlite::params![blob, id],
+		)?;
+	}
+	Ok(())
+}
+
 fn backfill_shingle_counts(connection: &Connection) -> Result<()> {
 	let mut stmt = connection
 		.prepare("SELECT id FROM documents WHERE document_minhash IS NOT NULL")?;
@@ -242,6 +281,7 @@ fn migrate(connection: &Connection) -> Result<()> {
 		)?;
 		backfill_shingle_counts(connection)?;
 	}
+	resign_stale_minhash_signatures(connection)?;
 	connection.execute_batch(
 		"CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_project_path
 		 ON documents(project, relative_path)
@@ -789,5 +829,48 @@ mod tests {
 			[doc_id.0], |row| row.get(0),
 		).unwrap();
 		assert_eq!(after, Some(minhash::distinct_shingle_count(body) as i64));
+	}
+
+	#[test]
+	fn resign_recomputes_legacy_width_signatures() {
+		let db = setup_db();
+		let body = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+		let sig = minhash::minhash(body);
+		let doc_id = insert_document(
+			&db, None, "Doc", Some("test"), MergeStrategy::None,
+			Some("/test"), "2024-01-01 00:00:00", Some(&sig),
+		).unwrap();
+		let entry = make_entry(body, None);
+		insert_entry(
+			&db, doc_id, &entry, 0, "Doc", "2024-01-01 00:00:00", "/test", &sig,
+		).unwrap();
+
+		let legacy_blob: Vec<u8> = sig.iter().take(32).flat_map(|v| v.to_le_bytes()).collect();
+		db.execute(
+			"UPDATE documents SET document_minhash = ?1 WHERE id = ?2",
+			rusqlite::params![legacy_blob, doc_id.0],
+		).unwrap();
+		db.execute(
+			"UPDATE entries SET minhash = ?1 WHERE document_id = ?2",
+			rusqlite::params![legacy_blob, doc_id.0],
+		).unwrap();
+
+		resign_stale_minhash_signatures(&db).unwrap();
+
+		let expected_bytes = (crate::types::MINHASH_SIZE * 8) as i64;
+		let doc_len: i64 = db.query_row(
+			"SELECT length(document_minhash) FROM documents WHERE id = ?1",
+			[doc_id.0], |row| row.get(0),
+		).unwrap();
+		let entry_len: i64 = db.query_row(
+			"SELECT length(minhash) FROM entries WHERE document_id = ?1",
+			[doc_id.0], |row| row.get(0),
+		).unwrap();
+		assert_eq!(doc_len, expected_bytes);
+		assert_eq!(entry_len, expected_bytes);
+
+		let candidates = find_dup_candidates(&db, "2024-01-02 00:00:00", 180).unwrap();
+		let candidate = candidates.iter().find(|c| c.id == doc_id.0).unwrap();
+		assert!((minhash::jaccard(&candidate.document_minhash, &sig) - 1.0).abs() < f64::EPSILON);
 	}
 }
