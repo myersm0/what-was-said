@@ -164,6 +164,8 @@ const dup_window_days: i64 = 180;
 const containment_threshold: f64 = 0.8;
 const containment_prefilter: f64 = 0.5;
 const containment_min_shingles: usize = 48;
+const title_jaccard_floor: f64 = 0.15;
+const block_prompt_words: usize = 300;
 
 #[derive(Debug, PartialEq)]
 enum CandidateVerdict {
@@ -177,11 +179,15 @@ fn classify_by_signature(
 	similarity: f64,
 	newcomer_shingle_count: usize,
 	candidate_shingle_count: Option<i64>,
+	same_title: bool,
 ) -> CandidateVerdict {
 	if similarity >= dup_jaccard_high {
 		return CandidateVerdict::AutoSupersede;
 	}
 	if similarity >= dup_jaccard_low {
+		return CandidateVerdict::NeedsGrayReview;
+	}
+	if same_title && similarity >= title_jaccard_floor {
 		return CandidateVerdict::NeedsGrayReview;
 	}
 	let Some(candidate_count) = candidate_shingle_count else {
@@ -304,6 +310,7 @@ fn prompt_gray_zone(
 	similarity: f64,
 	shared_block_words: usize,
 	containment: Option<f64>,
+	same_title: bool,
 	new_text: &str,
 	existing_text: &str,
 	backend: Option<&dyn LlmBackend>,
@@ -315,6 +322,9 @@ fn prompt_gray_zone(
 	eprintln!("  existing: {} (doc {}, ingested {})", existing_path, existing_id, existing_date);
 	eprintln!("  new:      {} (current file)", new_path);
 	eprintln!("  similarity: {:.2}, shared block: ~{} words", similarity, shared_block_words);
+	if same_title {
+		eprintln!("  same source title (likely a re-clip of the same page or conversation)");
+	}
 	if let Some(overlap) = containment {
 		eprintln!(
 			"  containment: {:.0}% of the smaller document is shared (low similarity reflects a large size difference, not unrelatedness)",
@@ -644,6 +654,7 @@ pub fn ingest_file(
 		similarity: f64,
 		shared_block_words: usize,
 		containment: Option<f64>,
+		same_title: bool,
 		existing_text: String,
 	}
 
@@ -653,7 +664,9 @@ pub fn ingest_file(
 
 	for candidate in &candidates {
 		let similarity = minhash::jaccard(&doc_hash, &candidate.document_minhash);
-		match classify_by_signature(similarity, newcomer_shingle_count, candidate.shingle_count) {
+		let same_title = !merge_key.is_empty()
+			&& util::strip_source_suffix(&candidate.source_title) == merge_key;
+		match classify_by_signature(similarity, newcomer_shingle_count, candidate.shingle_count, same_title) {
 			CandidateVerdict::AutoSupersede => {
 				qualifying.push(RelationPlan {
 					existing_id: candidate.id,
@@ -673,23 +686,32 @@ pub fn ingest_file(
 					similarity,
 					shared_block_words: shared,
 					containment: None,
+					same_title,
 					existing_text,
 				});
 			}
 			CandidateVerdict::NeedsContainmentCheck => {
 				let existing_text = fetch_existing_text(connection, candidate.id)?;
 				let containment = minhash::exact_containment(&new_text, &existing_text);
-				if containment >= containment_threshold {
+				let smaller_count = candidate.shingle_count
+					.map(|count| newcomer_shingle_count.min(count as usize))
+					.unwrap_or(newcomer_shingle_count);
+				let block_possible =
+					containment * smaller_count as f64 >= (block_prompt_words - 2) as f64;
+				if containment >= containment_threshold || block_possible {
 					let shared = minhash::longest_shared_block_words(&new_text, &existing_text);
-					gray_candidates.push(GrayCandidate {
-						id: candidate.id,
-						path: candidate_path(candidate),
-						date: candidate.clip_date.clone(),
-						similarity,
-						shared_block_words: shared,
-						containment: Some(containment),
-						existing_text,
-					});
+					if containment >= containment_threshold || shared >= block_prompt_words {
+						gray_candidates.push(GrayCandidate {
+							id: candidate.id,
+							path: candidate_path(candidate),
+							date: candidate.clip_date.clone(),
+							similarity,
+							shared_block_words: shared,
+							containment: Some(containment),
+							same_title,
+							existing_text,
+						});
+					}
 				}
 			}
 			CandidateVerdict::NoMatch => {}
@@ -722,6 +744,7 @@ pub fn ingest_file(
 			gray.similarity,
 			gray.shared_block_words,
 			gray.containment,
+			gray.same_title,
 			&new_text,
 			&gray.existing_text,
 			options.backend,
@@ -998,33 +1021,63 @@ mod tests {
 
 	#[test]
 	fn classify_auto_supersedes_at_and_above_high_band() {
-		assert_eq!(classify_by_signature(0.95, 100, Some(100)), CandidateVerdict::AutoSupersede);
-		assert_eq!(classify_by_signature(dup_jaccard_high, 100, Some(100)), CandidateVerdict::AutoSupersede);
+		assert_eq!(classify_by_signature(0.95, 100, Some(100), false), CandidateVerdict::AutoSupersede);
+		assert_eq!(classify_by_signature(dup_jaccard_high, 100, Some(100), false), CandidateVerdict::AutoSupersede);
 	}
 
 	#[test]
 	fn classify_prompts_in_mid_band() {
-		assert_eq!(classify_by_signature(0.55, 100, Some(100)), CandidateVerdict::NeedsGrayReview);
-		assert_eq!(classify_by_signature(dup_jaccard_low, 100, Some(100)), CandidateVerdict::NeedsGrayReview);
+		assert_eq!(classify_by_signature(0.55, 100, Some(100), false), CandidateVerdict::NeedsGrayReview);
+		assert_eq!(classify_by_signature(dup_jaccard_low, 100, Some(100), false), CandidateVerdict::NeedsGrayReview);
 	}
 
 	#[test]
 	fn classify_flags_containment_for_large_contained_doc() {
-		assert_eq!(classify_by_signature(0.15, 500, Some(60)), CandidateVerdict::NeedsContainmentCheck);
+		assert_eq!(classify_by_signature(0.15, 500, Some(60), false), CandidateVerdict::NeedsContainmentCheck);
 	}
 
 	#[test]
 	fn classify_no_match_when_contained_doc_below_size_floor() {
-		assert_eq!(classify_by_signature(0.15, 500, Some(10)), CandidateVerdict::NoMatch);
+		assert_eq!(classify_by_signature(0.15, 500, Some(10), false), CandidateVerdict::NoMatch);
 	}
 
 	#[test]
 	fn classify_no_match_when_overlap_estimate_below_prefilter() {
-		assert_eq!(classify_by_signature(0.15, 500, Some(500)), CandidateVerdict::NoMatch);
+		assert_eq!(classify_by_signature(0.15, 500, Some(500), false), CandidateVerdict::NoMatch);
 	}
 
 	#[test]
 	fn classify_no_match_when_candidate_cardinality_missing() {
-		assert_eq!(classify_by_signature(0.15, 500, None), CandidateVerdict::NoMatch);
+		assert_eq!(classify_by_signature(0.15, 500, None, false), CandidateVerdict::NoMatch);
+	}
+
+	#[test]
+	fn classify_same_title_routes_sub_gray_jaccard_to_prompt() {
+		// observed signature estimates from two real missed version families:
+		// a revised-and-truncated re-clip, a near-floor revision, and a
+		// large-block revision whose estimate drew low
+		assert_eq!(classify_by_signature(0.156, 158, Some(220), true), CandidateVerdict::NeedsGrayReview);
+		assert_eq!(classify_by_signature(0.375, 309, Some(220), true), CandidateVerdict::NeedsGrayReview);
+		assert_eq!(classify_by_signature(0.312, 1770, Some(1348), true), CandidateVerdict::NeedsGrayReview);
+	}
+
+	#[test]
+	fn classify_same_title_at_floor_boundary() {
+		assert_eq!(classify_by_signature(title_jaccard_floor, 100, Some(100), true), CandidateVerdict::NeedsGrayReview);
+	}
+
+	#[test]
+	fn classify_same_title_below_floor_falls_through() {
+		assert_eq!(classify_by_signature(0.10, 100, Some(100), true), CandidateVerdict::NoMatch);
+	}
+
+	#[test]
+	fn classify_same_title_below_floor_still_reaches_containment_path() {
+		assert_eq!(classify_by_signature(0.10, 500, Some(60), true), CandidateVerdict::NeedsContainmentCheck);
+	}
+
+	#[test]
+	fn classify_different_title_unaffected_between_floors() {
+		assert_eq!(classify_by_signature(0.2, 100, Some(100), false), CandidateVerdict::NoMatch);
 	}
 }
