@@ -170,8 +170,6 @@ The `--config` flag specifies the config directory (default: `~/.config/what-was
 The `examples/` directory contains sample documents, preprocessor scripts, and a config file. To ingest the demo data:
 
 ```bash
-pip install -r examples/parsers/requirements.txt
-
 what-was-said --config examples ingest examples/inbox/email/
 what-was-said --config examples ingest examples/inbox/slack/
 what-was-said --config examples ingest examples/inbox/markdown/

@@ -1,5 +1,6 @@
 import argparse
-from dateutil.parser import parse as parse_date
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 import json
 import re
 import sys
@@ -58,15 +59,45 @@ def extract_author_from_from_line(line):
 	return clean_author(re.sub(r'^From:\s+', '', line))
 
 
+weekday_prefix = re.compile(r'^[A-Za-z]+,\s+')
+rfc2822_shape = re.compile(r'^(?:[A-Za-z]{3}, )?\d{1,2} [A-Za-z]{3} \d{4} \d{2}:\d{2}')
+
+timestamp_formats = [
+	'%B %d, %Y %I:%M %p',
+	'%B %d, %Y %H:%M',
+	'%B %d, %Y %I:%M:%S %p',
+	'%B %d, %Y %H:%M:%S',
+	'%m/%d/%Y %I:%M %p',
+	'%m/%d/%Y %H:%M',
+	'%Y-%m-%d %H:%M:%S',
+	'%Y-%m-%dT%H:%M:%S',
+]
+
+
+def parse_timestamp(cleaned):
+	if rfc2822_shape.match(cleaned):
+		try:
+			return parsedate_to_datetime(cleaned)
+		except (TypeError, ValueError, IndexError):
+			pass
+	without_weekday = weekday_prefix.sub('', cleaned)
+	for fmt in timestamp_formats:
+		try:
+			return datetime.strptime(without_weekday, fmt)
+		except ValueError:
+			continue
+	return None
+
+
 def normalize_timestamp(raw):
 	cleaned = raw.replace('\u202f', ' ').replace(' at ', ' ').strip()
 	hour_match = re.search(r' (\d{2}):\d{2} ?PM$', cleaned)
 	if hour_match and int(hour_match.group(1)) > 12:
 		cleaned = re.sub(r' ?PM$', '', cleaned)
-	try:
-		return parse_date(cleaned).strftime('%Y-%m-%dT%H:%M:%S')
-	except (ValueError, OverflowError):
+	parsed = parse_timestamp(cleaned)
+	if parsed is None:
 		return raw.strip()
+	return parsed.strftime('%Y-%m-%dT%H:%M:%S')
 
 
 def extract_timestamp(line):
