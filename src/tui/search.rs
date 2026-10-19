@@ -103,6 +103,7 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 		date_to: if app.date_to.is_empty() { None } else { Some(app.date_to.clone()) },
 		project: if app.project_filter.is_empty() { None } else { Some(app.project_filter.clone()) },
 		excluded_tags: app.tag_config.expand_filter_tags(&app.global_exclude),
+		required_tags: Vec::new(),
 	};
 
 	let allowed_doc_ids: std::collections::HashSet<i64> = app.documents.iter()

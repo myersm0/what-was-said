@@ -17,18 +17,24 @@ use rusqlite::Connection;
 
 use crate::types::MergeStrategy;
 
-/// The single SQL form of tag-based hiding, shared by every search path:
-/// a `NOT EXISTS` against `document_tags` over an already-expanded tag list.
-pub(crate) struct TagExclusion {
+/// The single SQL form of tag-based filtering, shared by every search path:
+/// a `NOT EXISTS` (hiding) or `EXISTS` (requiring) against `document_tags`
+/// over an already-expanded tag list.
+pub(crate) struct TagClause {
 	tags: Vec<String>,
 	first_param: usize,
+	required: bool,
 }
 
-pub(crate) fn tag_exclusion_clause(excluded_tags: &[String], first_param: usize) -> TagExclusion {
-	TagExclusion { tags: excluded_tags.to_vec(), first_param }
+pub(crate) fn tag_exclusion_clause(excluded_tags: &[String], first_param: usize) -> TagClause {
+	TagClause { tags: excluded_tags.to_vec(), first_param, required: false }
 }
 
-impl TagExclusion {
+pub(crate) fn tag_requirement_clause(required_tags: &[String], first_param: usize) -> TagClause {
+	TagClause { tags: required_tags.to_vec(), first_param, required: true }
+}
+
+impl TagClause {
 	pub(crate) fn condition(&self) -> Option<String> {
 		if self.tags.is_empty() {
 			return None;
@@ -37,16 +43,14 @@ impl TagExclusion {
 			.map(|offset| format!("?{}", self.first_param + offset))
 			.collect();
 		Some(format!(
-			"NOT EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id = d.id AND dt.tag IN ({}))",
+			"{}EXISTS (SELECT 1 FROM document_tags dt WHERE dt.document_id = d.id AND dt.tag IN ({}))",
+			if self.required { "" } else { "NOT " },
 			placeholders.join(", "),
 		))
 	}
 
-	pub(crate) fn where_fragment(&self, prefix: &str) -> String {
-		match self.condition() {
-			Some(condition) => format!("{} {}", prefix, condition),
-			None => String::new(),
-		}
+	pub(crate) fn param_count(&self) -> usize {
+		self.tags.len()
 	}
 
 	pub(crate) fn push_params(&self, params: &mut Vec<Box<dyn rusqlite::types::ToSql>>) {
@@ -54,6 +58,49 @@ impl TagExclusion {
 			params.push(Box::new(tag.clone()));
 		}
 	}
+}
+
+/// Appends both tag clauses to `conditions`, numbering placeholders after
+/// whatever is already in `params`.
+pub(crate) fn push_tag_conditions(
+	conditions: &mut Vec<String>,
+	params: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+	excluded_tags: &[String],
+	required_tags: &[String],
+) {
+	let exclusion = tag_exclusion_clause(excluded_tags, params.len() + 1);
+	let requirement = tag_requirement_clause(required_tags, params.len() + 1 + exclusion.param_count());
+	for clause in [&exclusion, &requirement] {
+		if let Some(condition) = clause.condition() {
+			conditions.push(condition);
+			clause.push_params(params);
+		}
+	}
+}
+
+pub(crate) fn where_clause(conditions: &[String]) -> String {
+	if conditions.is_empty() {
+		String::new()
+	} else {
+		format!("WHERE {}", conditions.join(" AND "))
+	}
+}
+
+/// Sync once wrote `T`-separated clip dates. Date bounds and "latest" ordering
+/// compare strings, so every clip date must share ingest's `YYYY-MM-DD HH:MM:SS`.
+fn normalize_clip_date_separators(connection: &Connection) -> Result<()> {
+	let pending: bool = connection.query_row(
+		"SELECT EXISTS(SELECT 1 FROM documents WHERE clip_date LIKE '____-__-__T%')",
+		[],
+		|row| row.get(0),
+	)?;
+	if pending {
+		connection.execute_batch(
+			"UPDATE documents SET clip_date = replace(clip_date, 'T', ' ') WHERE clip_date LIKE '____-__-__T%';
+			 UPDATE entries SET clip_date = replace(clip_date, 'T', ' ') WHERE clip_date LIKE '____-__-__T%';",
+		)?;
+	}
+	Ok(())
 }
 
 fn resign_stale_minhash_signatures(connection: &Connection) -> Result<()> {
@@ -321,6 +368,7 @@ fn migrate(connection: &Connection) -> Result<()> {
 		backfill_shingle_counts(connection)?;
 	}
 	resign_stale_minhash_signatures(connection)?;
+	normalize_clip_date_separators(connection)?;
 	connection.execute_batch(
 		"CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_project_path
 		 ON documents(project, relative_path)
@@ -779,7 +827,7 @@ mod tests {
 		insert_claim_embedding(&db, c2, &emb_b).unwrap();
 
 		let query: Vec<f32> = vec![0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-		let results = find_similar_claims(&db, &query, 2, &[]).unwrap();
+		let results = find_similar_claims(&db, &query, 2, &[], &[]).unwrap();
 		assert_eq!(results.len(), 2);
 		assert_eq!(results[0].claim_id, c1);
 		assert!(results[0].similarity > results[1].similarity);
@@ -878,16 +926,63 @@ mod tests {
 		insert_claim_embedding(&db, new_claim, &[0.9, 0.1, 0.0, 0.0]).unwrap();
 		let query = vec![1.0, 0.0, 0.0, 0.0];
 
-		let hidden = find_similar_claims(&db, &query, 10, &["superseded".to_string()]).unwrap();
+		let hidden = find_similar_claims(&db, &query, 10, &["superseded".to_string()], &[]).unwrap();
 		assert_eq!(hidden.len(), 1);
 		assert_eq!(hidden[0].claim_id, new_claim);
 		assert!(!hidden[0].superseded);
 
-		let shown = find_similar_claims(&db, &query, 10, &[]).unwrap();
+		let shown = find_similar_claims(&db, &query, 10, &[], &[]).unwrap();
 		assert_eq!(shown.len(), 2);
 		let old_hit = shown.iter().find(|c| c.claim_id == old_claim).unwrap();
 		assert!(old_hit.superseded);
 		assert_eq!(old_hit.current_document_id, Some(new_version));
+	}
+
+	#[test]
+	fn similar_claims_require_tag_and_bump_fetch_past_untagged_neighbors() {
+		let db = setup_db();
+		let untagged = insert_test_document(&db, "untagged", "otter content").0;
+		let tagged = insert_test_document(&db, "tagged", "otter content too").0;
+		add_tag(&db, tagged, "lab-meeting").unwrap();
+
+		ensure_vec_claims_table(&db, 4).unwrap();
+		for offset in 0..3 {
+			let claim = insert_claim(&db, untagged, None, None, &format!("Otters {}.", offset), "m", "h").unwrap();
+			insert_claim_embedding(&db, claim, &[1.0, 0.01 * offset as f32, 0.0, 0.0]).unwrap();
+		}
+		let tagged_claim = insert_claim(&db, tagged, None, None, "Otters hold hands.", "m", "h").unwrap();
+		insert_claim_embedding(&db, tagged_claim, &[0.5, 0.5, 0.0, 0.0]).unwrap();
+		let query = vec![1.0, 0.0, 0.0, 0.0];
+
+		let results = find_similar_claims(&db, &query, 1, &[], &["lab-meeting".to_string()]).unwrap();
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].claim_id, tagged_claim);
+	}
+
+	#[test]
+	fn tag_conditions_number_placeholders_after_existing_params() {
+		let mut conditions = vec!["x = ?1".to_string()];
+		let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(1_i64)];
+		push_tag_conditions(
+			&mut conditions, &mut params,
+			&["junk".to_string(), "superseded".to_string()], &["lab-meeting".to_string()],
+		);
+		assert_eq!(params.len(), 4);
+		assert!(conditions[1].starts_with("NOT EXISTS") && conditions[1].contains("?2, ?3"));
+		assert!(conditions[2].starts_with("EXISTS") && conditions[2].contains("(?4)"));
+	}
+
+	#[test]
+	fn initialize_normalizes_t_separated_clip_dates() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "synced", "body").0;
+		db.execute("UPDATE documents SET clip_date = '2026-10-14T09:00:00' WHERE id = ?1", [doc_id]).unwrap();
+		db.execute("UPDATE entries SET clip_date = '2026-10-14T09:00:00' WHERE document_id = ?1", [doc_id]).unwrap();
+		initialize(&db).unwrap();
+		let document_date: String = db.query_row("SELECT clip_date FROM documents WHERE id = ?1", [doc_id], |row| row.get(0)).unwrap();
+		let entry_date: String = db.query_row("SELECT clip_date FROM entries WHERE document_id = ?1", [doc_id], |row| row.get(0)).unwrap();
+		assert_eq!(document_date, "2026-10-14 09:00:00");
+		assert_eq!(entry_date, "2026-10-14 09:00:00");
 	}
 
 	#[test]

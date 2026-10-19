@@ -57,11 +57,46 @@ pub struct Doctype {
 struct ConfigToml {
 	#[serde(default)]
 	doctype: Vec<DoctypeToml>,
+	#[serde(default)]
+	mcp: McpConfig,
 }
 
 #[derive(Debug)]
 pub struct Config {
 	pub doctypes: Vec<Doctype>,
+	pub mcp: McpConfig,
+}
+
+/// Result sizing for `what-was-said mcp`. Searches are for choosing documents
+/// to open, so they return a few short excerpts rather than the passages.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpConfig {
+	pub search_documents: usize,
+	pub max_search_documents: usize,
+	pub hits_per_document: usize,
+	pub hit_chars: usize,
+	pub list_limit: usize,
+	pub max_list_limit: usize,
+	pub claims_limit: usize,
+	pub max_claims_limit: usize,
+	pub document_chars: usize,
+}
+
+impl Default for McpConfig {
+	fn default() -> Self {
+		McpConfig {
+			search_documents: 5,
+			max_search_documents: 15,
+			hits_per_document: 2,
+			hit_chars: 1000,
+			list_limit: 20,
+			max_list_limit: 100,
+			claims_limit: 10,
+			max_claims_limit: 30,
+			document_chars: 24_000,
+		}
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -144,7 +179,7 @@ impl Config {
 				extract: entry.extract,
 			});
 		}
-		Ok(Config { doctypes })
+		Ok(Config { doctypes, mcp: raw.mcp })
 	}
 
 	pub fn detect(&self, source_title: &str, file_extension: Option<&str>) -> Option<DoctypeMatch> {
@@ -376,6 +411,11 @@ impl TagConfig {
 
 	pub fn expanded_default_exclude(&self) -> Vec<String> {
 		self.expand_filter_tags(&self.default_exclude)
+	}
+
+	/// Normalized the way stored tags are, then expanded through `[includes]`.
+	pub fn expand_required_tag(&self, tag: &str) -> Vec<String> {
+		self.expand_filter_tags(&[tag.trim().to_lowercase()])
 	}
 
 	pub fn doc_matches_filter(&self, doc_tags: &[String], filter_tag: &str) -> bool {
@@ -905,5 +945,24 @@ mod tag_filter_tests {
 			colors: HashMap::new(),
 		};
 		assert_eq!(tag_config.expanded_default_exclude(), vec!["parent", "child"]);
+	}
+}
+
+#[cfg(test)]
+mod mcp_config_tests {
+	use super::*;
+
+	#[test]
+	fn mcp_section_overrides_only_named_fields() {
+		let config = Config::parse("[mcp]\nhit_chars = 500\nsearch_documents = 3\n").unwrap();
+		assert_eq!(config.mcp.hit_chars, 500);
+		assert_eq!(config.mcp.search_documents, 3);
+		assert_eq!(config.mcp.document_chars, McpConfig::default().document_chars);
+		assert_eq!(Config::parse("").unwrap().mcp, McpConfig::default());
+	}
+
+	#[test]
+	fn mcp_section_rejects_misspelled_keys() {
+		assert!(Config::parse("[mcp]\nhit_char = 500\n").is_err());
 	}
 }

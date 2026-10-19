@@ -6,8 +6,6 @@ Test data and parser scripts for what-was-said ingestion.
 
 ```bash
 # from the repo root
-pip install -r examples/parsers/requirements.txt
-
 what-was-said --config examples ingest examples/inbox/email/
 what-was-said --config examples ingest examples/inbox/slack/
 what-was-said --config examples ingest examples/inbox/markdown/
@@ -29,7 +27,6 @@ examples/
 └── parsers/        # external preprocessor scripts
     ├── email_parser.py
     ├── junk.txt
-    ├── requirements.txt
     └── slack_parser.py
 ```
 

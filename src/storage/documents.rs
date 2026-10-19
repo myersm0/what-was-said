@@ -310,6 +310,25 @@ pub fn document_count(connection: &Connection) -> Result<i64> {
 	Ok(connection.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?)
 }
 
+pub fn doctype_counts(connection: &Connection) -> Result<Vec<(Option<String>, i64)>> {
+	let mut statement = connection.prepare(
+		"SELECT doctype_name, COUNT(*) FROM documents GROUP BY doctype_name ORDER BY COUNT(*) DESC",
+	)?;
+	let rows = statement
+		.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(rows)
+}
+
+pub fn clip_date_range(connection: &Connection) -> Result<Option<(String, String)>> {
+	let range: (Option<String>, Option<String>) = connection.query_row(
+		"SELECT MIN(clip_date), MAX(clip_date) FROM documents",
+		[],
+		|row| Ok((row.get(0)?, row.get(1)?)),
+	)?;
+	Ok(range.0.zip(range.1))
+}
+
 pub fn document_exists_by_path(connection: &Connection, origin_path: &str) -> Result<bool> {
 	let count: i64 = connection.query_row(
 		"SELECT COUNT(*) FROM documents WHERE origin_path = ?1",
@@ -480,6 +499,126 @@ pub fn list_documents(
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 	Ok(results)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DocumentListOrder {
+	#[default]
+	DateDescending,
+	DateAscending,
+	Title,
+}
+
+pub struct DocumentListQuery<'a> {
+	pub project: Option<&'a str>,
+	pub doctype: Option<&'a str>,
+	pub date_from: Option<&'a str>,
+	pub date_to: Option<&'a str>,
+	pub excluded_tags: &'a [String],
+	pub required_tags: &'a [String],
+	pub order: DocumentListOrder,
+	pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ListedDocument {
+	pub id: i64,
+	pub title: Option<String>,
+	pub source_title: String,
+	pub clip_date: String,
+	pub doctype_name: Option<String>,
+	pub project: Option<String>,
+	pub doc_status: Option<String>,
+	pub doc_role: Option<String>,
+	pub relative_path: Option<String>,
+	pub tags: Vec<String>,
+	pub brief_summary: Option<String>,
+	pub superseded: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub current_document_id: Option<i64>,
+}
+
+/// O(D log D) over matching documents (no clip_date index), plus two indexed
+/// subqueries per returned row. Supersession is left for the caller to fill.
+pub fn list_documents_filtered(
+	connection: &Connection,
+	query: &DocumentListQuery,
+) -> Result<Vec<ListedDocument>> {
+	let mut conditions = Vec::new();
+	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+	let bounds = [
+		("d.project =", query.project),
+		("d.doctype_name =", query.doctype),
+		("d.clip_date >=", query.date_from),
+		("d.clip_date <=", query.date_to),
+	];
+	for (comparison, value) in bounds {
+		if let Some(value) = value {
+			conditions.push(format!("{} ?{}", comparison, param_values.len() + 1));
+			param_values.push(Box::new(value.to_string()));
+		}
+	}
+	super::push_tag_conditions(&mut conditions, &mut param_values, query.excluded_tags, query.required_tags);
+
+	let order_by = match query.order {
+		DocumentListOrder::DateDescending => "d.clip_date DESC, d.id DESC",
+		DocumentListOrder::DateAscending => "d.clip_date ASC, d.id ASC",
+		DocumentListOrder::Title => "COALESCE(d.title, d.source_title) COLLATE NOCASE ASC, d.id ASC",
+	};
+	let sql = format!(
+		"SELECT d.id, d.title, d.source_title, d.clip_date, d.doctype_name,
+		        d.project, d.doc_status, d.doc_role, d.relative_path,
+		        (SELECT GROUP_CONCAT(tag, ',') FROM document_tags WHERE document_id = d.id),
+		        (SELECT dc.body FROM derived_content dc
+		         WHERE dc.document_id = d.id AND dc.content_type = 'brief' AND dc.quality = 'ok')
+		 FROM documents d
+		 {}
+		 ORDER BY {}
+		 LIMIT ?{}",
+		super::where_clause(&conditions),
+		order_by,
+		param_values.len() + 1,
+	);
+	param_values.push(Box::new(query.limit as i64));
+	let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+	let mut statement = connection.prepare(&sql)?;
+	let rows = statement
+		.query_map(param_refs.as_slice(), |row| {
+			let tags: Option<String> = row.get(9)?;
+			Ok(ListedDocument {
+				id: row.get(0)?,
+				title: row.get(1)?,
+				source_title: row.get(2)?,
+				clip_date: row.get(3)?,
+				doctype_name: row.get(4)?,
+				project: row.get(5)?,
+				doc_status: row.get(6)?,
+				doc_role: row.get(7)?,
+				relative_path: row.get(8)?,
+				tags: tags
+					.map(|t| t.split(',').map(str::to_string).collect())
+					.unwrap_or_default(),
+				brief_summary: row.get(10)?,
+				superseded: false,
+				current_document_id: None,
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(rows)
+}
+
+/// (project, doc_status, count) for every project present in the database.
+pub fn project_status_counts(connection: &Connection) -> Result<Vec<(String, String, i64)>> {
+	let mut statement = connection.prepare(
+		"SELECT project, COALESCE(doc_status, 'unknown'), COUNT(*) FROM documents
+		 WHERE project IS NOT NULL
+		 GROUP BY project, doc_status
+		 ORDER BY project",
+	)?;
+	let rows = statement
+		.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(rows)
 }
 
 #[derive(Debug, Clone, Serialize)]

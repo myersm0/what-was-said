@@ -10,6 +10,7 @@ use what_was_said::embed;
 use what_was_said::extract::{self, ExtractOptions};
 use what_was_said::ingest;
 use what_was_said::llm::LlmBackend;
+use what_was_said::mcp;
 use what_was_said::ollama::OllamaClient;
 use what_was_said::openai::OpenAiClient;
 use what_was_said::query::{self, SearchSortColumn};
@@ -117,6 +118,9 @@ enum Command {
 
 	/// Show database statistics
 	Stats,
+
+	/// Read-only MCP server on stdio, for Claude Desktop
+	Mcp,
 
 	/// Start JSON API server
 	Serve {
@@ -229,6 +233,12 @@ fn main() -> Result<()> {
 		Some(config_file.as_path()).filter(|p| p.exists()),
 	)?;
 	let mut llms = config::LlmsConfig::load(&config_dir)?;
+	if matches!(cli.command, Some(Command::Mcp)) && !db_path.exists() {
+		anyhow::bail!(
+			"no database at {}; pass --db with the absolute path of an existing database",
+			db_path.display(),
+		);
+	}
 	let connection = open_db(&db_path)?;
 	let json_output = cli.json;
 
@@ -525,10 +535,21 @@ fn main() -> Result<()> {
 				}
 			}
 		}
+		Some(Command::Mcp) => {
+			let backend = create_backend(&llms.backend)?;
+			let tag_config = config::load_tag_config(&config_dir);
+			let projects = what_was_said::projects::load_registry(&config_dir)?;
+			let context = mcp::McpContext::new(
+				connection, backend, embed_model, tag_config, projects,
+				config.mcp.clone(), db_path.display().to_string(),
+			);
+			mcp::run(context)?;
+		}
 		Some(Command::Serve { port }) => {
 			let backend = create_backend(&llms.backend)?;
-			let default_excluded_tags = config::load_tag_config(&config_dir).expanded_default_exclude();
-			serve::run(connection, backend, embed_model, port, default_excluded_tags)?;
+			let tag_config = config::load_tag_config(&config_dir);
+			let projects = what_was_said::projects::load_registry(&config_dir)?;
+			serve::run(connection, backend, embed_model, port, tag_config, projects)?;
 		}
 		Some(Command::Browse { tags, exclude, include_all }) => {
 			let backend = create_backend(&llms.backend)?;

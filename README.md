@@ -142,6 +142,11 @@ what-was-said sync --project game        # sync one project
 
 Sync ingests curated project documents from their on-disk source of truth (see [Project sync](#project-sync)). Project docs are not embedded by sync; run `embed` (and `derive`/`extract`) afterward, as with captured clips.
 
+**MCP** (see [MCP server](#mcp-server))
+```bash
+what-was-said --db /abs/path/what-was-said.db --config /abs/config/dir mcp
+```
+
 **Serve**
 ```bash
 what-was-said serve              # default port 3030
@@ -161,7 +166,7 @@ what-was-said extract --status --json
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
-The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). The `--backend`, `--ollama`, `--model`, and `--embed-model` flags override their corresponding values from `llms.toml`.
+The `--config` flag specifies the config directory (default: `~/Library/Application Support/what-was-said/` on macOS, `~/.config/what-was-said/` on Linux). The `--backend`, `--ollama`, `--model`, and `--embed-model` flags override their corresponding values from `llms.toml`.
 
 ---
 
@@ -170,8 +175,6 @@ The `--config` flag specifies the config directory (default: `~/.config/what-was
 The `examples/` directory contains sample documents, preprocessor scripts, and a config file. To ingest the demo data:
 
 ```bash
-pip install -r examples/parsers/requirements.txt
-
 what-was-said --config examples ingest examples/inbox/email/
 what-was-said --config examples ingest examples/inbox/slack/
 what-was-said --config examples ingest examples/inbox/markdown/
@@ -216,18 +219,62 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 | Endpoint | Description |
 |---|---|
-| `GET /search?q=...&sort=score\|date&author=...&date_from=...&date_to=...&project=...&include_hidden=true` | FTS5 keyword search, results grouped by document |
-| `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...&project=...&include_hidden=true` | Semantic search via embeddings, results grouped by document |
+| `GET /search?q=...&sort=score\|date&author=...&date_from=...&date_to=...&project=...&tag=...&include_hidden=true` | FTS5 keyword search, results grouped by document |
+| `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...&project=...&tag=...&include_hidden=true` | Semantic search via embeddings, results grouped by document |
+| `GET /documents?project=...&tag=...&doctype=...&date_from=...&date_to=...&sort=date\|date_asc\|title&limit=N&include_hidden=true` | Filtered document listing, newest first by default |
+| `GET /projects` | Registered projects with document counts by status |
+| `GET /tags` | Tags with counts, `[includes]` parents, and default-hidden marking |
 | `GET /get/:id` | Full document with entries and chunks |
 | `GET /entries/:doc_id` | Entries for a document |
 | `GET /claims/doc/:doc_id` | Claims extracted from a document |
-| `GET /claims/similar?q=...&limit=N&include_hidden=true` | Semantic search over claims |
+| `GET /claims/similar?q=...&limit=N&tag=...&include_hidden=true` | Semantic search over claims |
 | `GET /stats` | Database statistics |
 | `GET /derive/status` | Derivation progress |
 
-All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP status codes.
+All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP status codes; keyword input FTS5 cannot parse is a 400.
+
+`tag` keeps only documents carrying that tag or one it includes through `[includes]`. Keyword queries are plain text: each word is matched literally as a prefix (so `nrg-svc-hcpx` or `file.zip` work) and `"quoted phrases"` match as written; there are no operators. A date-only `date_to` covers that whole day.
 
 Search endpoints hide documents tagged with a default-excluded tag (`superseded`, `junk`, etc. per `tags.toml`) unless `include_hidden=true`. Direct fetches always return the requested document. Whenever a superseded document appears in a response — by opt-in, direct fetch, or a claim sourced from it — it carries `superseded: true` and `current_document_id` pointing at the family's current version, so a consumer can always route to the live document. Non-superseded documents carry `superseded: false`.
+
+---
+
+## MCP server
+
+`what-was-said mcp` runs a read-only [MCP](https://modelcontextprotocol.io) server on stdio, so Claude Desktop can query the database directly. It opens the database itself (no `serve` needed) and refuses to start if the database file doesn't exist, rather than creating an empty one.
+
+Tools: `search_keyword`, `search_semantic`, `search_claims`, `get_document`, `list_documents`, `list_projects`, `list_tags`, and `stats`. Searches return a few documents with short excerpts, sized for choosing what to open; `get_document` returns the full text up to a character budget and states how to continue past it. Superseded documents are hidden and annotated exactly as in `serve`. A `project` or `tag` value that cannot match anything is returned as a tool error naming the valid choices. If Ollama is unreachable, the semantic and claim tools return an error and the rest keep working.
+
+Register it in Claude Desktop's `claude_desktop_config.json` (Settings > Developer > Edit Config), with absolute paths throughout since Desktop launches servers with a minimal environment:
+
+```json
+{
+  "mcpServers": {
+    "what-was-said": {
+      "command": "/Users/you/.local/bin/what-was-said",
+      "args": [
+        "--db", "/Users/you/Library/Application Support/what-was-said/what-was-said.db",
+        "--config", "/Users/you/Library/Application Support/what-was-said",
+        "mcp"
+      ]
+    }
+  }
+}
+```
+
+Quit Desktop fully and reopen it after editing. Diagnostics go to stderr, which Desktop writes to `~/Library/Logs/Claude/mcp-server-what-was-said.log`.
+
+Result sizes are configurable in an optional `[mcp]` section of `config.toml`; these are the defaults:
+
+```toml
+[mcp]
+search_documents = 5        # documents per search (max_search_documents = 15)
+hits_per_document = 2
+hit_chars = 1000            # characters per excerpt
+list_limit = 20             # rows per list_documents (max_list_limit = 100)
+claims_limit = 10           # (max_claims_limit = 30)
+document_chars = 24000      # get_document budget per call
+```
 
 ---
 
@@ -358,7 +405,7 @@ Manifest statuses are `canonical`, `provisional`, and `archived`. A fourth statu
 
 ## Configuration
 
-All config lives in `~/.config/what-was-said/` (override with `--config`):
+All config lives in one directory, `~/Library/Application Support/what-was-said/` on macOS or `~/.config/what-was-said/` on Linux (override with `--config`):
 
 - `config.toml` — doctype definitions and parsing rules
 - `llms.toml` — all LLM configuration: backend selection, authentication, model defaults, and per-task (derive/extract/diff) overrides
@@ -445,11 +492,11 @@ Available colors: `red`, `green`, `blue`, `cyan`, `magenta`, `yellow`, `white`, 
 
 ## Database
 
-SQLite at `~/.local/share/what-was-said/what-was-said.db`, with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`.
+SQLite at `~/Library/Application Support/what-was-said/what-was-said.db` on macOS or `~/.local/share/what-was-said/what-was-said.db` on Linux (override with `--db`), with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`.
 
 **Reset:**
 ```bash
-rm ~/.local/share/what-was-said/what-was-said.db
+rm ~/.local/share/what-was-said/what-was-said.db   # Linux; on macOS the file is in ~/Library/Application Support/what-was-said/
 ```
 
 **Rebuild embeddings:**
