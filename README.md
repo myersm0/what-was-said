@@ -492,17 +492,20 @@ Available colors: `red`, `green`, `blue`, `cyan`, `magenta`, `yellow`, `white`, 
 
 ## Database
 
-SQLite at `~/Library/Application Support/what-was-said/what-was-said.db` on macOS or `~/.local/share/what-was-said/what-was-said.db` on Linux (override with `--db`), with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`.
+SQLite at `~/Library/Application Support/what-was-said/what-was-said.db` on macOS or `~/.local/share/what-was-said/what-was-said.db` on Linux (override with `--db`), with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`. The schema version is kept in `PRAGMA user_version`; `mcp` and `serve` refuse a database at any other version instead of migrating it.
+
+The first `embed` run records its model in the `meta` table, and from then on `embed` and every semantic search refuse a different configured `embed_model`, since vectors from different models can't be compared. A query whose dimension differs from the stored vectors is refused the same way.
 
 **Reset:**
 ```bash
 rm ~/.local/share/what-was-said/what-was-said.db   # Linux; on macOS the file is in ~/Library/Application Support/what-was-said/
 ```
 
-**Rebuild embeddings:**
+**Rebuild embeddings** (also the way to switch embedding models):
 ```sql
 DROP TABLE vec_chunks;
 DROP TABLE IF EXISTS vec_claims;
+DELETE FROM meta WHERE key = 'embedding_model';
 ```
 ```bash
 what-was-said embed

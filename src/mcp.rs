@@ -259,13 +259,14 @@ impl McpContext {
 				return Err("Semantic search is unavailable: no chunk embeddings exist yet (the user runs \
 					`what-was-said embed`). Use search_keyword or list_documents.".to_string());
 			}
+			storage::check_embedding_model(&connection, &self.embed_model).map_err(embedding_failure)?;
 			self.resolve_scope(&connection, params.scope.into_input())?
 		};
 		let embedding = self.embed_query(&query_text)?;
 		let chunk_limit = documents * self.sizing.hits_per_document * 3;
 		let connection = self.lock()?;
 		let results = query::find_similar_grouped_filtered(&connection, &embedding, chunk_limit, &scope.filters)
-			.map_err(internal)?;
+			.map_err(embedding_failure)?;
 		Ok(self.render_search("semantic", &query_text, scope.applied, results, documents, false, &[
 			"search_keyword finds exact names and identifiers",
 		]))
@@ -283,6 +284,7 @@ impl McpContext {
 				return Err("Claim search is unavailable: no claim embeddings exist yet (the user runs \
 					`what-was-said extract` then `embed`). Use search_semantic or search_keyword.".to_string());
 			}
+			storage::check_embedding_model(&connection, &self.embed_model).map_err(embedding_failure)?;
 			self.resolve_scope(&connection, query::FilterInput {
 				tag: params.tag,
 				include_hidden: params.include_hidden.unwrap_or(false),
@@ -292,7 +294,7 @@ impl McpContext {
 		let embedding = self.embed_query(&query_text)?;
 		let connection = self.lock()?;
 		let claims = query::find_similar_claims_filtered(&connection, &embedding, limit, &scope.filters)
-			.map_err(internal)?;
+			.map_err(embedding_failure)?;
 		let mut response = json!({
 			"request": {"method": "claims", "query": query_text, "filters": scope.applied},
 			"claims": claims,
@@ -451,6 +453,7 @@ impl McpContext {
 			"chunk_embeddings": embeddings,
 			"claims": storage::claim_count(&connection).map_err(internal)?,
 			"claim_embeddings": claim_embeddings,
+			"embedding_model": storage::recorded_embedding_model(&connection).map_err(internal)?,
 			"semantic_search_available": embeddings > 0,
 			"claim_search_available": claim_embeddings > 0,
 			"clip_dates": date_range,
@@ -677,6 +680,18 @@ fn filter_failure(error: anyhow::Error) -> String {
 			"tag" => format!("{} Use an exact name from list_tags.", filter_error),
 			_ => filter_error.to_string(),
 		},
+		None => internal(error),
+	}
+}
+
+/// A stored-vector mismatch is a configuration problem the user must fix, so
+/// it is reported as such rather than as an internal error.
+fn embedding_failure(error: anyhow::Error) -> String {
+	match error.downcast_ref::<storage::EmbeddingMismatch>() {
+		Some(mismatch) => format!(
+			"Semantic search is unavailable: {}. search_keyword and list_documents still work.",
+			mismatch,
+		),
 		None => internal(error),
 	}
 }

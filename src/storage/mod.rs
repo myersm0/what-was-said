@@ -178,7 +178,7 @@ fn backfill_shingle_counts(connection: &Connection) -> Result<()> {
 
 /// Bumped whenever `migrate` changes the schema. Read-only consumers refuse a
 /// database at any other version rather than migrating it themselves.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// How long a statement waits on another process's write lock before failing.
 pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -328,6 +328,11 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 		);
 
 		CREATE INDEX IF NOT EXISTS claims_document_id ON claims(document_id);
+
+		CREATE TABLE IF NOT EXISTS meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
 
 		CREATE TABLE IF NOT EXISTS document_relations (
 			id INTEGER PRIMARY KEY,

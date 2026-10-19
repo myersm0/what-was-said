@@ -626,7 +626,7 @@ query.rs (grouping/ranking):
 
 ## Embeddings
 
-Chunk embeddings are stored in `vec_chunks`, claim embeddings in `vec_claims` — both sqlite-vec `vec0` virtual tables with cosine distance metric. Tables are created lazily on the first `what-was-said embed` run, with the embedding dimension detected from the model's response.
+Chunk embeddings are stored in `vec_chunks`, claim embeddings in `vec_claims` — both sqlite-vec `vec0` virtual tables with cosine distance metric. Tables are created lazily on the first `what-was-said embed` run, with the embedding dimension detected from the model's response. That run also records the model under `embedding_model` in the `meta` key–value table. `check_embedding_model` refuses a different configured model in `embed` and in every semantic search surface, and the search paths compare the query's dimension with the `float[N]` the vec table was declared with, so a model change can't silently produce meaningless rankings (`cosine_similarity` would otherwise truncate to the shorter vector).
 
 **Generate**: `what-was-said embed [--limit N] [--embed-model MODEL]`
 

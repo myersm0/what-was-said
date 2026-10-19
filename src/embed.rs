@@ -10,6 +10,7 @@ pub fn run(
 	embed_model: &str,
 	limit: Option<usize>,
 ) -> Result<()> {
+	storage::check_embedding_model(connection, embed_model)?;
 	let chunk_pending = storage::count_chunks_without_embeddings(connection)?;
 	let chunk_existing = storage::count_chunks_with_embeddings(connection)?;
 	println!("chunk embeddings: {} existing, {} pending", chunk_existing, chunk_pending);
@@ -22,6 +23,7 @@ pub fn run(
 		for (i, chunk) in chunks.iter().enumerate() {
 			let embedding = backend.embed(&chunk.body, embed_model)?;
 			if i == 0 {
+				storage::adopt_embedding_model(connection, embed_model, embedding.len())?;
 				storage::ensure_vec_table(connection, embedding.len())?;
 			}
 			storage::insert_embedding(connection, chunk.id, &embedding)?;
@@ -44,6 +46,7 @@ pub fn run(
 		for (i, claim) in claims.iter().enumerate() {
 			let embedding = backend.embed(&claim.content, embed_model)?;
 			if i == 0 {
+				storage::adopt_embedding_model(connection, embed_model, embedding.len())?;
 				storage::ensure_vec_claims_table(connection, embedding.len())?;
 			}
 			storage::insert_claim_embedding(connection, claim.id, &embedding)?;

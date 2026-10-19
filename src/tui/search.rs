@@ -131,6 +131,10 @@ fn run_search(app: &mut App, connection: &Connection, search_config: &SearchConf
 				app.status_message = Some("No embeddings - run 'what-was-said embed' first".to_string());
 				return Ok(());
 			}
+			if let Err(e) = storage::check_embedding_model(connection, &search_config.embed_model) {
+				app.status_message = Some(e.to_string());
+				return Ok(());
+			}
 
 			let query_embedding = match search_config.backend.embed(&app.search_query, &search_config.embed_model) {
 				Ok(emb) => emb,

@@ -79,6 +79,15 @@ fn err_query(e: anyhow::Error) -> ApiError {
 	err_500(e)
 }
 
+/// A configured embed model that doesn't match the stored vectors is a 503:
+/// semantic search stays unavailable until the configuration is fixed.
+fn err_embedding(e: anyhow::Error) -> ApiError {
+	match e.downcast_ref::<storage::EmbeddingMismatch>() {
+		Some(mismatch) => err_503(mismatch.to_string()),
+		None => err_500(e),
+	}
+}
+
 fn err_400(msg: impl Into<String>) -> ApiError {
 	(StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg.into()})))
 }
@@ -156,6 +165,7 @@ async fn similar_handler(
 		if !storage::vec_table_exists(&connection) {
 			return Err(err_503("no embeddings yet - run 'what-was-said embed' first"));
 		}
+		storage::check_embedding_model(&connection, &state.embed_model).map_err(err_embedding)?;
 		state.resolve(&connection, FilterInput {
 			author: params.author,
 			date_from: params.date_from,
@@ -169,7 +179,7 @@ async fn similar_handler(
 	let connection = state.lock()?;
 	let results = query::find_similar_grouped_filtered(
 		&connection, &query_embedding, limit, &filters,
-	).map_err(err_500)?;
+	).map_err(err_embedding)?;
 	Ok(Json(results))
 }
 
@@ -326,6 +336,7 @@ async fn similar_claims_handler(
 		if !storage::vec_claims_table_exists(&connection) {
 			return Err(err_503("no claim embeddings yet - run 'what-was-said extract' then 'what-was-said embed'"));
 		}
+		storage::check_embedding_model(&connection, &state.embed_model).map_err(err_embedding)?;
 		state.resolve(&connection, FilterInput {
 			tag: params.tag,
 			include_hidden: params.include_hidden.unwrap_or(false),
@@ -335,7 +346,7 @@ async fn similar_claims_handler(
 	let query_embedding = state.embed(&params.q)?;
 	let connection = state.lock()?;
 	let results = query::find_similar_claims_filtered(&connection, &query_embedding, limit, &filters)
-		.map_err(err_500)?;
+		.map_err(err_embedding)?;
 	Ok(Json(results))
 }
 

@@ -134,6 +134,7 @@ fn find_similar_chunks_routed(
 	filters: &PassageFilters,
 	exact_scan_max_chunks: i64,
 ) -> Result<Vec<SimilarChunk>> {
+	check_vector_dimension(connection, "vec_chunks", query_embedding.len())?;
 	let scoped = filters.project.is_some() || !filters.required_tags.is_empty();
 	let exact = scoped && count_scoped_chunks(connection, filters)? <= exact_scan_max_chunks;
 	let results = if exact {
@@ -340,6 +341,96 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 	dot / (norm_a.sqrt() * norm_b.sqrt())
 }
 
+// --- embedding model guard ---
+
+const EMBEDDING_MODEL_KEY: &str = "embedding_model";
+
+/// A query or stored vector that can't be compared with the vectors already in
+/// the database: a different model or dimension. Not fixable by retrying.
+#[derive(Debug)]
+pub struct EmbeddingMismatch(pub String);
+
+impl std::fmt::Display for EmbeddingMismatch {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(&self.0)
+	}
+}
+
+impl std::error::Error for EmbeddingMismatch {}
+
+pub fn recorded_embedding_model(connection: &Connection) -> Result<Option<String>> {
+	match connection.query_row(
+		"SELECT value FROM meta WHERE key = ?1", [EMBEDDING_MODEL_KEY], |row| row.get(0),
+	) {
+		Ok(model) => Ok(Some(model)),
+		Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+		Err(error) => Err(error.into()),
+	}
+}
+
+/// Refuses a configured embed model other than the one recorded by `embed`.
+/// Databases embedded before the model was recorded pass until the next `embed`.
+pub fn check_embedding_model(connection: &Connection, model: &str) -> Result<()> {
+	match recorded_embedding_model(connection)? {
+		Some(recorded) if recorded != model => Err(EmbeddingMismatch(format!(
+			"stored embeddings were computed with {} but the configured embed model is {}; set \
+			 embed_model back to {} (changing models means re-embedding the whole corpus; see \
+			 \"Rebuild embeddings\" in the README)",
+			recorded, model, recorded,
+		)).into()),
+		_ => Ok(()),
+	}
+}
+
+/// The `float[N]` dimension `table` was created with, if it exists.
+fn vec_table_dimension(connection: &Connection, table: &str) -> Result<Option<usize>> {
+	let sql: Option<String> = match connection.query_row(
+		"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |row| row.get(0),
+	) {
+		Ok(sql) => sql,
+		Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+		Err(error) => return Err(error.into()),
+	};
+	Ok(sql.and_then(|sql| {
+		let start = sql.find("float[")? + "float[".len();
+		let end = start + sql[start..].find(']')?;
+		sql[start..end].trim().parse().ok()
+	}))
+}
+
+fn check_vector_dimension(connection: &Connection, table: &str, dimension: usize) -> Result<()> {
+	match vec_table_dimension(connection, table)? {
+		Some(declared) if declared != dimension => Err(EmbeddingMismatch(format!(
+			"{} holds {}-dimension vectors but the query embedding has {}; the configured embed \
+			 model is not the one the corpus was embedded with",
+			table, declared, dimension,
+		)).into()),
+		_ => Ok(()),
+	}
+}
+
+/// Called by `embed` once it knows the model's dimension: checks the model and
+/// dimension against what is stored, then records the model if nothing was.
+pub fn adopt_embedding_model(connection: &Connection, model: &str, dimension: usize) -> Result<()> {
+	check_embedding_model(connection, model)?;
+	check_vector_dimension(connection, "vec_chunks", dimension)?;
+	check_vector_dimension(connection, "vec_claims", dimension)?;
+	if recorded_embedding_model(connection)?.is_none() {
+		if count_chunks_with_embeddings(connection)? + count_claims_with_embeddings(connection)? > 0 {
+			eprintln!(
+				"recording {} as the embedding model; existing vectors predate model tracking and are \
+				 assumed to come from it",
+				model,
+			);
+		}
+		connection.execute(
+			"INSERT INTO meta (key, value) VALUES (?1, ?2)",
+			params![EMBEDDING_MODEL_KEY, model],
+		)?;
+	}
+	Ok(())
+}
+
 // --- vec_claims ---
 
 pub fn vec_claims_table_exists(connection: &Connection) -> bool {
@@ -439,6 +530,7 @@ pub fn find_similar_claims(
 	excluded_tags: &[String],
 	required_tags: &[String],
 ) -> Result<Vec<SimilarClaim>> {
+	check_vector_dimension(connection, "vec_claims", query_embedding.len())?;
 	let has_post_knn_filter = !excluded_tags.is_empty() || !required_tags.is_empty();
 	let fetch_limit = if has_post_knn_filter { limit * 5 } else { limit };
 	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
@@ -581,5 +673,33 @@ mod tests {
 			let documents: Vec<i64> = results.iter().map(|r| r.document_id).collect();
 			assert_eq!(documents, vec![in_project], "threshold {}", exact_scan_max_chunks);
 		}
+	}
+
+	#[test]
+	fn embedding_model_is_recorded_once_and_enforced() {
+		let db = setup_db();
+		check_embedding_model(&db, "model-a").unwrap();
+		adopt_embedding_model(&db, "model-a", 4).unwrap();
+		assert_eq!(recorded_embedding_model(&db).unwrap().as_deref(), Some("model-a"));
+		adopt_embedding_model(&db, "model-a", 4).unwrap();
+
+		let error = check_embedding_model(&db, "model-b").unwrap_err();
+		assert!(error.downcast_ref::<EmbeddingMismatch>().is_some());
+		assert!(error.to_string().contains("model-a"), "{}", error);
+		assert!(adopt_embedding_model(&db, "model-b", 4).is_err());
+	}
+
+	#[test]
+	fn mismatched_dimensions_are_refused_before_searching() {
+		let db = setup_db();
+		ensure_vec_table(&db, 4).unwrap();
+		insert_embedded_document(&db, "doc", &[1.0, 0.0, 0.0, 0.0]);
+		assert_eq!(vec_table_dimension(&db, "vec_chunks").unwrap(), Some(4));
+		assert_eq!(vec_table_dimension(&db, "vec_claims").unwrap(), None);
+
+		let error = find_similar_chunks(&db, &[1.0, 0.0, 0.0], 5).unwrap_err();
+		assert!(error.downcast_ref::<EmbeddingMismatch>().is_some(), "{}", error);
+		assert!(adopt_embedding_model(&db, "model-a", 3).is_err());
+		assert!(adopt_embedding_model(&db, "model-a", 4).is_ok());
 	}
 }

@@ -366,6 +366,7 @@ fn main() -> Result<()> {
 						anyhow::bail!("no embeddings yet - run 'what-was-said embed' first");
 					}
 
+					storage::check_embedding_model(&connection, &embed_model)?;
 					let backend = create_backend(&llms.backend)?;
 					let query_embedding = backend.embed(&query, &embed_model)?;
 					let results = query::find_similar_grouped_filtered(&connection, &query_embedding, 10, &filters)?;
