@@ -31,6 +31,8 @@ pub struct ChunkSearchResult {
 	pub heading_title: Option<String>,
 	pub rank: f64,
 	pub doc_status: Option<String>,
+	/// The document's latest capture; `clip_date` is this entry's first.
+	pub document_clip_date: String,
 }
 
 /// Plain text to an FTS5 expression. "Quoted phrases" stay phrases; every other
@@ -101,7 +103,7 @@ pub fn raw_fts_search(
 		"SELECT c.id, c.entry_id, e.document_id, c.body, c.chunk_index, e.position,
 		        e.author, e.source_title, e.clip_date, e.heading_title, f.rank,
 		        snippet(chunks_fts, 0, '\x02', '\x03', '\x01', 12),
-		        d.doc_status
+		        d.doc_status, d.clip_date
 		 FROM chunks_fts f
 		 JOIN chunks c ON c.id = f.rowid
 		 JOIN entries e ON e.id = c.entry_id
@@ -139,6 +141,7 @@ fn run_fts_query(
 				rank: row.get(10)?,
 				snippet: row.get(11)?,
 				doc_status: row.get(12)?,
+				document_clip_date: row.get(13)?,
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;

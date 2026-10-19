@@ -17,6 +17,7 @@ pub enum SearchSortColumn {
 pub struct GroupedSearchResult {
 	pub document_id: i64,
 	pub source_title: String,
+	/// The document's latest capture, as in listings.
 	pub clip_date: String,
 	pub best_rank: f64,
 	pub superseded: bool,
@@ -35,6 +36,9 @@ pub struct ChunkHit {
 	pub author: Option<String>,
 	pub heading_title: Option<String>,
 	pub rank: f64,
+	/// When this entry was first captured. Search date filters apply to this,
+	/// so a merged thread matches by when each message arrived.
+	pub captured: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,6 +92,9 @@ pub fn search_filtered(
 	)?;
 	let mut results = group_fts_results(rows, sort_by);
 	annotate_supersession(connection, &mut results)?;
+	if sort_by == SearchSortColumn::Score {
+		demote_superseded(&mut results);
+	}
 	Ok(results)
 }
 
@@ -113,6 +120,7 @@ pub fn find_similar_grouped_filtered(
 	)?;
 	let mut results = group_similar_results(chunks);
 	annotate_supersession(connection, &mut results)?;
+	demote_superseded(&mut results);
 	Ok(results)
 }
 
@@ -271,6 +279,24 @@ pub fn list_tags(
 	Ok(listings)
 }
 
+/// Same scale as `status_weight`: an older version's near-identical text
+/// should not outrank the current one when hidden documents are included.
+const SUPERSEDED_WEIGHT: f64 = 0.5;
+
+fn demote_superseded(results: &mut [GroupedSearchResult]) {
+	if !results.iter().any(|r| r.superseded) {
+		return;
+	}
+	for result in results.iter_mut().filter(|r| r.superseded) {
+		result.best_rank = if result.best_rank < 0.0 {
+			result.best_rank * SUPERSEDED_WEIGHT
+		} else {
+			result.best_rank / SUPERSEDED_WEIGHT
+		};
+	}
+	results.sort_by(|a, b| a.best_rank.partial_cmp(&b.best_rank).unwrap_or(std::cmp::Ordering::Equal));
+}
+
 fn annotate_supersession(
 	connection: &Connection,
 	results: &mut [GroupedSearchResult],
@@ -308,6 +334,7 @@ pub fn group_fts_results(
 			author: row.author,
 			heading_title: row.heading_title,
 			rank: row.rank,
+			captured: row.clip_date,
 		};
 		match grouped.iter_mut().find(|d| d.document_id == row.document_id) {
 			Some(doc) => {
@@ -328,7 +355,7 @@ pub fn group_fts_results(
 			None => grouped.push(GroupedSearchResult {
 				document_id: row.document_id,
 				source_title: row.source_title,
-				clip_date: row.clip_date,
+				clip_date: row.document_clip_date,
 				best_rank: weighted_rank,
 				superseded: false,
 				current_document_id: None,
@@ -372,6 +399,7 @@ pub fn group_similar_results(
 			author: chunk.author,
 			heading_title: None,
 			rank,
+			captured: chunk.clip_date,
 		};
 
 		match grouped.iter_mut().find(|d| d.document_id == chunk.document_id) {
@@ -384,7 +412,7 @@ pub fn group_similar_results(
 			None => grouped.push(GroupedSearchResult {
 				document_id: chunk.document_id,
 				source_title: chunk.source_title,
-				clip_date: chunk.clip_date,
+				clip_date: chunk.document_clip_date,
 				best_rank: weighted_rank,
 				superseded: false,
 				current_document_id: None,
@@ -454,6 +482,7 @@ mod tests {
 			heading_title: None,
 			rank,
 			doc_status: None,
+			document_clip_date: date.to_string(),
 		}
 	}
 
@@ -503,18 +532,21 @@ mod tests {
 				clip_date: "2024-01-01".into(), body: "first".into(),
 				similarity: 0.9, author: None, entry_position: 0, chunk_index: 0,
 				doc_status: None, project: None, start_char: 0, end_char: 0,
+				document_clip_date: "2024-02-01".into(),
 			},
 			storage::SimilarChunk {
 				chunk_id: 2, document_id: 1, source_title: "Doc A".into(),
 				clip_date: "2024-01-01".into(), body: "second".into(),
 				similarity: 0.7, author: None, entry_position: 1, chunk_index: 0,
 				doc_status: None, project: None, start_char: 0, end_char: 0,
+				document_clip_date: "2024-02-01".into(),
 			},
 			storage::SimilarChunk {
 				chunk_id: 3, document_id: 2, source_title: "Doc B".into(),
 				clip_date: "2024-02-01".into(), body: "other".into(),
 				similarity: 0.8, author: None, entry_position: 0, chunk_index: 0,
 				doc_status: None, project: None, start_char: 0, end_char: 0,
+				document_clip_date: "2024-02-01".into(),
 			},
 		];
 		let grouped = group_similar_results(chunks);
@@ -555,7 +587,7 @@ mod visibility_tests {
 	use super::*;
 	use crate::chunking;
 	use crate::minhash;
-	use crate::types::{MergeStrategy, SegmentedEntry};
+	use crate::types::{DocumentId, MergeStrategy, SegmentedEntry};
 
 	fn setup_db() -> Connection {
 		unsafe {
@@ -962,5 +994,64 @@ mod visibility_tests {
 		assert!(find("x-frontend").documents_with_includes.is_none());
 		assert!(find("superseded").hidden_by_default);
 		assert!(!find("x-backend").hidden_by_default);
+	}
+
+	/// A positional merge: a later clip appends an entry and moves the
+	/// document's clip_date forward.
+	fn append_clip(connection: &Connection, document_id: i64, position: u32, body: &str, clip_date: &str) {
+		let entry = SegmentedEntry {
+			start_line: 1,
+			end_line: 1,
+			body: body.to_string(),
+			author: None,
+			timestamp: None,
+			is_quote: false,
+			heading_level: None,
+			heading_title: None,
+		};
+		let entry_id = storage::insert_entry(
+			connection, DocumentId(document_id), &entry, position, "thread", clip_date, "/test2", &minhash::minhash(body),
+		).unwrap();
+		storage::insert_chunks(connection, entry_id, &chunking::chunk_text(body)).unwrap();
+		storage::update_document_clip_date(connection, document_id, clip_date, "filename").unwrap();
+	}
+
+	#[test]
+	fn search_reports_document_date_and_filters_by_entry_capture() {
+		let db = setup_db();
+		let thread = insert_document(&db, "thread", "lemurs groom each other at dawn", "2026-04-07 15:42:00");
+		append_clip(&db, thread, 1, "the keeper fed the lemurs bananas", "2026-04-07 17:02:08");
+
+		let results = search_filtered(&db, "lemurs", SearchSortColumn::Score, &SearchFilters::default()).unwrap();
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].clip_date, "2026-04-07 17:02:08");
+		let mut captured: Vec<&str> = results[0].chunks.iter().map(|c| c.captured.as_str()).collect();
+		captured.sort();
+		assert_eq!(captured, vec!["2026-04-07 15:42:00", "2026-04-07 17:02:08"]);
+
+		let early = SearchFilters { date_to: Some("2026-04-07 16:00:00".into()), ..Default::default() };
+		let results = search_filtered(&db, "lemurs", SearchSortColumn::Score, &early).unwrap();
+		assert_eq!(results[0].chunks.len(), 1);
+		assert_eq!(results[0].chunks[0].captured, "2026-04-07 15:42:00");
+		assert_eq!(results[0].clip_date, "2026-04-07 17:02:08");
+
+		embed_all_chunks(&db, |_| vec![1.0, 0.0, 0.0, 0.0]);
+		let similar = find_similar_grouped_filtered(&db, &[1.0, 0.0, 0.0, 0.0], 5, &SearchFilters::default()).unwrap();
+		assert_eq!(similar[0].clip_date, "2026-04-07 17:02:08");
+	}
+
+	#[test]
+	fn current_version_outranks_identical_superseded_version() {
+		let db = setup_db();
+		let old_version = insert_document(&db, "notes v1", "capybara census results", "2024-01-01 00:00:00");
+		let new_version = insert_document(&db, "notes v2", "capybara census results", "2024-02-01 00:00:00");
+		make_family(&db, new_version, old_version);
+
+		let keyword = search_filtered(&db, "capybara", SearchSortColumn::Score, &SearchFilters::default()).unwrap();
+		assert_eq!(keyword.iter().map(|r| r.document_id).collect::<Vec<_>>(), vec![new_version, old_version]);
+
+		embed_all_chunks(&db, |_| vec![1.0, 0.0, 0.0, 0.0]);
+		let semantic = find_similar_grouped_filtered(&db, &[1.0, 0.0, 0.0, 0.0], 5, &SearchFilters::default()).unwrap();
+		assert_eq!(semantic.iter().map(|r| r.document_id).collect::<Vec<_>>(), vec![new_version, old_version]);
 	}
 }

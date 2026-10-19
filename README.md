@@ -166,7 +166,7 @@ what-was-said extract --status --json
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
-The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). The `--backend`, `--ollama`, `--model`, and `--embed-model` flags override their corresponding values from `llms.toml`.
+The `--config` flag specifies the config directory (default: `~/Library/Application Support/what-was-said/` on macOS, `~/.config/what-was-said/` on Linux). The `--backend`, `--ollama`, `--model`, and `--embed-model` flags override their corresponding values from `llms.toml`.
 
 ---
 
@@ -405,7 +405,7 @@ Manifest statuses are `canonical`, `provisional`, and `archived`. A fourth statu
 
 ## Configuration
 
-All config lives in `~/.config/what-was-said/` (override with `--config`):
+All config lives in one directory, `~/Library/Application Support/what-was-said/` on macOS or `~/.config/what-was-said/` on Linux (override with `--config`):
 
 - `config.toml` — doctype definitions and parsing rules
 - `llms.toml` — all LLM configuration: backend selection, authentication, model defaults, and per-task (derive/extract/diff) overrides
@@ -492,11 +492,11 @@ Available colors: `red`, `green`, `blue`, `cyan`, `magenta`, `yellow`, `white`, 
 
 ## Database
 
-SQLite at `~/.local/share/what-was-said/what-was-said.db`, with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`.
+SQLite at `~/Library/Application Support/what-was-said/what-was-said.db` on macOS or `~/.local/share/what-was-said/what-was-said.db` on Linux (override with `--db`), with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`.
 
 **Reset:**
 ```bash
-rm ~/.local/share/what-was-said/what-was-said.db
+rm ~/.local/share/what-was-said/what-was-said.db   # Linux; on macOS the file is in ~/Library/Application Support/what-was-said/
 ```
 
 **Rebuild embeddings:**

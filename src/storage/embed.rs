@@ -100,6 +100,8 @@ pub struct SimilarChunk {
 	pub project: Option<String>,
 	pub start_char: usize,
 	pub end_char: usize,
+	/// The document's latest capture; `clip_date` is this entry's first.
+	pub document_clip_date: String,
 }
 
 pub fn find_similar_chunks(
@@ -203,7 +205,7 @@ fn find_similar_chunks_knn(
 		)
 		SELECT knn.chunk_id, knn.distance, c.body, e.document_id,
 		       e.source_title, e.clip_date, e.author, e.position, c.chunk_index,
-		       d.doc_status, d.project, c.start_char, c.end_char
+		       d.doc_status, d.project, c.start_char, c.end_char, d.clip_date
 		FROM knn
 		JOIN chunks c ON c.id = knn.chunk_id
 		JOIN entries e ON e.id = c.entry_id
@@ -241,7 +243,7 @@ fn find_similar_chunks_exact(
 	let sql = format!(
 		"SELECT v.chunk_id, v.embedding, c.body, e.document_id,
 		        e.source_title, e.clip_date, e.author, e.position, c.chunk_index,
-		        d.doc_status, d.project, c.start_char, c.end_char
+		        d.doc_status, d.project, c.start_char, c.end_char, d.clip_date
 		 FROM chunks c
 		 JOIN entries e ON e.id = c.entry_id
 		 JOIN documents d ON d.id = e.document_id
@@ -276,6 +278,7 @@ fn similar_chunk_from_row(row: &rusqlite::Row, similarity: f32) -> rusqlite::Res
 		project: row.get(10)?,
 		start_char: row.get(11)?,
 		end_char: row.get(12)?,
+		document_clip_date: row.get(13)?,
 	})
 }
 

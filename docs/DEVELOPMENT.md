@@ -116,7 +116,7 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 ### main.rs
 CLI parsing via clap derive API and command dispatch. Registers the sqlite-vec extension via `sqlite3_auto_extension`. Contains `open_db()` for connection setup and `create_backend()` factory that returns `Box<dyn LlmBackend>` based on `BackendConfig`.
 
-The `--config` flag specifies the config directory (default: `~/.config/what-was-said/`). `LlmsConfig::load` reads all LLM configuration (backend, auth, model defaults, and per-task overrides) from `llms.toml` within this directory, falling back to the legacy `backend.toml`/`derive.toml`/`extract.toml` files when `llms.toml` is absent. CLI flags (`--backend`, `--ollama`, `--model`, `--embed-model`) are optional overrides; `--model` overrides both the general and diff models. All CLI backend/model flags are `Option<String>` — no hardcoded defaults in clap.
+The `--config` flag specifies the config directory (default: `dirs::config_dir()/what-was-said`, i.e. `~/Library/Application Support/what-was-said/` on macOS and `~/.config/what-was-said/` on Linux). `LlmsConfig::load` reads all LLM configuration (backend, auth, model defaults, and per-task overrides) from `llms.toml` within this directory, falling back to the legacy `backend.toml`/`derive.toml`/`extract.toml` files when `llms.toml` is absent. CLI flags (`--backend`, `--ollama`, `--model`, `--embed-model`) are optional overrides; `--model` overrides both the general and diff models. All CLI backend/model flags are `Option<String>` — no hardcoded defaults in clap.
 
 Subcommands: ingest (file or directory), about (with `--method=[exact|semantic]`), in, dump, stats, embed, derive, extract, diff, relations repair (with `--family`), relations scan, serve, sync, browse (default).
 
@@ -672,7 +672,7 @@ The embed command processes chunks first, then claims, with separate progress re
 
 13. **Paragraph-aware chunking**: Chunk boundary detection recognizes both sentence-ending punctuation (`.!?`) and paragraph breaks (`\n\n`) as snap points. This prevents documents without terminal punctuation (bullet lists, notes, code-heavy content) from producing oversized single chunks.
 
-14. **Config-directory convention**: All configuration files (`config.toml`, `llms.toml`, `tags.toml`, themes) live in a single config directory (default `~/.config/what-was-said/`), overridable with `--config`. This allows multiple configurations (e.g. personal vs. work) by pointing at different directories.
+14. **Config-directory convention**: All configuration files (`config.toml`, `llms.toml`, `tags.toml`, themes) live in a single config directory (default `dirs::config_dir()/what-was-said`: `~/Library/Application Support/` on macOS, `~/.config/` on Linux), overridable with `--config`. This allows multiple configurations (e.g. personal vs. work) by pointing at different directories.
 
 15. **Claim extraction with adaptive prompt**: A single prompt handles all document types. The LLM adapts its extraction to whatever is substantive in the text rather than following per-domain rules. Source-format framings (email attribution, voice memo context) are retained as structural hints only. No stored classification — testing showed models are weak at it, and the claim text itself is the representation.
 
@@ -725,7 +725,7 @@ Two guarantees: (1) documents carrying a default-excluded tag are hidden from ev
 
 ## Common Maintenance Tasks
 
-**Reset database**: Delete `~/.local/share/what-was-said/what-was-said.db`
+**Reset database**: Delete `what-was-said.db` under `dirs::data_dir()/what-was-said` (`~/Library/Application Support/` on macOS, `~/.local/share/` on Linux)
 
 **Re-embed everything**: `DROP TABLE vec_chunks; DROP TABLE IF EXISTS vec_claims;` in sqlite3, then `what-was-said embed`
 

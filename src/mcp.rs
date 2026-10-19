@@ -20,8 +20,15 @@ const PROJECT_DESCRIPTION: &str = "Exact identifier of a registered curated proj
 const TAG_DESCRIPTION: &str = "Only documents carrying this tag, or a tag it includes. Use an exact \
 	name from list_tags.";
 const AUTHOR_DESCRIPTION: &str = "Case-insensitive substring of a message author's name.";
-const DATE_FROM_DESCRIPTION: &str = "Earliest clip date, YYYY-MM-DD, inclusive.";
-const DATE_TO_DESCRIPTION: &str = "Latest clip date, YYYY-MM-DD, inclusive.";
+const DATE_FROM_DESCRIPTION: &str = "YYYY-MM-DD, inclusive. Matches passages captured on or after \
+	this date. A thread or page clipped repeatedly has passages captured at different times, so a hit's \
+	`captured` date can be earlier than its document's clip_date (the latest capture).";
+const DATE_TO_DESCRIPTION: &str = "YYYY-MM-DD, inclusive. Matches passages captured on or before \
+	this date.";
+const LIST_DATE_FROM_DESCRIPTION: &str = "YYYY-MM-DD, inclusive. Documents whose clip_date (latest \
+	capture) is on or after this date.";
+const LIST_DATE_TO_DESCRIPTION: &str = "YYYY-MM-DD, inclusive. Documents whose clip_date (latest \
+	capture) is on or before this date.";
 const INCLUDE_HIDDEN_DESCRIPTION: &str = "Also return documents hidden by default: superseded older \
 	versions and anything tagged junk or archived. Default false.";
 
@@ -119,9 +126,9 @@ pub struct ListParams {
 	pub tag: Option<String>,
 	/// Exact doctype name, e.g. "email" or "slack"; see stats for the doctypes present.
 	pub doctype: Option<String>,
-	#[schemars(description = DATE_FROM_DESCRIPTION)]
+	#[schemars(description = LIST_DATE_FROM_DESCRIPTION)]
 	pub date_from: Option<String>,
-	#[schemars(description = DATE_TO_DESCRIPTION)]
+	#[schemars(description = LIST_DATE_TO_DESCRIPTION)]
 	pub date_to: Option<String>,
 	/// "date" (newest first, the default), "date_asc" (oldest first) or "title".
 	pub sort: Option<ListSort>,
@@ -165,6 +172,9 @@ struct HitOut {
 	heading: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	author: Option<String>,
+	/// Only when this passage was captured before the document's clip_date.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	captured: Option<String>,
 	excerpt: String,
 }
 
@@ -581,6 +591,7 @@ impl McpContext {
 }
 
 fn shape_document(result: GroupedSearchResult, hits: usize, hit_chars: usize, anchored: bool) -> SearchDocumentOut {
+	let document_date = result.clip_date;
 	let mut chunks = result.chunks;
 	chunks.sort_by(|a, b| a.rank.partial_cmp(&b.rank).unwrap_or(std::cmp::Ordering::Equal));
 	let more_hits = chunks.len().saturating_sub(hits);
@@ -592,6 +603,7 @@ fn shape_document(result: GroupedSearchResult, hits: usize, hit_chars: usize, an
 			HitOut {
 				heading: chunk.heading_title,
 				author: chunk.author,
+				captured: (chunk.captured != document_date).then_some(chunk.captured),
 				excerpt: excerpt(
 					&chunk.chunk_body,
 					anchor.as_ref().map(|(fragment, offset)| (fragment.as_str(), *offset)),
@@ -603,7 +615,7 @@ fn shape_document(result: GroupedSearchResult, hits: usize, hit_chars: usize, an
 	SearchDocumentOut {
 		document_id: result.document_id,
 		source_title: result.source_title,
-		clip_date: result.clip_date,
+		clip_date: document_date,
 		superseded: result.superseded,
 		current_document_id: result.current_document_id,
 		hits,
@@ -811,7 +823,8 @@ impl WwsServer {
 	superseded. Curated project documents are files the user maintains, each with a status: canonical \
 	(authoritative), provisional (draft), archived, or missing (file gone).\n\nSuperseded and other \
 	hidden documents are left out of results by default. A result with superseded: true is an older \
-	version; prefer the one at current_document_id.\n\nFor 'latest', 'recent' or 'where did I leave \
+	version; prefer the one at current_document_id. A document's clip_date is its latest capture; a search \
+	hit's captured date, when shown, is when that passage first arrived.\n\nFor 'latest', 'recent' or 'where did I leave \
 	off', call list_documents (newest first) rather than searching. Search results are short excerpts \
 	for choosing documents; read the best two or three with get_document before answering. Take project \
 	and tag values from list_projects and list_tags, never from the user's wording.\n\nBefore concluding \
@@ -1116,6 +1129,33 @@ mod tests {
 		assert_eq!(stats["semantic_search_available"], false);
 		assert_eq!(stats["doctypes"]["slack"], 1);
 		assert_eq!(stats["clip_dates"]["newest"], "2026-10-01 09:00:00");
+	}
+
+	#[test]
+	fn hits_captured_before_the_document_date_say_so() {
+		let db = setup_db();
+		let thread = insert_document(&db, "thread", "md5 checks on the zip packages", "2025-03-07 11:06:58");
+		let entry = SegmentedEntry {
+			start_line: 1,
+			end_line: 1,
+			body: "a later reply without the term".to_string(),
+			author: None,
+			timestamp: None,
+			is_quote: false,
+			heading_level: None,
+			heading_title: None,
+		};
+		storage::insert_entry(
+			&db, crate::types::DocumentId(thread), &entry, 1, "thread", "2025-03-07 13:33:17", "/test2",
+			&minhash::minhash(&entry.body),
+		).unwrap();
+		storage::update_document_clip_date(&db, thread, "2025-03-07 13:33:17", "filename").unwrap();
+		let context = context(db);
+
+		let response = parse(context.search_keyword(keyword("md5")));
+		let result = &response["results"][0];
+		assert_eq!(result["clip_date"], "2025-03-07 13:33:17");
+		assert_eq!(result["hits"][0]["captured"], "2025-03-07 11:06:58");
 	}
 
 	#[test]
