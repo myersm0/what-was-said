@@ -5,6 +5,8 @@ use serde::Serialize;
 use crate::storage;
 use crate::util;
 
+pub use crate::storage::{DocumentListOrder, FtsQueryError, ListedDocument};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchSortColumn {
 	Score,
@@ -45,6 +47,9 @@ pub struct SearchFilters {
 	/// `TagConfig::expand_filter_tags`. Empty means no tag-based hiding
 	/// (the `--include-all` / `include_hidden=true` case).
 	pub excluded_tags: Vec<String>,
+	/// The expanded form of one required tag (`TagConfig::expand_required_tag`):
+	/// a document passes if it carries any of these. Empty means no requirement.
+	pub required_tags: Vec<String>,
 }
 
 impl SearchFilters {
@@ -54,8 +59,8 @@ impl SearchFilters {
 	fn date_from_ref(&self) -> Option<&str> {
 		self.date_from.as_deref()
 	}
-	fn date_to_ref(&self) -> Option<&str> {
-		self.date_to.as_deref()
+	fn date_to_bound(&self) -> Option<String> {
+		self.date_to.as_deref().map(inclusive_upper_bound)
 	}
 	fn project_ref(&self) -> Option<&str> {
 		self.project.as_deref()
@@ -76,9 +81,10 @@ pub fn search_filtered(
 	sort_by: SearchSortColumn,
 	filters: &SearchFilters,
 ) -> Result<Vec<GroupedSearchResult>> {
+	let date_to = filters.date_to_bound();
 	let rows = storage::raw_fts_search(
-		connection, query, filters.author_ref(), filters.date_from_ref(), filters.date_to_ref(),
-		filters.project_ref(), &filters.excluded_tags,
+		connection, query, filters.author_ref(), filters.date_from_ref(), date_to.as_deref(),
+		filters.project_ref(), &filters.excluded_tags, &filters.required_tags,
 	)?;
 	let mut results = group_fts_results(rows, sort_by);
 	annotate_supersession(connection, &mut results)?;
@@ -99,14 +105,170 @@ pub fn find_similar_grouped_filtered(
 	limit: usize,
 	filters: &SearchFilters,
 ) -> Result<Vec<GroupedSearchResult>> {
+	let date_to = filters.date_to_bound();
 	let chunks = storage::find_similar_chunks_filtered(
 		connection, query_embedding, limit,
-		filters.author_ref(), filters.date_from_ref(), filters.date_to_ref(),
-		filters.project_ref(), &filters.excluded_tags,
+		filters.author_ref(), filters.date_from_ref(), date_to.as_deref(),
+		filters.project_ref(), &filters.excluded_tags, &filters.required_tags,
 	)?;
 	let mut results = group_similar_results(chunks);
 	annotate_supersession(connection, &mut results)?;
 	Ok(results)
+}
+
+/// Claims carry no author/date/project scoping; only the tag filters apply.
+pub fn find_similar_claims_filtered(
+	connection: &Connection,
+	query_embedding: &[f32],
+	limit: usize,
+	filters: &SearchFilters,
+) -> Result<Vec<storage::SimilarClaim>> {
+	storage::find_similar_claims(
+		connection, query_embedding, limit, &filters.excluded_tags, &filters.required_tags,
+	)
+}
+
+/// A date-only upper bound covers that whole day: '~' sorts after any time part.
+fn inclusive_upper_bound(date_to: &str) -> String {
+	if date_to.len() == 10 {
+		format!("{}~", date_to)
+	} else {
+		date_to.to_string()
+	}
+}
+
+const BRIEF_SUMMARY_CHARS: usize = 300;
+
+#[derive(Debug, Clone, Default)]
+pub struct ListFilters {
+	pub project: Option<String>,
+	pub doctype: Option<String>,
+	pub date_from: Option<String>,
+	pub date_to: Option<String>,
+	pub excluded_tags: Vec<String>,
+	pub required_tags: Vec<String>,
+}
+
+pub fn list_documents(
+	connection: &Connection,
+	filters: &ListFilters,
+	order: DocumentListOrder,
+	limit: usize,
+) -> Result<Vec<ListedDocument>> {
+	let date_to = filters.date_to.as_deref().map(inclusive_upper_bound);
+	let mut documents = storage::list_documents_filtered(connection, &storage::DocumentListQuery {
+		project: filters.project.as_deref(),
+		doctype: filters.doctype.as_deref(),
+		date_from: filters.date_from.as_deref(),
+		date_to: date_to.as_deref(),
+		excluded_tags: &filters.excluded_tags,
+		required_tags: &filters.required_tags,
+		order,
+		limit,
+	})?;
+	for document in documents.iter_mut() {
+		if let Some(brief) = document.brief_summary.as_mut() {
+			truncate_with_ellipsis(brief, BRIEF_SUMMARY_CHARS);
+		}
+		let status = storage::supersession_status(connection, document.id)?;
+		document.superseded = status.superseded;
+		document.current_document_id = status.current_document_id;
+	}
+	Ok(documents)
+}
+
+fn truncate_with_ellipsis(text: &mut String, max_chars: usize) {
+	if let Some((byte_index, _)) = text.char_indices().nth(max_chars) {
+		text.truncate(byte_index);
+		text.push('…');
+	}
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectListing {
+	pub name: String,
+	/// False for a project that has documents but is no longer in projects.toml.
+	pub registered: bool,
+	pub documents: i64,
+	pub by_status: std::collections::BTreeMap<String, i64>,
+}
+
+pub fn list_projects(
+	connection: &Connection,
+	registrations: &[crate::projects::ProjectRegistration],
+) -> Result<Vec<ProjectListing>> {
+	let mut listings: Vec<ProjectListing> = registrations
+		.iter()
+		.map(|r| ProjectListing {
+			name: r.name.clone(),
+			registered: true,
+			documents: 0,
+			by_status: Default::default(),
+		})
+		.collect();
+	for (project, status, count) in storage::project_status_counts(connection)? {
+		let index = match listings.iter().position(|l| l.name == project) {
+			Some(index) => index,
+			None => {
+				listings.push(ProjectListing {
+					name: project,
+					registered: false,
+					documents: 0,
+					by_status: Default::default(),
+				});
+				listings.len() - 1
+			}
+		};
+		let listing = &mut listings[index];
+		listing.documents += count;
+		*listing.by_status.entry(status).or_insert(0) += count;
+	}
+	Ok(listings)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TagListing {
+	pub tag: String,
+	/// Documents carrying this exact tag.
+	pub documents: i64,
+	/// Children from `[includes]`; filtering by this tag also matches them.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	pub includes: Vec<String>,
+	/// Documents matched when filtering by this tag, children included.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub documents_with_includes: Option<i64>,
+	pub hidden_by_default: bool,
+}
+
+/// Every tag in use plus every `[includes]` parent, even one no document
+/// carries directly, so a filter value never has to be guessed.
+pub fn list_tags(
+	connection: &Connection,
+	tag_config: &crate::config::TagConfig,
+) -> Result<Vec<TagListing>> {
+	let hidden = tag_config.expanded_default_exclude();
+	let mut counts: std::collections::BTreeMap<String, i64> =
+		storage::list_all_tags(connection)?.into_iter().collect();
+	for parent in tag_config.includes.keys() {
+		counts.entry(parent.clone()).or_insert(0);
+	}
+	let mut listings = Vec::with_capacity(counts.len());
+	for (tag, documents) in counts {
+		let includes = tag_config.includes.get(&tag).cloned().unwrap_or_default();
+		let documents_with_includes = if includes.is_empty() {
+			None
+		} else {
+			Some(storage::count_documents_with_any_tag(connection, &tag_config.expand_filter_tags(&[tag.clone()]))?)
+		};
+		listings.push(TagListing {
+			hidden_by_default: hidden.contains(&tag),
+			tag,
+			documents,
+			includes,
+			documents_with_includes,
+		});
+	}
+	Ok(listings)
 }
 
 fn annotate_supersession(
@@ -544,5 +706,246 @@ mod visibility_tests {
 		let results = find_similar_grouped_filtered(&db, &[1.0, 0.0, 0.0, 0.0], 10, &filters).unwrap();
 		assert_eq!(results.len(), 1);
 		assert_eq!(results[0].document_id, shown_doc);
+	}
+
+	fn embed_all_chunks(db: &Connection, embedding_for: impl Fn(i64) -> Vec<f32>) {
+		storage::ensure_vec_table(db, 4).unwrap();
+		let chunk_rows: Vec<(i64, i64)> = db.prepare(
+			"SELECT c.id, e.document_id FROM chunks c JOIN entries e ON e.id = c.entry_id",
+		).unwrap()
+			.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+			.unwrap()
+			.collect::<std::result::Result<Vec<_>, _>>()
+			.unwrap();
+		for (chunk_id, document_id) in &chunk_rows {
+			storage::insert_embedding(db, *chunk_id, &embedding_for(*document_id)).unwrap();
+		}
+	}
+
+	fn tag_config_with_includes(parent: &str, children: &[&str]) -> crate::config::TagConfig {
+		let mut includes = std::collections::HashMap::new();
+		includes.insert(parent.to_string(), children.iter().map(|c| c.to_string()).collect());
+		crate::config::TagConfig { includes, ..Default::default() }
+	}
+
+	#[test]
+	fn keyword_search_requires_tag_through_includes_expansion() {
+		let db = setup_db();
+		insert_document(&db, "loose note", "ferret husbandry", "2024-01-01 00:00:00");
+		let child_tagged = insert_document(&db, "x note", "ferret husbandry", "2024-02-01 00:00:00");
+		storage::add_tag(&db, child_tagged, "x-backend").unwrap();
+
+		let tag_config = tag_config_with_includes("project-x", &["x-frontend", "x-backend"]);
+		let filters = SearchFilters {
+			required_tags: tag_config.expand_required_tag(" Project-X "),
+			..Default::default()
+		};
+		let results = search_filtered(&db, "ferret", SearchSortColumn::Score, &filters).unwrap();
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].document_id, child_tagged);
+	}
+
+	#[test]
+	fn required_and_excluded_tags_combine() {
+		let db = setup_db();
+		let hidden = insert_document(&db, "old", "badger setts", "2024-01-01 00:00:00");
+		let shown = insert_document(&db, "new", "badger setts", "2024-02-01 00:00:00");
+		for id in [hidden, shown] {
+			storage::add_tag(&db, id, "fieldwork").unwrap();
+		}
+		storage::add_tag(&db, hidden, "junk").unwrap();
+
+		let filters = SearchFilters {
+			excluded_tags: vec!["junk".to_string()],
+			required_tags: vec!["fieldwork".to_string()],
+			..Default::default()
+		};
+		let results = search_filtered(&db, "badger", SearchSortColumn::Score, &filters).unwrap();
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].document_id, shown);
+	}
+
+	#[test]
+	fn semantic_search_requires_tag_without_project() {
+		let db = setup_db();
+		let untagged = insert_document(&db, "near", "stoat notes", "2024-01-01 00:00:00");
+		let tagged = insert_document(&db, "far", "stoat notes again", "2024-02-01 00:00:00");
+		storage::add_tag(&db, tagged, "lab-meeting").unwrap();
+		embed_all_chunks(&db, |document_id| {
+			if document_id == untagged { vec![1.0, 0.0, 0.0, 0.0] } else { vec![0.5, 0.5, 0.0, 0.0] }
+		});
+
+		let filters = SearchFilters { required_tags: vec!["lab-meeting".to_string()], ..Default::default() };
+		let results = find_similar_grouped_filtered(&db, &[1.0, 0.0, 0.0, 0.0], 1, &filters).unwrap();
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].document_id, tagged);
+		assert!(!results[0].superseded);
+	}
+
+	#[test]
+	fn malformed_keyword_input_is_a_typed_client_error() {
+		let db = setup_db();
+		insert_document(&db, "montre note", "montre strap repair", "2024-01-01 00:00:00");
+		for bad_query in ["project:montre", "\"unbalanced"] {
+			let error = search_filtered(&db, bad_query, SearchSortColumn::Score, &SearchFilters::default())
+				.err()
+				.unwrap_or_else(|| panic!("expected an error for {:?}", bad_query));
+			let fts_error = error.downcast_ref::<FtsQueryError>()
+				.unwrap_or_else(|| panic!("expected FtsQueryError for {:?}, got {}", bad_query, error));
+			assert_eq!(fts_error.query, bad_query);
+		}
+		let plain = search_filtered(&db, "project montre", SearchSortColumn::Score, &SearchFilters::default()).unwrap();
+		assert!(plain.is_empty());
+		let found = search_filtered(&db, "montre", SearchSortColumn::Score, &SearchFilters::default()).unwrap();
+		assert_eq!(found.len(), 1);
+	}
+
+	fn listed_ids(db: &Connection, filters: &ListFilters, order: DocumentListOrder, limit: usize) -> Vec<i64> {
+		list_documents(db, filters, order, limit).unwrap().iter().map(|d| d.id).collect()
+	}
+
+	#[test]
+	fn listing_sorts_by_date_both_ways_and_by_title_and_honors_limit() {
+		let db = setup_db();
+		let middle = insert_document(&db, "alpha", "x", "2024-02-01 00:00:00");
+		let oldest = insert_document(&db, "Charlie", "x", "2024-01-01 00:00:00");
+		let newest = insert_document(&db, "Bravo", "x", "2024-03-01 00:00:00");
+		let all = ListFilters::default();
+		assert_eq!(listed_ids(&db, &all, DocumentListOrder::DateDescending, 10), vec![newest, middle, oldest]);
+		assert_eq!(listed_ids(&db, &all, DocumentListOrder::DateAscending, 10), vec![oldest, middle, newest]);
+		assert_eq!(listed_ids(&db, &all, DocumentListOrder::Title, 10), vec![middle, newest, oldest]);
+		assert_eq!(listed_ids(&db, &all, DocumentListOrder::DateDescending, 2), vec![newest, middle]);
+	}
+
+	#[test]
+	fn listing_filters_alone_and_combined() {
+		let db = setup_db();
+		let meeting = insert_document(&db, "2026-10-14-lab-sync.md", "x", "2026-10-14 09:00:00");
+		let other_meeting = insert_document(&db, "2026-10-07-lab-sync.md", "x", "2026-10-07 09:00:00");
+		let email = insert_document(&db, "re: balsa", "x", "2026-10-14 15:00:00");
+		db.execute("UPDATE documents SET project = 'meetings', doc_status = 'canonical' WHERE id IN (?1, ?2)", [meeting, other_meeting]).unwrap();
+		db.execute("UPDATE documents SET doctype_name = 'email' WHERE id = ?1", [email]).unwrap();
+		storage::add_tag(&db, email, "balsa").unwrap();
+		storage::add_tag(&db, other_meeting, "balsa").unwrap();
+		let order = DocumentListOrder::DateDescending;
+
+		let by_project = ListFilters { project: Some("meetings".into()), ..Default::default() };
+		assert_eq!(listed_ids(&db, &by_project, order, 10), vec![meeting, other_meeting]);
+		let by_doctype = ListFilters { doctype: Some("email".into()), ..Default::default() };
+		assert_eq!(listed_ids(&db, &by_doctype, order, 10), vec![email]);
+		let by_tag = ListFilters { required_tags: vec!["balsa".into()], ..Default::default() };
+		assert_eq!(listed_ids(&db, &by_tag, order, 10), vec![email, other_meeting]);
+		let one_day = ListFilters {
+			date_from: Some("2026-10-14".into()),
+			date_to: Some("2026-10-14".into()),
+			..Default::default()
+		};
+		assert_eq!(listed_ids(&db, &one_day, order, 10), vec![email, meeting]);
+		let combined = ListFilters {
+			project: Some("meetings".into()),
+			required_tags: vec!["balsa".into()],
+			..Default::default()
+		};
+		assert_eq!(listed_ids(&db, &combined, order, 10), vec![other_meeting]);
+
+		let listed = list_documents(&db, &by_project, order, 1).unwrap();
+		assert_eq!(listed[0].project.as_deref(), Some("meetings"));
+		assert_eq!(listed[0].doc_status.as_deref(), Some("canonical"));
+	}
+
+	#[test]
+	fn listing_hides_by_default_and_annotates_when_included() {
+		let db = setup_db();
+		let old_version = insert_document(&db, "note v1", "x", "2024-01-01 00:00:00");
+		let new_version = insert_document(&db, "note v2", "x", "2024-02-01 00:00:00");
+		make_family(&db, new_version, old_version);
+		let order = DocumentListOrder::DateDescending;
+
+		let hidden = ListFilters { excluded_tags: vec!["superseded".into()], ..Default::default() };
+		let listed = list_documents(&db, &hidden, order, 10).unwrap();
+		assert_eq!(listed.len(), 1);
+		assert_eq!(listed[0].id, new_version);
+		assert!(!listed[0].superseded);
+
+		let shown = list_documents(&db, &ListFilters::default(), order, 10).unwrap();
+		let old_listing = shown.iter().find(|d| d.id == old_version).unwrap();
+		assert!(old_listing.superseded);
+		assert_eq!(old_listing.current_document_id, Some(new_version));
+		assert!(old_listing.tags.contains(&"superseded".to_string()));
+	}
+
+	#[test]
+	fn date_only_upper_bound_covers_the_whole_day_in_search() {
+		let db = setup_db();
+		let afternoon = insert_document(&db, "late note", "marmot burrow", "2024-02-01 15:30:00");
+		let filters = SearchFilters { date_to: Some("2024-02-01".into()), ..Default::default() };
+		let results = search_filtered(&db, "marmot", SearchSortColumn::Score, &filters).unwrap();
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].document_id, afternoon);
+	}
+
+	#[test]
+	fn truncation_counts_characters_and_marks_the_cut() {
+		let mut short = "déjà vu".to_string();
+		truncate_with_ellipsis(&mut short, 7);
+		assert_eq!(short, "déjà vu");
+		let mut long = "déjà vu again".to_string();
+		truncate_with_ellipsis(&mut long, 4);
+		assert_eq!(long, "déjà…");
+	}
+
+	#[test]
+	fn project_listing_counts_by_status_and_flags_unregistered() {
+		let db = setup_db();
+		let registration = |name: &str| crate::projects::ProjectRegistration {
+			name: name.to_string(),
+			manifest_path: std::path::PathBuf::from(format!("/p/{}/documents.toml", name)),
+			root: std::path::PathBuf::from(format!("/p/{}", name)),
+		};
+		for (title, project, status) in [
+			("a", "meetings", "canonical"),
+			("b", "meetings", "canonical"),
+			("c", "meetings", "missing"),
+			("d", "retired", "provisional"),
+		] {
+			let id = insert_document(&db, title, "x", "2024-01-01 00:00:00");
+			db.execute(
+				"UPDATE documents SET project = ?1, doc_status = ?2 WHERE id = ?3",
+				rusqlite::params![project, status, id],
+			).unwrap();
+		}
+		insert_document(&db, "captured", "x", "2024-01-01 00:00:00");
+
+		let listings = list_projects(&db, &[registration("empty"), registration("meetings")]).unwrap();
+		let find = |name: &str| listings.iter().find(|l| l.name == name).unwrap();
+		assert_eq!(listings.len(), 3);
+		assert!(find("empty").registered);
+		assert_eq!(find("empty").documents, 0);
+		assert_eq!(find("meetings").documents, 3);
+		assert_eq!(find("meetings").by_status.get("canonical"), Some(&2));
+		assert_eq!(find("meetings").by_status.get("missing"), Some(&1));
+		assert!(!find("retired").registered);
+	}
+
+	#[test]
+	fn tag_listing_includes_parents_and_marks_hidden() {
+		let db = setup_db();
+		let frontend = insert_document(&db, "f", "x", "2024-01-01 00:00:00");
+		let backend = insert_document(&db, "b", "x", "2024-01-01 00:00:00");
+		storage::add_tag(&db, frontend, "x-frontend").unwrap();
+		storage::add_tag(&db, backend, "x-backend").unwrap();
+		storage::add_tag(&db, backend, "superseded").unwrap();
+		let mut tag_config = tag_config_with_includes("project-x", &["x-frontend", "x-backend"]);
+		tag_config.default_exclude = vec!["superseded".to_string()];
+
+		let listings = list_tags(&db, &tag_config).unwrap();
+		let find = |tag: &str| listings.iter().find(|l| l.tag == tag).unwrap();
+		assert_eq!(find("project-x").documents, 0);
+		assert_eq!(find("project-x").documents_with_includes, Some(2));
+		assert_eq!(find("project-x").includes, vec!["x-frontend", "x-backend"]);
+		assert_eq!(find("x-frontend").documents, 1);
+		assert!(find("x-frontend").documents_with_includes.is_none());
+		assert!(find("superseded").hidden_by_default);
+		assert!(!find("x-backend").hidden_by_default);
 	}
 }

@@ -527,8 +527,9 @@ fn main() -> Result<()> {
 		}
 		Some(Command::Serve { port }) => {
 			let backend = create_backend(&llms.backend)?;
-			let default_excluded_tags = config::load_tag_config(&config_dir).expanded_default_exclude();
-			serve::run(connection, backend, embed_model, port, default_excluded_tags)?;
+			let tag_config = config::load_tag_config(&config_dir);
+			let projects = what_was_said::projects::load_registry(&config_dir)?;
+			serve::run(connection, backend, embed_model, port, tag_config, projects)?;
 		}
 		Some(Command::Browse { tags, exclude, include_all }) => {
 			let backend = create_backend(&llms.backend)?;

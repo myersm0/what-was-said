@@ -35,6 +35,18 @@ pub fn list_all_tags(connection: &Connection) -> Result<Vec<(String, i64)>> {
 	Ok(tags)
 }
 
+pub fn count_documents_with_any_tag(connection: &Connection, tags: &[String]) -> Result<i64> {
+	if tags.is_empty() {
+		return Ok(0);
+	}
+	let placeholders: Vec<String> = (1..=tags.len()).map(|i| format!("?{}", i)).collect();
+	let sql = format!(
+		"SELECT COUNT(DISTINCT document_id) FROM document_tags WHERE tag IN ({})",
+		placeholders.join(", "),
+	);
+	Ok(connection.query_row(&sql, rusqlite::params_from_iter(tags.iter()), |row| row.get(0))?)
+}
+
 pub fn get_document_ids_by_tag(connection: &Connection, tag: &str) -> Result<Vec<i64>> {
 	let mut stmt = connection.prepare("SELECT document_id FROM document_tags WHERE tag = ?1")?;
 	let ids = stmt

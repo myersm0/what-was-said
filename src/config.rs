@@ -378,6 +378,11 @@ impl TagConfig {
 		self.expand_filter_tags(&self.default_exclude)
 	}
 
+	/// Normalized the way stored tags are, then expanded through `[includes]`.
+	pub fn expand_required_tag(&self, tag: &str) -> Vec<String> {
+		self.expand_filter_tags(&[tag.trim().to_lowercase()])
+	}
+
 	pub fn doc_matches_filter(&self, doc_tags: &[String], filter_tag: &str) -> bool {
 		if doc_tags.iter().any(|t| t == filter_tag) {
 			return true;

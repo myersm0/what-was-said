@@ -53,7 +53,7 @@ fn sync_project(connection: &Connection, registration: &ProjectRegistration) -> 
 	collect_files(&registration.root, &registration.root, &mut files)?;
 	let on_disk: HashSet<String> = files.iter().map(|(_, relative)| relative.clone()).collect();
 
-	let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+	let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 	let mut summary = SyncSummary { new: 0, updated: 0, unchanged: 0, missing: 0 };
 
 	for (absolute, relative) in files {
