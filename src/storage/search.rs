@@ -33,6 +33,37 @@ pub struct ChunkSearchResult {
 	pub doc_status: Option<String>,
 }
 
+/// Plain text to an FTS5 expression. "Quoted phrases" stay phrases; every other
+/// word becomes a quoted prefix term, so `nrg-svc-hcpx`, `Mike's` or `file.zip`
+/// match literally instead of parsing as column filters or operators.
+pub fn fts_match_expression(query: &str) -> String {
+	let mut terms = Vec::new();
+	let mut rest = query;
+	loop {
+		rest = rest.trim_start();
+		if rest.is_empty() {
+			break;
+		}
+		if let Some(after_quote) = rest.strip_prefix('"') {
+			match after_quote.find('"') {
+				Some(end) => {
+					let phrase = &after_quote[..end];
+					if !phrase.trim().is_empty() {
+						terms.push(format!("\"{}\"", phrase));
+					}
+					rest = &after_quote[end + 1..];
+				}
+				None => rest = after_quote,
+			}
+			continue;
+		}
+		let end = rest.find(|c: char| c.is_whitespace() || c == '"').unwrap_or(rest.len());
+		terms.push(format!("\"{}\"*", &rest[..end]));
+		rest = &rest[end..];
+	}
+	terms.join(" ")
+}
+
 pub fn raw_fts_search(
 	connection: &Connection,
 	query: &str,
@@ -43,11 +74,7 @@ pub fn raw_fts_search(
 	excluded_tags: &[String],
 	required_tags: &[String],
 ) -> Result<Vec<ChunkSearchResult>> {
-	let prefix_query: String = query
-		.split_whitespace()
-		.map(|word| format!("{}*", word))
-		.collect::<Vec<_>>()
-		.join(" ");
+	let prefix_query = fts_match_expression(query);
 
 	let mut conditions = vec!["chunks_fts MATCH ?1".to_string()];
 	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(prefix_query.clone())];

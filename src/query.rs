@@ -783,21 +783,36 @@ mod visibility_tests {
 	}
 
 	#[test]
-	fn malformed_keyword_input_is_a_typed_client_error() {
+	fn punctuated_keywords_match_literally_and_empty_input_is_a_typed_error() {
 		let db = setup_db();
-		insert_document(&db, "montre note", "montre strap repair", "2024-01-01 00:00:00");
-		for bad_query in ["project:montre", "\"unbalanced"] {
-			let error = search_filtered(&db, bad_query, SearchSortColumn::Score, &SearchFilters::default())
-				.err()
-				.unwrap_or_else(|| panic!("expected an error for {:?}", bad_query));
-			let fts_error = error.downcast_ref::<FtsQueryError>()
-				.unwrap_or_else(|| panic!("expected FtsQueryError for {:?}, got {}", bad_query, error));
-			assert_eq!(fts_error.query, bad_query);
+		let service = insert_document(&db, "svc", "run it as nrg-svc-hcpx on hcpx-fs01", "2024-01-01 00:00:00");
+		let colon = insert_document(&db, "montre", "the project:montre plan and Mike's notes", "2024-01-01 00:00:00");
+		let filters = SearchFilters::default();
+		for (query, expected) in [
+			("nrg-svc-hcpx", service),
+			("hcpx-fs", service),
+			("project:montre", colon),
+			("Mike's", colon),
+			("\"project montre", colon),
+			("\"project montre\"", colon),
+		] {
+			let results = search_filtered(&db, query, SearchSortColumn::Score, &filters)
+				.unwrap_or_else(|e| panic!("{:?} failed: {}", query, e));
+			assert_eq!(results.len(), 1, "query {:?}", query);
+			assert_eq!(results[0].document_id, expected, "query {:?}", query);
 		}
-		let plain = search_filtered(&db, "project montre", SearchSortColumn::Score, &SearchFilters::default()).unwrap();
-		assert!(plain.is_empty());
-		let found = search_filtered(&db, "montre", SearchSortColumn::Score, &SearchFilters::default()).unwrap();
-		assert_eq!(found.len(), 1);
+		assert!(search_filtered(&db, "OR", SearchSortColumn::Score, &filters).unwrap().is_empty());
+
+		let error = search_filtered(&db, "  ", SearchSortColumn::Score, &filters).err().unwrap();
+		assert!(error.downcast_ref::<FtsQueryError>().is_some(), "got {}", error);
+	}
+
+	#[test]
+	fn fts_expression_quotes_words_and_keeps_phrases() {
+		assert_eq!(storage::fts_match_expression("nrg-svc-hcpx md5"), "\"nrg-svc-hcpx\"* \"md5\"*");
+		assert_eq!(storage::fts_match_expression("\"BALSA packages\" zip"), "\"BALSA packages\" \"zip\"*");
+		assert_eq!(storage::fts_match_expression("\"dangling"), "\"dangling\"*");
+		assert_eq!(storage::fts_match_expression("\"\" x"), "\"x\"*");
 	}
 
 	fn listed_ids(db: &Connection, filters: &ListFilters, order: DocumentListOrder, limit: usize) -> Vec<i64> {

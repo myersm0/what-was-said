@@ -310,6 +310,25 @@ pub fn document_count(connection: &Connection) -> Result<i64> {
 	Ok(connection.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))?)
 }
 
+pub fn doctype_counts(connection: &Connection) -> Result<Vec<(Option<String>, i64)>> {
+	let mut statement = connection.prepare(
+		"SELECT doctype_name, COUNT(*) FROM documents GROUP BY doctype_name ORDER BY COUNT(*) DESC",
+	)?;
+	let rows = statement
+		.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(rows)
+}
+
+pub fn clip_date_range(connection: &Connection) -> Result<Option<(String, String)>> {
+	let range: (Option<String>, Option<String>) = connection.query_row(
+		"SELECT MIN(clip_date), MAX(clip_date) FROM documents",
+		[],
+		|row| Ok((row.get(0)?, row.get(1)?)),
+	)?;
+	Ok(range.0.zip(range.1))
+}
+
 pub fn document_exists_by_path(connection: &Connection, origin_path: &str) -> Result<bool> {
 	let count: i64 = connection.query_row(
 		"SELECT COUNT(*) FROM documents WHERE origin_path = ?1",

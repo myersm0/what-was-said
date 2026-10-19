@@ -6,6 +6,7 @@ pub mod embed;
 pub mod extract;
 pub mod types;
 pub mod llm;
+pub mod mcp;
 pub mod minhash;
 pub mod markdown;
 pub mod ollama;
