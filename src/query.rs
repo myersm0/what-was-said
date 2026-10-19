@@ -2,6 +2,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde::Serialize;
 
+use crate::config::TagConfig;
+use crate::projects::ProjectRegistration;
 use crate::storage;
 use crate::util;
 
@@ -69,6 +71,128 @@ impl SearchFilters {
 	fn project_ref(&self) -> Option<&str> {
 		self.project.as_deref()
 	}
+}
+
+/// A filter value the caller can fix: an unregistered project, a tag no
+/// document carries, a malformed date. Serve maps it to 400, MCP to a tool error.
+#[derive(Debug)]
+pub struct FilterError {
+	pub field: &'static str,
+	pub message: String,
+}
+
+impl std::fmt::Display for FilterError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(&self.message)
+	}
+}
+
+impl std::error::Error for FilterError {}
+
+fn filter_error(field: &'static str, message: String) -> anyhow::Error {
+	anyhow::Error::new(FilterError { field, message })
+}
+
+/// Filter values as a caller supplied them, before validation.
+#[derive(Debug, Clone, Default)]
+pub struct FilterInput {
+	pub author: Option<String>,
+	pub date_from: Option<String>,
+	pub date_to: Option<String>,
+	pub project: Option<String>,
+	pub tag: Option<String>,
+	pub include_hidden: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedFilters {
+	pub filters: SearchFilters,
+	/// The requested tag, normalized, before `[includes]` expansion.
+	pub tag: Option<String>,
+	/// Default-hidden tags left visible because the required tag names them.
+	pub unhidden_tags: Vec<String>,
+}
+
+/// The validation inputs that stay fixed for a server's lifetime, shared by
+/// MCP and serve so the two cannot accept different filter values.
+pub struct FilterContext<'a> {
+	pub tag_config: &'a TagConfig,
+	pub default_excluded_tags: &'a [String],
+	pub projects: &'a [ProjectRegistration],
+}
+
+impl FilterContext<'_> {
+	/// Blank values count as absent. Dates are normalized to the clip-date form;
+	/// a project must be listed by `list_projects`, and a tag must be carried by
+	/// at least one document. Asking for a default-hidden tag shows it.
+	pub fn resolve(&self, connection: &Connection, input: FilterInput) -> Result<ResolvedFilters> {
+		let author = present(input.author);
+		let date_from = present(input.date_from).map(|value| normalize_date("date_from", &value)).transpose()?;
+		let date_to = present(input.date_to).map(|value| normalize_date("date_to", &value)).transpose()?;
+		if let (Some(from), Some(to)) = (&date_from, &date_to) {
+			if from.as_str() > inclusive_upper_bound(to).as_str() {
+				return Err(filter_error("date_from", format!("date_from {} is after date_to {}.", from, to)));
+			}
+		}
+		let project = present(input.project);
+		if let Some(project) = &project {
+			self.check_project(connection, project)?;
+		}
+		let tag = present(input.tag).map(|tag| tag.to_lowercase());
+		let required_tags = match &tag {
+			Some(tag) => {
+				let expanded = self.tag_config.expand_required_tag(tag);
+				if storage::count_documents_with_any_tag(connection, &expanded)? == 0 {
+					return Err(filter_error("tag", format!("No document carries the tag '{}' or any tag it includes.", tag)));
+				}
+				expanded
+			}
+			None => Vec::new(),
+		};
+		let mut excluded_tags = if input.include_hidden {
+			Vec::new()
+		} else {
+			self.default_excluded_tags.to_vec()
+		};
+		let unhidden_tags: Vec<String> = excluded_tags.iter().filter(|t| required_tags.contains(t)).cloned().collect();
+		excluded_tags.retain(|t| !required_tags.contains(t));
+		Ok(ResolvedFilters {
+			filters: SearchFilters { author, date_from, date_to, project, excluded_tags, required_tags },
+			tag,
+			unhidden_tags,
+		})
+	}
+
+	fn check_project(&self, connection: &Connection, project: &str) -> Result<()> {
+		let known = list_projects(connection, self.projects)?;
+		if known.iter().any(|listing| listing.name == project) {
+			return Ok(());
+		}
+		let names: Vec<&str> = known.iter().map(|listing| listing.name.as_str()).collect();
+		Err(filter_error("project", if names.is_empty() {
+			format!("'{}' is not a curated project: none are registered.", project)
+		} else {
+			format!("'{}' is not a registered curated project (known: {}).", project, names.join(", "))
+		}))
+	}
+}
+
+fn present(value: Option<String>) -> Option<String> {
+	value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// `YYYY-MM-DD`, or `YYYY-MM-DD HH:MM:SS` with a space or `T`, returned in the
+/// canonical clip-date form so string comparison in SQL is sound.
+fn normalize_date(field: &'static str, value: &str) -> Result<String> {
+	if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+		return Ok(date.format("%Y-%m-%d").to_string());
+	}
+	chrono::NaiveDateTime::parse_from_str(&value.replacen('T', " ", 1), "%Y-%m-%d %H:%M:%S")
+		.map(|parsed| parsed.format("%Y-%m-%d %H:%M:%S").to_string())
+		.map_err(|_| filter_error(field, format!(
+			"{} must be a date in YYYY-MM-DD form (or YYYY-MM-DD HH:MM:SS), got '{}'.",
+			field, value,
+		)))
 }
 
 pub fn search(
@@ -1053,5 +1177,76 @@ mod visibility_tests {
 		embed_all_chunks(&db, |_| vec![1.0, 0.0, 0.0, 0.0]);
 		let semantic = find_similar_grouped_filtered(&db, &[1.0, 0.0, 0.0, 0.0], 5, &SearchFilters::default()).unwrap();
 		assert_eq!(semantic.iter().map(|r| r.document_id).collect::<Vec<_>>(), vec![new_version, old_version]);
+	}
+
+	fn registration(name: &str) -> ProjectRegistration {
+		ProjectRegistration {
+			name: name.to_string(),
+			manifest_path: std::path::PathBuf::from(format!("/p/{}/documents.toml", name)),
+			root: std::path::PathBuf::from(format!("/p/{}", name)),
+		}
+	}
+
+	fn field_of(error: anyhow::Error) -> &'static str {
+		error.downcast_ref::<FilterError>().expect("a FilterError").field
+	}
+
+	#[test]
+	fn resolve_validates_and_normalizes_filter_values() {
+		let db = setup_db();
+		let id = insert_document(&db, "thread", "x", "2026-10-01 09:00:00");
+		storage::add_tag(&db, id, "balsa").unwrap();
+		let tag_config = TagConfig::default();
+		let projects = vec![registration("meetings")];
+		let context = FilterContext { tag_config: &tag_config, default_excluded_tags: &[], projects: &projects };
+		let resolve = |input: FilterInput| context.resolve(&db, input);
+
+		let resolved = resolve(FilterInput {
+			date_from: Some(" 2026-01-05 ".into()),
+			date_to: Some("2026-10-01T09:00:00".into()),
+			project: Some("meetings".into()),
+			tag: Some("Balsa".into()),
+			author: Some("  ".into()),
+			..Default::default()
+		}).unwrap();
+		assert_eq!(resolved.filters.date_from.as_deref(), Some("2026-01-05"));
+		assert_eq!(resolved.filters.date_to.as_deref(), Some("2026-10-01 09:00:00"));
+		assert_eq!(resolved.tag.as_deref(), Some("balsa"));
+		assert_eq!(resolved.filters.required_tags, vec!["balsa"]);
+		assert!(resolved.filters.author.is_none());
+
+		assert_eq!(field_of(resolve(FilterInput { date_from: Some("2026-10-01xyz".into()), ..Default::default() }).unwrap_err()), "date_from");
+		assert_eq!(field_of(resolve(FilterInput { date_to: Some("last week".into()), ..Default::default() }).unwrap_err()), "date_to");
+		assert_eq!(field_of(resolve(FilterInput {
+			date_from: Some("2026-10-02".into()),
+			date_to: Some("2026-10-01".into()),
+			..Default::default()
+		}).unwrap_err()), "date_from");
+		assert!(resolve(FilterInput {
+			date_from: Some("2026-10-01 12:00:00".into()),
+			date_to: Some("2026-10-01".into()),
+			..Default::default()
+		}).is_ok());
+		let project_error = resolve(FilterInput { project: Some("montre".into()), ..Default::default() }).unwrap_err();
+		assert!(project_error.to_string().contains("meetings"), "{}", project_error);
+		assert_eq!(field_of(project_error), "project");
+		assert_eq!(field_of(resolve(FilterInput { tag: Some("montre".into()), ..Default::default() }).unwrap_err()), "tag");
+	}
+
+	#[test]
+	fn requiring_a_hidden_tag_shows_it() {
+		let db = setup_db();
+		let archived = insert_document(&db, "old plan", "wombat logistics", "2026-01-01 00:00:00");
+		storage::add_tag(&db, archived, "archived").unwrap();
+		insert_document(&db, "new plan", "wombat logistics revised", "2026-02-01 00:00:00");
+		let tag_config = TagConfig::default();
+		let hidden = vec!["archived".to_string(), "junk".to_string()];
+		let context = FilterContext { tag_config: &tag_config, default_excluded_tags: &hidden, projects: &[] };
+
+		let resolved = context.resolve(&db, FilterInput { tag: Some("archived".into()), ..Default::default() }).unwrap();
+		assert_eq!(resolved.unhidden_tags, vec!["archived"]);
+		assert_eq!(resolved.filters.excluded_tags, vec!["junk"]);
+		let results = search_filtered(&db, "wombat", SearchSortColumn::Score, &resolved.filters).unwrap();
+		assert_eq!(results.iter().map(|r| r.document_id).collect::<Vec<_>>(), vec![archived]);
 	}
 }

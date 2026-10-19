@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 use crate::config::{McpConfig, TagConfig};
 use crate::llm::LlmBackend;
 use crate::projects::ProjectRegistration;
-use crate::query::{self, DocumentListOrder, FtsQueryError, GroupedSearchResult, SearchSortColumn};
+use crate::query::{self, DocumentListOrder, FilterError, FtsQueryError, GroupedSearchResult, SearchSortColumn};
 use crate::storage;
 
 const PROJECT_DESCRIPTION: &str = "Exact identifier of a registered curated project, as returned by \
@@ -49,11 +49,10 @@ pub enum ListSort {
 	Title,
 }
 
+/// The passage filters shared by keyword and semantic search.
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
-pub struct KeywordParams {
-	/// Plain words and/or "quoted phrases". No operators, no field:value filters.
-	pub query: String,
+pub struct SearchScope {
 	#[schemars(description = AUTHOR_DESCRIPTION)]
 	pub author: Option<String>,
 	#[schemars(description = DATE_FROM_DESCRIPTION)]
@@ -66,6 +65,28 @@ pub struct KeywordParams {
 	pub tag: Option<String>,
 	#[schemars(description = INCLUDE_HIDDEN_DESCRIPTION)]
 	pub include_hidden: Option<bool>,
+}
+
+impl SearchScope {
+	fn into_input(self) -> query::FilterInput {
+		query::FilterInput {
+			author: self.author,
+			date_from: self.date_from,
+			date_to: self.date_to,
+			project: self.project,
+			tag: self.tag,
+			include_hidden: self.include_hidden.unwrap_or(false),
+		}
+	}
+}
+
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct KeywordParams {
+	/// Plain words and/or "quoted phrases". No operators, no field:value filters.
+	pub query: String,
+	#[serde(flatten)]
+	pub scope: SearchScope,
 	/// "score" (best match first, the default) or "date" (newest first).
 	pub sort: Option<KeywordSort>,
 	/// Number of documents to return. Default 5.
@@ -77,18 +98,8 @@ pub struct KeywordParams {
 pub struct SemanticParams {
 	/// A description of what you are looking for, in natural language.
 	pub query: String,
-	#[schemars(description = AUTHOR_DESCRIPTION)]
-	pub author: Option<String>,
-	#[schemars(description = DATE_FROM_DESCRIPTION)]
-	pub date_from: Option<String>,
-	#[schemars(description = DATE_TO_DESCRIPTION)]
-	pub date_to: Option<String>,
-	#[schemars(description = PROJECT_DESCRIPTION)]
-	pub project: Option<String>,
-	#[schemars(description = TAG_DESCRIPTION)]
-	pub tag: Option<String>,
-	#[schemars(description = INCLUDE_HIDDEN_DESCRIPTION)]
-	pub include_hidden: Option<bool>,
+	#[serde(flatten)]
+	pub scope: SearchScope,
 	/// Number of documents to return. Default 5.
 	pub limit: Option<u32>,
 }
@@ -149,16 +160,6 @@ pub struct McpContext {
 	projects: Vec<ProjectRegistration>,
 	sizing: McpConfig,
 	database_path: String,
-}
-
-#[derive(Default)]
-struct ScopeArgs {
-	author: Option<String>,
-	date_from: Option<String>,
-	date_to: Option<String>,
-	project: Option<String>,
-	tag: Option<String>,
-	include_hidden: Option<bool>,
 }
 
 struct Scope {
@@ -229,14 +230,7 @@ impl McpContext {
 			return Err("query is empty: give one or more plain words".to_string());
 		}
 		let connection = self.lock()?;
-		let scope = self.resolve_scope(&connection, ScopeArgs {
-			author: params.author,
-			date_from: params.date_from,
-			date_to: params.date_to,
-			project: params.project,
-			tag: params.tag,
-			include_hidden: params.include_hidden,
-		})?;
+		let scope = self.resolve_scope(&connection, params.scope.into_input())?;
 		let sort = match params.sort {
 			Some(KeywordSort::Date) => SearchSortColumn::Date,
 			_ => SearchSortColumn::Score,
@@ -265,14 +259,7 @@ impl McpContext {
 				return Err("Semantic search is unavailable: no chunk embeddings exist yet (the user runs \
 					`what-was-said embed`). Use search_keyword or list_documents.".to_string());
 			}
-			self.resolve_scope(&connection, ScopeArgs {
-				author: params.author,
-				date_from: params.date_from,
-				date_to: params.date_to,
-				project: params.project,
-				tag: params.tag,
-				include_hidden: params.include_hidden,
-			})?
+			self.resolve_scope(&connection, params.scope.into_input())?
 		};
 		let embedding = self.embed_query(&query_text)?;
 		let chunk_limit = documents * self.sizing.hits_per_document * 3;
@@ -296,9 +283,9 @@ impl McpContext {
 				return Err("Claim search is unavailable: no claim embeddings exist yet (the user runs \
 					`what-was-said extract` then `embed`). Use search_semantic or search_keyword.".to_string());
 			}
-			self.resolve_scope(&connection, ScopeArgs {
+			self.resolve_scope(&connection, query::FilterInput {
 				tag: params.tag,
-				include_hidden: params.include_hidden,
+				include_hidden: params.include_hidden.unwrap_or(false),
 				..Default::default()
 			})?
 		};
@@ -383,12 +370,12 @@ impl McpContext {
 
 	pub fn list_documents(&self, params: ListParams) -> ToolResult {
 		let connection = self.lock()?;
-		let scope = self.resolve_scope(&connection, ScopeArgs {
+		let scope = self.resolve_scope(&connection, query::FilterInput {
 			date_from: params.date_from,
 			date_to: params.date_to,
 			project: params.project,
 			tag: params.tag,
-			include_hidden: params.include_hidden,
+			include_hidden: params.include_hidden.unwrap_or(false),
 			..Default::default()
 		})?;
 		let doctype = present(params.doctype);
@@ -481,88 +468,38 @@ impl McpContext {
 		))
 	}
 
-	/// Validates and normalizes the shared filters. A project or tag that cannot
-	/// match anything is an error rather than a silent empty result.
-	fn resolve_scope(&self, connection: &Connection, args: ScopeArgs) -> std::result::Result<Scope, String> {
+	fn filter_context(&self) -> query::FilterContext<'_> {
+		query::FilterContext {
+			tag_config: &self.tag_config,
+			default_excluded_tags: &self.default_excluded_tags,
+			projects: &self.projects,
+		}
+	}
+
+	/// Validation is shared with serve; this adds the record of applied filters
+	/// that empty results report back to the model.
+	fn resolve_scope(&self, connection: &Connection, input: query::FilterInput) -> std::result::Result<Scope, String> {
+		let resolved = self.filter_context().resolve(connection, input).map_err(filter_failure)?;
+		let filters = &resolved.filters;
 		let mut applied = Map::new();
-		let author = present(args.author);
-		let date_from = present(args.date_from);
-		let date_to = present(args.date_to);
-		let project = present(args.project);
-		let tag = present(args.tag);
-		for (name, value) in [("date_from", &date_from), ("date_to", &date_to)] {
-			if let Some(value) = value {
-				check_date(name, value)?;
-			}
-		}
-		if let Some(project) = &project {
-			self.check_project(connection, project)?;
-		}
-		let required_tags = match &tag {
-			Some(tag) => {
-				let expanded = self.tag_config.expand_required_tag(tag);
-				let carrying = storage::count_documents_with_any_tag(connection, &expanded).map_err(internal)?;
-				if carrying == 0 {
-					return Err(format!(
-						"No document carries the tag '{}' or any tag it includes. Use an exact name from list_tags.",
-						tag,
-					));
-				}
-				expanded
-			}
-			None => Vec::new(),
-		};
-		let excluded_tags = if args.include_hidden.unwrap_or(false) {
-			Vec::new()
-		} else {
-			self.default_excluded_tags.clone()
-		};
 		for (name, value) in [
-			("author", &author),
-			("date_from", &date_from),
-			("date_to", &date_to),
-			("project", &project),
-			("tag", &tag),
+			("author", &filters.author),
+			("date_from", &filters.date_from),
+			("date_to", &filters.date_to),
+			("project", &filters.project),
+			("tag", &resolved.tag),
 		] {
 			if let Some(value) = value {
 				applied.insert(name.to_string(), json!(value));
 			}
 		}
-		if !excluded_tags.is_empty() {
-			applied.insert("hidden_tags_excluded".to_string(), json!(excluded_tags));
+		if !filters.excluded_tags.is_empty() {
+			applied.insert("hidden_tags_excluded".to_string(), json!(filters.excluded_tags));
 		}
-		Ok(Scope {
-			filters: query::SearchFilters {
-				author,
-				date_from,
-				date_to,
-				project,
-				excluded_tags,
-				required_tags,
-			},
-			applied,
-		})
-	}
-
-	fn check_project(&self, connection: &Connection, project: &str) -> std::result::Result<(), String> {
-		let known = query::list_projects(connection, &self.projects).map_err(internal)?;
-		if known.iter().any(|listing| listing.name == project) {
-			return Ok(());
+		if !resolved.unhidden_tags.is_empty() {
+			applied.insert("hidden_tags_shown".to_string(), json!(resolved.unhidden_tags));
 		}
-		let names: Vec<&str> = known.iter().map(|listing| listing.name.as_str()).collect();
-		Err(if names.is_empty() {
-			format!(
-				"'{}' is not a curated project: none are registered. Leave project unset and use tag or \
-				 query terms for the topic.",
-				project,
-			)
-		} else {
-			format!(
-				"'{}' is not a registered curated project (known: {}). Leave project unset unless you \
-				 have an exact name from list_projects; use tag or query terms for the topic.",
-				project, names.join(", "),
-			)
-		})
+		Ok(Scope { filters: resolved.filters, applied })
 	}
 
 	#[allow(clippy::too_many_arguments)]
@@ -692,7 +629,7 @@ fn render_entries(entries: &[storage::EntryContent]) -> String {
 fn empty_note(what: &str, applied: &Map<String, Value>, suggestions: &[&str]) -> String {
 	let narrowing: Vec<String> = applied
 		.iter()
-		.filter(|(name, _)| name.as_str() != "hidden_tags_excluded")
+		.filter(|(name, _)| !name.starts_with("hidden_tags_"))
 		.map(|(name, value)| format!("{}={}", name, value))
 		.collect();
 	let mut note = if narrowing.is_empty() {
@@ -728,11 +665,20 @@ fn bounded(requested: Option<u32>, default: usize, max: usize) -> usize {
 	requested.map(|n| n as usize).unwrap_or(default).clamp(1, max.max(1))
 }
 
-fn check_date(name: &str, value: &str) -> std::result::Result<(), String> {
-	let date_part = value.get(..10).unwrap_or(value);
-	chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d")
-		.map(|_| ())
-		.map_err(|_| format!("{} must be a date in YYYY-MM-DD form, got '{}'", name, value))
+/// Adds the tool that lists valid values, so the model's next call can use one.
+fn filter_failure(error: anyhow::Error) -> String {
+	match error.downcast_ref::<FilterError>() {
+		Some(filter_error) => match filter_error.field {
+			"project" => format!(
+				"{} Leave project unset unless you have an exact name from list_projects; use tag or \
+				 query terms for the topic.",
+				filter_error,
+			),
+			"tag" => format!("{} Use an exact name from list_tags.", filter_error),
+			_ => filter_error.to_string(),
+		},
+		None => internal(error),
+	}
 }
 
 fn internal(error: impl std::fmt::Display) -> String {
@@ -951,6 +897,10 @@ mod tests {
 		KeywordParams { query: query.to_string(), ..Default::default() }
 	}
 
+	fn scoped(query: &str, scope: SearchScope) -> KeywordParams {
+		KeywordParams { scope, ..keyword(query) }
+	}
+
 	#[test]
 	fn tool_schemas_serialize_with_project_guidance() {
 		let schemas = [
@@ -968,6 +918,23 @@ mod tests {
 			serde_json::to_value(schemars::schema_for!(GetDocumentParams)).unwrap(),
 		] {
 			assert!(schema["properties"].is_object());
+		}
+	}
+
+	#[test]
+	fn flattened_scope_deserializes_from_flat_arguments() {
+		let params: KeywordParams = serde_json::from_value(json!({
+			"query": "otter",
+			"tag": "balsa",
+			"include_hidden": true,
+			"limit": 3,
+		})).unwrap();
+		assert_eq!(params.scope.tag.as_deref(), Some("balsa"));
+		assert_eq!(params.scope.include_hidden, Some(true));
+		assert_eq!(params.limit, Some(3));
+		let schema = serde_json::to_value(schemars::schema_for!(SemanticParams)).unwrap();
+		for field in ["query", "author", "date_from", "date_to", "project", "tag", "include_hidden", "limit"] {
+			assert!(schema["properties"][field].is_object(), "{} missing from {}", field, schema);
 		}
 	}
 
@@ -1008,7 +975,7 @@ mod tests {
 		let hidden = parse(context.search_keyword(keyword("walrus")));
 		assert_eq!(hidden["results"].as_array().unwrap().len(), 1);
 
-		let shown = parse(context.search_keyword(KeywordParams { include_hidden: Some(true), ..keyword("walrus") }));
+		let shown = parse(context.search_keyword(scoped("walrus", SearchScope { include_hidden: Some(true), ..Default::default() })));
 		let old_hit = shown["results"].as_array().unwrap().iter()
 			.find(|r| r["document_id"] == old_version).unwrap();
 		assert_eq!(old_hit["superseded"], true);
@@ -1051,7 +1018,7 @@ mod tests {
 		let db = setup_db();
 		insert_document(&db, "thread", "zebra crossing", "2026-01-01 00:00:00");
 		let context = context(db);
-		let response = parse(context.search_keyword(KeywordParams { author: Some("nobody".into()), ..keyword("zebra") }));
+		let response = parse(context.search_keyword(scoped("zebra", SearchScope { author: Some("nobody".into()), ..Default::default() })));
 		assert!(response["results"].as_array().unwrap().is_empty());
 		let note = response["note"].as_str().unwrap();
 		assert!(note.contains("author=\"nobody\""), "{}", note);
@@ -1064,13 +1031,14 @@ mod tests {
 		let db = setup_db();
 		insert_document(&db, "thread", "montre strap", "2026-01-01 00:00:00");
 		let context = context(db);
-		let project_error = context.search_keyword(KeywordParams { project: Some("montre".into()), ..keyword("strap") }).unwrap_err();
+		let project_error = context.search_keyword(scoped("strap", SearchScope { project: Some("montre".into()), ..Default::default() })).unwrap_err();
 		assert!(project_error.contains("not a registered curated project") && project_error.contains("meetings"), "{}", project_error);
+		assert!(project_error.contains("list_projects"), "{}", project_error);
 		let tag_error = context.list_documents(ListParams { tag: Some("montre".into()), ..Default::default() }).unwrap_err();
 		assert!(tag_error.contains("list_tags"), "{}", tag_error);
 		let date_error = context.list_documents(ListParams { date_from: Some("last week".into()), ..Default::default() }).unwrap_err();
 		assert!(date_error.contains("YYYY-MM-DD"), "{}", date_error);
-		let blank_project = context.search_keyword(KeywordParams { project: Some("  ".into()), ..keyword("strap") });
+		let blank_project = context.search_keyword(scoped("strap", SearchScope { project: Some("  ".into()), ..Default::default() }));
 		assert_eq!(parse(blank_project)["results"].as_array().unwrap().len(), 1);
 	}
 

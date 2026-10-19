@@ -231,9 +231,9 @@ The source line is matched against doctype patterns in `config.toml` to determin
 | `GET /stats` | Database statistics |
 | `GET /derive/status` | Derivation progress |
 
-All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP status codes; keyword input FTS5 cannot parse is a 400.
+All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP status codes. Input the caller can fix is a 400: keyword input FTS5 cannot parse, an unknown `sort`, a malformed date (`YYYY-MM-DD` or `YYYY-MM-DD HH:MM:SS`), a `project` that isn't registered, or a `tag` no document carries. A missing dependency (Ollama unreachable, embeddings not computed yet) is a 503. Filter validation is shared with the MCP server, so both accept exactly the same values. `limit` on the similarity endpoints is capped at 100.
 
-`tag` keeps only documents carrying that tag or one it includes through `[includes]`. Keyword queries are plain text: each word is matched literally as a prefix (so `nrg-svc-hcpx` or `file.zip` work) and `"quoted phrases"` match as written; there are no operators. A date-only `date_to` covers that whole day.
+`tag` keeps only documents carrying that tag or one it includes through `[includes]`; asking for a tag that is hidden by default (e.g. `tag=archived`) shows it without needing `include_hidden`. Keyword queries are plain text: each word is matched literally as a prefix (so `nrg-svc-hcpx` or `file.zip` work) and `"quoted phrases"` match as written; there are no operators. A date-only `date_to` covers that whole day.
 
 Search endpoints hide documents tagged with a default-excluded tag (`superseded`, `junk`, etc. per `tags.toml`) unless `include_hidden=true`. Direct fetches always return the requested document. Whenever a superseded document appears in a response — by opt-in, direct fetch, or a claim sourced from it — it carries `superseded: true` and `current_document_id` pointing at the family's current version, so a consumer can always route to the live document. Non-superseded documents carry `superseded: false`.
 
