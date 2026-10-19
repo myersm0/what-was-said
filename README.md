@@ -215,7 +215,7 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 ## API server
 
-`what-was-said serve` starts a localhost JSON API for programmatic access — the agent-facing interface, with the DB connection held open to avoid per-call process spawn overhead. Like `mcp`, it opens the database read-only and needs an existing, migrated database.
+`what-was-said serve` starts a localhost JSON API for programmatic access — the agent-facing interface, with the DB connection held open to avoid per-call process spawn overhead. Like `mcp`, it opens the database read-only and needs an existing, migrated database. Requests must carry a `Host` of `127.0.0.1:<port>` or `localhost:<port>`; anything else gets a 403, which blocks DNS-rebinding attacks from web pages open in a browser.
 
 | Endpoint | Description |
 |---|---|

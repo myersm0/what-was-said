@@ -1,8 +1,9 @@
 use anyhow::Result;
 use axum::{
-	extract::{Path, Query, State},
-	http::StatusCode,
-	response::{IntoResponse, Json},
+	extract::{Path, Query, Request, State},
+	http::{header::HOST, StatusCode},
+	middleware::{self, Next},
+	response::{IntoResponse, Json, Response},
 	routing::get,
 	Router,
 };
@@ -300,6 +301,34 @@ async fn similar_claims_handler(
 	Ok(Json(results))
 }
 
+/// Whether a request's Host header names this server. Binding to 127.0.0.1
+/// stops remote clients, but a browser tricked by DNS rebinding still connects
+/// locally while sending the attacker's hostname.
+fn is_local_host(host: Option<&str>, port: u16) -> bool {
+	let Some(host) = host else {
+		return false;
+	};
+	let host = host.to_ascii_lowercase();
+	["127.0.0.1", "localhost"]
+		.iter()
+		.any(|name| host == format!("{}:{}", name, port) || (port == 80 && host == *name))
+}
+
+async fn require_local_host(
+	State(port): State<u16>,
+	request: Request,
+	next: Next,
+) -> std::result::Result<Response, (StatusCode, Json<serde_json::Value>)> {
+	let local = is_local_host(request.headers().get(HOST).and_then(|value| value.to_str().ok()), port);
+	if !local {
+		return Err((
+			StatusCode::FORBIDDEN,
+			Json(serde_json::json!({"error": format!("Host must be 127.0.0.1:{} or localhost:{}", port, port)})),
+		));
+	}
+	Ok(next.run(request).await)
+}
+
 pub fn run(
 	connection: rusqlite::Connection,
 	backend: Box<dyn LlmBackend>,
@@ -330,7 +359,8 @@ pub fn run(
 		.route("/derive/status", get(derive_status_handler))
 		.route("/claims/doc/:doc_id", get(claims_handler))
 		.route("/claims/similar", get(similar_claims_handler))
-		.with_state(state);
+		.with_state(state)
+		.layer(middleware::from_fn_with_state(port, require_local_host));
 
 	let runtime = tokio::runtime::Runtime::new()?;
 	runtime.block_on(async {
@@ -355,5 +385,16 @@ mod tests {
 		});
 		assert_eq!(err_query(fts_error).0, StatusCode::BAD_REQUEST);
 		assert_eq!(err_query(anyhow::anyhow!("disk I/O error")).0, StatusCode::INTERNAL_SERVER_ERROR);
+	}
+
+	#[test]
+	fn only_local_host_headers_are_accepted() {
+		assert!(is_local_host(Some("127.0.0.1:3030"), 3030));
+		assert!(is_local_host(Some("LocalHost:3030"), 3030));
+		assert!(!is_local_host(Some("localhost:3031"), 3030));
+		assert!(!is_local_host(Some("attacker.example:3030"), 3030));
+		assert!(!is_local_host(Some("localhost.attacker.example:3030"), 3030));
+		assert!(!is_local_host(Some("localhost"), 3030));
+		assert!(!is_local_host(None, 3030));
 	}
 }
