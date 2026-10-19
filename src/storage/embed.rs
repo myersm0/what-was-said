@@ -4,7 +4,7 @@ use serde::Serialize;
 use zerocopy::IntoBytes;
 
 use super::documents::chunk_count;
-use super::{push_tag_conditions, where_clause};
+use super::{push_tag_conditions, where_clause, PassageFilters};
 
 #[derive(Debug)]
 pub struct ChunkForEmbedding {
@@ -109,50 +109,33 @@ pub fn find_similar_chunks(
 	query_embedding: &[f32],
 	limit: usize,
 ) -> Result<Vec<SimilarChunk>> {
-	find_similar_chunks_filtered(connection, query_embedding, limit, None, None, None, None, &[], &[])
+	find_similar_chunks_filtered(connection, query_embedding, limit, &PassageFilters::default())
 }
 
-/// Above this many candidate chunks, a required-tag filter falls back from an
-/// exact scan to KNN with an enlarged fetch, trading recall for bounded cost.
-/// At 4096 dimensions the exact ceiling is ~80 MB of embeddings read per query.
+/// Above this many candidate chunks, a project or required-tag filter falls
+/// back from an exact scan to KNN with an enlarged fetch, trading recall for
+/// bounded cost. At 4096 dimensions the exact ceiling is ~80 MB of embeddings
+/// read per query.
 const EXACT_SCAN_MAX_CHUNKS: i64 = 5_000;
-
-struct ChunkFilters<'a> {
-	author_like: Option<&'a str>,
-	date_from: Option<&'a str>,
-	date_to: Option<&'a str>,
-	project: Option<&'a str>,
-	excluded_tags: &'a [String],
-	required_tags: &'a [String],
-}
 
 pub fn find_similar_chunks_filtered(
 	connection: &Connection,
 	query_embedding: &[f32],
 	limit: usize,
-	author_like: Option<&str>,
-	date_from: Option<&str>,
-	date_to: Option<&str>,
-	project_filter: Option<&str>,
-	excluded_tags: &[String],
-	required_tags: &[String],
+	filters: &PassageFilters,
 ) -> Result<Vec<SimilarChunk>> {
-	let filters = ChunkFilters {
-		author_like, date_from, date_to, project: project_filter, excluded_tags, required_tags,
-	};
-	find_similar_chunks_routed(connection, query_embedding, limit, &filters, EXACT_SCAN_MAX_CHUNKS)
+	find_similar_chunks_routed(connection, query_embedding, limit, filters, EXACT_SCAN_MAX_CHUNKS)
 }
 
 fn find_similar_chunks_routed(
 	connection: &Connection,
 	query_embedding: &[f32],
 	limit: usize,
-	filters: &ChunkFilters,
+	filters: &PassageFilters,
 	exact_scan_max_chunks: i64,
 ) -> Result<Vec<SimilarChunk>> {
-	let exact = filters.project.is_some()
-		|| (!filters.required_tags.is_empty()
-			&& count_tagged_chunks(connection, filters.required_tags)? <= exact_scan_max_chunks);
+	let scoped = filters.project.is_some() || !filters.required_tags.is_empty();
+	let exact = scoped && count_scoped_chunks(connection, filters)? <= exact_scan_max_chunks;
 	let results = if exact {
 		find_similar_chunks_exact(connection, query_embedding, filters)?
 	} else {
@@ -161,12 +144,17 @@ fn find_similar_chunks_routed(
 	Ok(finish_similar_chunks(results, limit, filters))
 }
 
-/// O(total chunks): entries has no document_id index, so this walks chunks and
-/// probes `document_tags` by primary key.
-fn count_tagged_chunks(connection: &Connection, required_tags: &[String]) -> Result<i64> {
+/// Chunks in the project and/or carrying a required tag. O(total chunks):
+/// entries has no document_id index, so this walks chunks and probes
+/// `documents` and `document_tags` by primary key.
+fn count_scoped_chunks(connection: &Connection, filters: &PassageFilters) -> Result<i64> {
 	let mut conditions = Vec::new();
 	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-	push_tag_conditions(&mut conditions, &mut param_values, &[], required_tags);
+	if let Some(project) = filters.project {
+		conditions.push(format!("d.project = ?{}", param_values.len() + 1));
+		param_values.push(Box::new(project.to_string()));
+	}
+	push_tag_conditions(&mut conditions, &mut param_values, &[], filters.required_tags);
 	let sql = format!(
 		"SELECT COUNT(*) FROM chunks c
 		 JOIN entries e ON e.id = c.entry_id
@@ -182,11 +170,12 @@ fn find_similar_chunks_knn(
 	connection: &Connection,
 	query_embedding: &[f32],
 	limit: usize,
-	filters: &ChunkFilters,
+	filters: &PassageFilters,
 ) -> Result<Vec<SimilarChunk>> {
 	let has_post_knn_filter = filters.author_like.is_some()
 		|| filters.date_from.is_some()
 		|| filters.date_to.is_some()
+		|| filters.project.is_some()
 		|| !filters.excluded_tags.is_empty()
 		|| !filters.required_tags.is_empty();
 	let fetch_limit = if has_post_knn_filter { limit * 5 } else { limit };
@@ -196,6 +185,10 @@ fn find_similar_chunks_knn(
 		Box::new(fetch_limit as i64),
 	];
 	let mut conditions = Vec::new();
+	if let Some(project) = filters.project {
+		conditions.push(format!("d.project = ?{}", param_values.len() + 1));
+		param_values.push(Box::new(project.to_string()));
+	}
 	push_tag_conditions(&mut conditions, &mut param_values, filters.excluded_tags, filters.required_tags);
 	let sql = format!(
 		"WITH knn AS (
@@ -231,7 +224,7 @@ fn find_similar_chunks_knn(
 fn find_similar_chunks_exact(
 	connection: &Connection,
 	query_embedding: &[f32],
-	filters: &ChunkFilters,
+	filters: &PassageFilters,
 ) -> Result<Vec<SimilarChunk>> {
 	let mut conditions = Vec::new();
 	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -285,7 +278,7 @@ fn similar_chunk_from_row(row: &rusqlite::Row, similarity: f32) -> rusqlite::Res
 fn finish_similar_chunks(
 	mut results: Vec<SimilarChunk>,
 	limit: usize,
-	filters: &ChunkFilters,
+	filters: &PassageFilters,
 ) -> Vec<SimilarChunk> {
 	if let Some(author_pattern) = filters.author_like {
 		let pattern_lower = author_pattern.to_lowercase();
@@ -552,10 +545,7 @@ mod tests {
 		crate::storage::add_tag(&db, tagged, "lab-meeting").unwrap();
 
 		let required = vec!["lab-meeting".to_string()];
-		let filters = ChunkFilters {
-			author_like: None, date_from: None, date_to: None, project: None,
-			excluded_tags: &[], required_tags: &required,
-		};
+		let filters = PassageFilters { required_tags: &required, ..Default::default() };
 		let query = [1.0, 0.0, 0.0, 0.0];
 		for exact_scan_max_chunks in [0, EXACT_SCAN_MAX_CHUNKS] {
 			let results = find_similar_chunks_routed(&db, &query, 1, &filters, exact_scan_max_chunks).unwrap();
@@ -571,6 +561,25 @@ mod tests {
 		insert_embedded_document(&db, "plain", &[1.0, 0.0, 0.0, 0.0]);
 		let tagged = insert_embedded_document(&db, "tagged", &[1.0, 0.0, 0.0, 0.0]);
 		crate::storage::add_tag(&db, tagged, "lab-meeting").unwrap();
-		assert_eq!(count_tagged_chunks(&db, &["lab-meeting".to_string()]).unwrap(), 1);
+		let required = vec!["lab-meeting".to_string()];
+		assert_eq!(count_scoped_chunks(&db, &PassageFilters { required_tags: &required, ..Default::default() }).unwrap(), 1);
+	}
+
+	#[test]
+	fn project_filter_holds_on_both_exact_and_knn_paths() {
+		let db = setup_db();
+		ensure_vec_table(&db, 4).unwrap();
+		insert_embedded_document(&db, "closest, no project", &[1.0, 0.0, 0.0, 0.0]);
+		let in_project = insert_embedded_document(&db, "in project", &[0.5, 0.5, 0.0, 0.0]);
+		db.execute("UPDATE documents SET project = 'meetings' WHERE id = ?1", params![in_project]).unwrap();
+
+		let filters = PassageFilters { project: Some("meetings"), ..Default::default() };
+		assert_eq!(count_scoped_chunks(&db, &filters).unwrap(), 1);
+		let query = [1.0, 0.0, 0.0, 0.0];
+		for exact_scan_max_chunks in [0, EXACT_SCAN_MAX_CHUNKS] {
+			let results = find_similar_chunks_routed(&db, &query, 5, &filters, exact_scan_max_chunks).unwrap();
+			let documents: Vec<i64> = results.iter().map(|r| r.document_id).collect();
+			assert_eq!(documents, vec![in_project], "threshold {}", exact_scan_max_chunks);
+		}
 	}
 }

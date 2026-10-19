@@ -17,6 +17,18 @@ use rusqlite::Connection;
 
 use crate::types::MergeStrategy;
 
+/// The passage-level filters every search path takes, borrowed from
+/// `query::SearchFilters` with `date_to` already widened to cover its day.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PassageFilters<'a> {
+	pub author_like: Option<&'a str>,
+	pub date_from: Option<&'a str>,
+	pub date_to: Option<&'a str>,
+	pub project: Option<&'a str>,
+	pub excluded_tags: &'a [String],
+	pub required_tags: &'a [String],
+}
+
 /// The single SQL form of tag-based filtering, shared by every search path:
 /// a `NOT EXISTS` (hiding) or `EXISTS` (requiring) against `document_tags`
 /// over an already-expanded tag list.

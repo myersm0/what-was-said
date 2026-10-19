@@ -7,13 +7,7 @@ use crate::projects::ProjectRegistration;
 use crate::storage;
 use crate::util;
 
-pub use crate::storage::{DocumentListOrder, FtsQueryError, ListedDocument};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchSortColumn {
-	Score,
-	Date,
-}
+pub use crate::storage::{DocumentListOrder, FtsQueryError, ListedDocument, SearchSortColumn};
 
 #[derive(Serialize)]
 pub struct GroupedSearchResult {
@@ -59,17 +53,20 @@ pub struct SearchFilters {
 }
 
 impl SearchFilters {
-	fn author_ref(&self) -> Option<&str> {
-		self.author.as_deref()
-	}
-	fn date_from_ref(&self) -> Option<&str> {
-		self.date_from.as_deref()
-	}
 	fn date_to_bound(&self) -> Option<String> {
 		self.date_to.as_deref().map(inclusive_upper_bound)
 	}
-	fn project_ref(&self) -> Option<&str> {
-		self.project.as_deref()
+
+	/// Borrowed for storage; `date_to` is the caller's `date_to_bound()`.
+	fn passage<'a>(&'a self, date_to: &'a Option<String>) -> storage::PassageFilters<'a> {
+		storage::PassageFilters {
+			author_like: self.author.as_deref(),
+			date_from: self.date_from.as_deref(),
+			date_to: date_to.as_deref(),
+			project: self.project.as_deref(),
+			excluded_tags: &self.excluded_tags,
+			required_tags: &self.required_tags,
+		}
 	}
 }
 
@@ -210,10 +207,7 @@ pub fn search_filtered(
 	filters: &SearchFilters,
 ) -> Result<Vec<GroupedSearchResult>> {
 	let date_to = filters.date_to_bound();
-	let rows = storage::raw_fts_search(
-		connection, query, filters.author_ref(), filters.date_from_ref(), date_to.as_deref(),
-		filters.project_ref(), &filters.excluded_tags, &filters.required_tags,
-	)?;
+	let rows = storage::raw_fts_search(connection, query, sort_by, &filters.passage(&date_to))?;
 	let mut results = group_fts_results(rows, sort_by);
 	annotate_supersession(connection, &mut results)?;
 	if sort_by == SearchSortColumn::Score {
@@ -237,11 +231,7 @@ pub fn find_similar_grouped_filtered(
 	filters: &SearchFilters,
 ) -> Result<Vec<GroupedSearchResult>> {
 	let date_to = filters.date_to_bound();
-	let chunks = storage::find_similar_chunks_filtered(
-		connection, query_embedding, limit,
-		filters.author_ref(), filters.date_from_ref(), date_to.as_deref(),
-		filters.project_ref(), &filters.excluded_tags, &filters.required_tags,
-	)?;
+	let chunks = storage::find_similar_chunks_filtered(connection, query_embedding, limit, &filters.passage(&date_to))?;
 	let mut results = group_similar_results(chunks);
 	annotate_supersession(connection, &mut results)?;
 	demote_superseded(&mut results);
@@ -412,11 +402,7 @@ fn demote_superseded(results: &mut [GroupedSearchResult]) {
 		return;
 	}
 	for result in results.iter_mut().filter(|r| r.superseded) {
-		result.best_rank = if result.best_rank < 0.0 {
-			result.best_rank * SUPERSEDED_WEIGHT
-		} else {
-			result.best_rank / SUPERSEDED_WEIGHT
-		};
+		result.best_rank = weighted(result.best_rank, SUPERSEDED_WEIGHT);
 	}
 	results.sort_by(|a, b| a.best_rank.partial_cmp(&b.best_rank).unwrap_or(std::cmp::Ordering::Equal));
 }
@@ -447,8 +433,7 @@ pub fn group_fts_results(
 ) -> Vec<GroupedSearchResult> {
 	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
 	for row in rows {
-		let weight = status_weight(row.doc_status.as_deref());
-		let weighted_rank = row.rank * weight;
+		let weighted_rank = weighted(row.rank, status_weight(row.doc_status.as_deref()));
 		let hit = ChunkHit {
 			entry_id: row.entry_id,
 			entry_position: row.entry_position,
@@ -512,8 +497,7 @@ pub fn group_similar_results(
 	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
 	for chunk in chunks {
 		let rank = -(chunk.similarity as f64);
-		let weight = status_weight(chunk.doc_status.as_deref());
-		let weighted_rank = rank * weight;
+		let weighted_rank = weighted(rank, status_weight(chunk.doc_status.as_deref()));
 		let hit = ChunkHit {
 			entry_id: 0,
 			entry_position: chunk.entry_position,
@@ -555,6 +539,16 @@ pub fn group_similar_results(
 	});
 
 	grouped
+}
+
+/// Ranks sort ascending (bm25 and negated similarity), usually negative but
+/// positive for a negative cosine similarity; a weight below 1 must worsen either.
+fn weighted(rank: f64, weight: f64) -> f64 {
+	if rank < 0.0 {
+		rank * weight
+	} else {
+		rank / weight
+	}
 }
 
 fn status_weight(status: Option<&str>) -> f64 {
@@ -1248,5 +1242,27 @@ mod visibility_tests {
 		assert_eq!(resolved.filters.excluded_tags, vec!["junk"]);
 		let results = search_filtered(&db, "wombat", SearchSortColumn::Score, &resolved.filters).unwrap();
 		assert_eq!(results.iter().map(|r| r.document_id).collect::<Vec<_>>(), vec![archived]);
+	}
+
+	#[test]
+	fn weights_worsen_positive_and_negative_ranks() {
+		assert!(weighted(-2.0, 0.5) > -2.0);
+		assert!(weighted(0.3, 0.5) > 0.3);
+		assert_eq!(weighted(-2.0, 1.0), -2.0);
+	}
+
+	#[test]
+	fn date_sorted_keyword_search_finds_newest_beyond_the_rank_cutoff() {
+		let db = setup_db();
+		for n in 0..205 {
+			insert_document(&db, &format!("old {}", n), "quokka quokka quokka", &format!("2025-01-01 00:{:02}:{:02}", n / 60, n % 60));
+		}
+		let filler = "unrelated words about something else entirely ".repeat(20);
+		let newest = insert_document(&db, "newest", &format!("{} quokka", filler), "2026-06-01 00:00:00");
+
+		let by_score = search_filtered(&db, "quokka", SearchSortColumn::Score, &SearchFilters::default()).unwrap();
+		assert!(by_score.iter().all(|r| r.document_id != newest));
+		let by_date = search_filtered(&db, "quokka", SearchSortColumn::Date, &SearchFilters::default()).unwrap();
+		assert_eq!(by_date[0].document_id, newest);
 	}
 }
