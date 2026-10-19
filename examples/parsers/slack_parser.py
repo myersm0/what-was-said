@@ -50,6 +50,8 @@ NOISE_LINE_PATTERNS = [
 	re.compile(r'^:[\w+\-]+:\s*$'),
 	re.compile(r'^\d+\s*$'),
 	re.compile(r'^image\.png\s*$'),
+	re.compile(r'^New\s*$'),
+	re.compile(r'^NEW\s*$'),
 ]
 
 LINK_UNFURL_SIGNALS = re.compile(
