@@ -164,7 +164,48 @@ fn backfill_shingle_counts(connection: &Connection) -> Result<()> {
 	Ok(())
 }
 
+/// Bumped whenever `migrate` changes the schema. Read-only consumers refuse a
+/// database at any other version rather than migrating it themselves.
+pub const SCHEMA_VERSION: i64 = 1;
+
+/// How long a statement waits on another process's write lock before failing.
+pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn schema_version(connection: &Connection) -> Result<i64> {
+	Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+}
+
+/// For long-lived consumers that only read (mcp, serve): no DDL, no migration,
+/// and `query_only` so no statement can write even by mistake.
+pub fn prepare_read_only(connection: &Connection) -> Result<()> {
+	connection.busy_timeout(BUSY_TIMEOUT)?;
+	let version = schema_version(connection)?;
+	if version < SCHEMA_VERSION {
+		anyhow::bail!(
+			"database schema is at version {} but this build expects {}; run any write-capable \
+			 command once to migrate it (e.g. `what-was-said stats` with the same --db)",
+			version, SCHEMA_VERSION,
+		);
+	}
+	if version > SCHEMA_VERSION {
+		anyhow::bail!(
+			"database schema is at version {}, newer than this build ({}); use a newer what-was-said",
+			version, SCHEMA_VERSION,
+		);
+	}
+	connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA query_only = ON;")?;
+	Ok(())
+}
+
 pub fn initialize(connection: &Connection) -> Result<()> {
+	connection.busy_timeout(BUSY_TIMEOUT)?;
+	let version = schema_version(connection)?;
+	if version > SCHEMA_VERSION {
+		anyhow::bail!(
+			"database schema is at version {}, newer than this build ({}); refusing to migrate it backward",
+			version, SCHEMA_VERSION,
+		);
+	}
 	connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 	connection.execute_batch("PRAGMA journal_mode=WAL;")?;
 	connection.execute_batch(
@@ -470,6 +511,7 @@ fn migrate(connection: &Connection) -> Result<()> {
 			connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 		}
 	}
+	connection.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))?;
 	Ok(())
 }
 
@@ -526,6 +568,31 @@ mod tests {
 		let chunks = chunking::chunk_text(body);
 		insert_chunks(connection, entry_id, &chunks).unwrap();
 		doc_id
+	}
+
+	#[test]
+	fn initialize_records_schema_version() {
+		let db = setup_db();
+		assert_eq!(schema_version(&db).unwrap(), SCHEMA_VERSION);
+	}
+
+	#[test]
+	fn read_only_connections_cannot_write() {
+		let db = setup_db();
+		insert_test_document(&db, "Doc", "some content");
+		prepare_read_only(&db).unwrap();
+		assert_eq!(document_count(&db).unwrap(), 1);
+		assert!(db.execute("DELETE FROM documents", []).is_err());
+		assert_eq!(document_count(&db).unwrap(), 1);
+	}
+
+	#[test]
+	fn read_only_open_refuses_unmigrated_and_newer_databases() {
+		let db = rusqlite::Connection::open_in_memory().unwrap();
+		assert!(prepare_read_only(&db).unwrap_err().to_string().contains("migrate"));
+		db.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1)).unwrap();
+		assert!(prepare_read_only(&db).unwrap_err().to_string().contains("newer"));
+		assert!(initialize(&db).unwrap_err().to_string().contains("newer"));
 	}
 
 	#[test]

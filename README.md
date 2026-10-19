@@ -215,7 +215,7 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 ## API server
 
-`what-was-said serve` starts a localhost JSON API for programmatic access — the agent-facing interface, with the DB connection held open to avoid per-call process spawn overhead.
+`what-was-said serve` starts a localhost JSON API for programmatic access — the agent-facing interface, with the DB connection held open to avoid per-call process spawn overhead. Like `mcp`, it opens the database read-only and needs an existing, migrated database.
 
 | Endpoint | Description |
 |---|---|
@@ -241,7 +241,7 @@ Search endpoints hide documents tagged with a default-excluded tag (`superseded`
 
 ## MCP server
 
-`what-was-said mcp` runs a read-only [MCP](https://modelcontextprotocol.io) server on stdio, so Claude Desktop can query the database directly. It opens the database itself (no `serve` needed) and refuses to start if the database file doesn't exist, rather than creating an empty one.
+`what-was-said mcp` runs a read-only [MCP](https://modelcontextprotocol.io) server on stdio, so Claude Desktop can query the database directly. It opens the database itself (no `serve` needed), read-only: it never creates, migrates, or writes to the database, and refuses to start if the file doesn't exist or its schema is out of date. After upgrading the binary, run any other command once (e.g. `what-was-said stats`) to migrate.
 
 Tools: `search_keyword`, `search_semantic`, `search_claims`, `get_document`, `list_documents`, `list_projects`, `list_tags`, and `stats`. Searches return a few documents with short excerpts, sized for choosing what to open; `get_document` returns the full text up to a character budget and states how to continue past it. Superseded documents are hidden and annotated exactly as in `serve`. A `project` or `tag` value that cannot match anything is returned as a tool error naming the valid choices. If Ollama is unreachable, the semantic and claim tools return an error and the rest keep working.
 

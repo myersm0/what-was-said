@@ -196,17 +196,39 @@ fn default_db_path() -> PathBuf {
 		.join("what-was-said.db")
 }
 
-fn open_db(path: &Path) -> Result<rusqlite::Connection> {
-	if let Some(parent) = path.parent() {
-		std::fs::create_dir_all(parent)?;
-	}
+fn register_vec_extension() {
 	VEC_INIT.call_once(|| unsafe {
 		rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
 			sqlite_vec::sqlite3_vec_init as *const (),
 		)));
 	});
+}
+
+fn open_db(path: &Path) -> Result<rusqlite::Connection> {
+	if let Some(parent) = path.parent() {
+		std::fs::create_dir_all(parent)?;
+	}
+	register_vec_extension();
 	let connection = rusqlite::Connection::open(path)?;
 	storage::initialize(&connection)?;
+	Ok(connection)
+}
+
+/// Never creates or migrates: a missing file or an out-of-date schema is an error.
+fn open_db_read_only(path: &Path) -> Result<rusqlite::Connection> {
+	if !path.exists() {
+		anyhow::bail!(
+			"no database at {}; pass --db with the absolute path of an existing database",
+			path.display(),
+		);
+	}
+	register_vec_extension();
+	let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+		| rusqlite::OpenFlags::SQLITE_OPEN_URI
+		| rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+	let connection = rusqlite::Connection::open_with_flags(path, flags)
+		.with_context(|| format!("opening {}", path.display()))?;
+	storage::prepare_read_only(&connection)?;
 	Ok(connection)
 }
 
@@ -233,13 +255,11 @@ fn main() -> Result<()> {
 		Some(config_file.as_path()).filter(|p| p.exists()),
 	)?;
 	let mut llms = config::LlmsConfig::load(&config_dir)?;
-	if matches!(cli.command, Some(Command::Mcp)) && !db_path.exists() {
-		anyhow::bail!(
-			"no database at {}; pass --db with the absolute path of an existing database",
-			db_path.display(),
-		);
-	}
-	let connection = open_db(&db_path)?;
+	let connection = if matches!(cli.command, Some(Command::Mcp) | Some(Command::Serve { .. })) {
+		open_db_read_only(&db_path)?
+	} else {
+		open_db(&db_path)?
+	};
 	let json_output = cli.json;
 
 	if let Some(b) = &cli.backend {
