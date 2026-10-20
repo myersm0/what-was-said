@@ -523,21 +523,27 @@ pub struct SimilarClaim {
 	pub current_document_id: Option<i64>,
 }
 
+/// Always fetches `limit * 5` neighbors: filters apply after the KNN, and
+/// collapsing a version family's duplicate claims frees slots to refill.
 pub fn find_similar_claims(
 	connection: &Connection,
 	query_embedding: &[f32],
 	limit: usize,
+	author_like: Option<&str>,
 	excluded_tags: &[String],
 	required_tags: &[String],
 ) -> Result<Vec<SimilarClaim>> {
 	check_vector_dimension(connection, "vec_claims", query_embedding.len())?;
-	let has_post_knn_filter = !excluded_tags.is_empty() || !required_tags.is_empty();
-	let fetch_limit = if has_post_knn_filter { limit * 5 } else { limit };
+	let fetch_limit = limit * 5;
 	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
 		Box::new(query_embedding.as_bytes().to_vec()),
 		Box::new(fetch_limit as i64),
 	];
 	let mut conditions = Vec::new();
+	if let Some(author) = author_like {
+		conditions.push(format!("LOWER(c.author) LIKE ?{}", param_values.len() + 1));
+		param_values.push(Box::new(format!("%{}%", author.to_lowercase())));
+	}
 	push_tag_conditions(&mut conditions, &mut param_values, excluded_tags, required_tags);
 	let sql = format!(
 		"WITH knn AS (
@@ -572,15 +578,44 @@ pub fn find_similar_claims(
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
-	results.truncate(limit);
 
 	for claim in &mut results {
 		let status = super::supersession_status(connection, claim.document_id)?;
 		claim.superseded = status.superseded;
 		claim.current_document_id = status.current_document_id;
 	}
-
+	let mut results = collapse_family_duplicates(results);
+	results.truncate(limit);
 	Ok(results)
+}
+
+fn normalized_claim(content: &str) -> String {
+	content.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Versions of one document often yield the same claim; keep one copy per
+/// family, at the best-ranked copy's position, preferring the current
+/// version's so the claim cites the document to read.
+fn collapse_family_duplicates(results: Vec<SimilarClaim>) -> Vec<SimilarClaim> {
+	let mut kept: Vec<SimilarClaim> = Vec::with_capacity(results.len());
+	let mut seen: std::collections::HashMap<(i64, String), usize> = std::collections::HashMap::new();
+	for claim in results {
+		let family = claim.current_document_id.unwrap_or(claim.document_id);
+		match seen.entry((family, normalized_claim(&claim.content))) {
+			std::collections::hash_map::Entry::Occupied(slot) => {
+				let index = *slot.get();
+				if kept[index].superseded && !claim.superseded {
+					let similarity = kept[index].similarity.max(claim.similarity);
+					kept[index] = SimilarClaim { similarity, ..claim };
+				}
+			}
+			std::collections::hash_map::Entry::Vacant(slot) => {
+				slot.insert(kept.len());
+				kept.push(claim);
+			}
+		}
+	}
+	kept
 }
 
 #[cfg(test)]
@@ -701,5 +736,32 @@ mod tests {
 		assert!(error.downcast_ref::<EmbeddingMismatch>().is_some(), "{}", error);
 		assert!(adopt_embedding_model(&db, "model-a", 3).is_err());
 		assert!(adopt_embedding_model(&db, "model-a", 4).is_ok());
+	}
+
+	fn similar_claim(claim_id: i64, document_id: i64, content: &str, similarity: f32, current: Option<i64>) -> SimilarClaim {
+		SimilarClaim {
+			claim_id,
+			document_id,
+			source_title: String::new(),
+			content: content.to_string(),
+			author: None,
+			similarity,
+			superseded: current.is_some(),
+			current_document_id: current,
+		}
+	}
+
+	#[test]
+	fn family_duplicates_collapse_to_the_current_version() {
+		let collapsed = collapse_family_duplicates(vec![
+			similar_claim(90, 8, "Cite Montre with the BibTeX entry.", 0.71, Some(9)),
+			similar_claim(55, 3, "Unrelated claim.", 0.65, None),
+			similar_claim(103, 9, "cite  montre with the BibTeX entry.", 0.70, None),
+			similar_claim(104, 4, "Cite Montre with the BibTeX entry.", 0.60, None),
+		]);
+		let ids: Vec<i64> = collapsed.iter().map(|claim| claim.claim_id).collect();
+		assert_eq!(ids, vec![103, 55, 104], "same text in another family is kept");
+		assert!(!collapsed[0].superseded);
+		assert_eq!(collapsed[0].similarity, 0.71);
 	}
 }

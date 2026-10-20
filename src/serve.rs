@@ -338,6 +338,7 @@ async fn similar_claims_handler(
 		}
 		storage::check_embedding_model(&connection, &state.embed_model).map_err(err_embedding)?;
 		state.resolve(&connection, FilterInput {
+			author: params.author,
 			tag: params.tag,
 			include_hidden: params.include_hidden.unwrap_or(false),
 			..Default::default()

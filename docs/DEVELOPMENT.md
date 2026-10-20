@@ -154,7 +154,7 @@ Endpoints:
 - `GET /get/:id` — full document with entries and chunks
 - `GET /entries/:doc_id` — entries for a document, wrapped as `{document_id, superseded, current_document_id?, entries}`
 - `GET /claims/doc/:doc_id` — claims extracted from a document, wrapped as `{document_id, superseded, current_document_id?, claims}`
-- `GET /claims/similar?q=...&limit=N&include_hidden=true|false` — semantic search over claims via `vec_claims`
+- `GET /claims/similar?q=...&limit=N&author=...&tag=...&include_hidden=true|false` — semantic search over claims via `vec_claims`. Always fetches `limit * 5` neighbors, then filters, then collapses claims whose normalized text repeats within one version family (keeping the current version's copy at the best-ranked position) before truncating
 - `GET /stats` — document/entry/chunk/embedding/claim counts
 - `GET /derive/status` — derivation progress
 

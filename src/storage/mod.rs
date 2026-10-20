@@ -975,7 +975,7 @@ mod tests {
 		insert_claim_embedding(&db, c2, &emb_b).unwrap();
 
 		let query: Vec<f32> = vec![0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-		let results = find_similar_claims(&db, &query, 2, &[], &[]).unwrap();
+		let results = find_similar_claims(&db, &query, 2, None, &[], &[]).unwrap();
 		assert_eq!(results.len(), 2);
 		assert_eq!(results[0].claim_id, c1);
 		assert!(results[0].similarity > results[1].similarity);
@@ -1074,12 +1074,12 @@ mod tests {
 		insert_claim_embedding(&db, new_claim, &[0.9, 0.1, 0.0, 0.0]).unwrap();
 		let query = vec![1.0, 0.0, 0.0, 0.0];
 
-		let hidden = find_similar_claims(&db, &query, 10, &["superseded".to_string()], &[]).unwrap();
+		let hidden = find_similar_claims(&db, &query, 10, None, &["superseded".to_string()], &[]).unwrap();
 		assert_eq!(hidden.len(), 1);
 		assert_eq!(hidden[0].claim_id, new_claim);
 		assert!(!hidden[0].superseded);
 
-		let shown = find_similar_claims(&db, &query, 10, &[], &[]).unwrap();
+		let shown = find_similar_claims(&db, &query, 10, None, &[], &[]).unwrap();
 		assert_eq!(shown.len(), 2);
 		let old_hit = shown.iter().find(|c| c.claim_id == old_claim).unwrap();
 		assert!(old_hit.superseded);
@@ -1102,7 +1102,7 @@ mod tests {
 		insert_claim_embedding(&db, tagged_claim, &[0.5, 0.5, 0.0, 0.0]).unwrap();
 		let query = vec![1.0, 0.0, 0.0, 0.0];
 
-		let results = find_similar_claims(&db, &query, 1, &[], &["lab-meeting".to_string()]).unwrap();
+		let results = find_similar_claims(&db, &query, 1, None, &[], &["lab-meeting".to_string()]).unwrap();
 		assert_eq!(results.len(), 1);
 		assert_eq!(results[0].claim_id, tagged_claim);
 	}

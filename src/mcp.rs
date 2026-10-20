@@ -109,6 +109,10 @@ pub struct SemanticParams {
 pub struct ClaimsParams {
 	/// What was asserted, decided or planned, in natural language.
 	pub query: String,
+	/// Case-insensitive substring of the claim's recorded author. Many claims
+	/// have none (see the tool description), so prefer naming the person in
+	/// the query when recall matters.
+	pub author: Option<String>,
 	#[schemars(description = TAG_DESCRIPTION)]
 	pub tag: Option<String>,
 	#[schemars(description = INCLUDE_HIDDEN_DESCRIPTION)]
@@ -312,6 +316,7 @@ impl McpContext {
 			}
 			storage::check_embedding_model(&connection, &self.embed_model).map_err(embedding_failure)?;
 			self.resolve_scope(&connection, query::FilterInput {
+				author: params.author,
 				tag: params.tag,
 				include_hidden: params.include_hidden.unwrap_or(false),
 				..Default::default()
@@ -792,7 +797,12 @@ impl WwsServer {
 		decided, believed or planned, with attribution. Use it for questions like 'what did we decide \
 		about X' or 'who said Y'; to find passages instead, use search_semantic or search_keyword. Each \
 		claim names its document; open it with get_document to check the context. Only documents \
-		processed by extract have claims (see stats).")]
+		processed by extract have claims (see stats). An author is recorded only when the source \
+		names one speaker for the claim, typically in email and chat threads. Claims are one lens \
+		on a document, extracted by a model that can miss things: a missing claim is not evidence \
+		that nothing was said, so confirm with search_keyword or search_semantic. When hidden \
+		versions are included, a claim repeated across versions of one document appears once, \
+		from the current version.")]
 	async fn search_claims(&self, Parameters(params): Parameters<ClaimsParams>) -> ToolResult {
 		self.blocking(|context| context.search_claims(params))
 	}
@@ -1171,6 +1181,30 @@ mod tests {
 		let response = parse(floored.search_semantic(SemanticParams { query: "birds".into(), ..Default::default() }));
 		assert_eq!(response["results"].as_array().unwrap().len(), 1);
 		assert_eq!(response["below_min_similarity"], 1);
+	}
+
+	#[test]
+	fn claim_search_filters_by_author_and_reports_the_filter() {
+		let db = setup_db();
+		let thread = insert_document(&db, "thread", "try the flag", "2026-01-01 00:00:00");
+		let alice = storage::insert_claim(&db, thread, None, Some("Alice Wilson"), "Alice suggested the flag.", "m", "h").unwrap();
+		let unattributed = storage::insert_claim(&db, thread, None, None, "The flag fixed rebuilds.", "m", "h").unwrap();
+		storage::ensure_vec_claims_table(&db, 4).unwrap();
+		storage::insert_claim_embedding(&db, alice, &[0.9, 0.1, 0.0, 0.0]).unwrap();
+		storage::insert_claim_embedding(&db, unattributed, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+		let context = context(db);
+
+		let all = parse(context.search_claims(ClaimsParams { query: "flag".into(), ..Default::default() }));
+		assert_eq!(all["claims"].as_array().unwrap().len(), 2, "{}", all);
+		let filtered = parse(context.search_claims(ClaimsParams {
+			query: "flag".into(),
+			author: Some("wilson".into()),
+			..Default::default()
+		}));
+		let claims = filtered["claims"].as_array().unwrap();
+		assert_eq!(claims.len(), 1, "{}", filtered);
+		assert_eq!(claims[0]["claim_id"], alice);
+		assert_eq!(filtered["request"]["filters"]["author"], "wilson");
 	}
 
 	#[test]

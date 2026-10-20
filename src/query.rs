@@ -246,7 +246,8 @@ pub fn find_similar_claims_filtered(
 	filters: &SearchFilters,
 ) -> Result<Vec<storage::SimilarClaim>> {
 	storage::find_similar_claims(
-		connection, query_embedding, limit, &filters.excluded_tags, &filters.required_tags,
+		connection, query_embedding, limit, filters.author.as_deref(),
+		&filters.excluded_tags, &filters.required_tags,
 	)
 }
 

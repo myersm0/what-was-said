@@ -227,7 +227,7 @@ The source line is matched against doctype patterns in `config.toml` to determin
 | `GET /get/:id` | Full document with entries and chunks |
 | `GET /entries/:doc_id` | Entries for a document |
 | `GET /claims/doc/:doc_id` | Claims extracted from a document |
-| `GET /claims/similar?q=...&limit=N&tag=...&include_hidden=true` | Semantic search over claims |
+| `GET /claims/similar?q=...&limit=N&author=...&tag=...&include_hidden=true` | Semantic search over claims; a claim repeated across versions of one document is returned once, from the current version |
 | `GET /stats` | Database statistics |
 | `GET /derive/status` | Derivation progress |
 
