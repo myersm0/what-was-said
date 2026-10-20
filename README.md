@@ -503,10 +503,11 @@ SQLite at `~/Library/Application Support/what-was-said/what-was-said.db` on macO
 
 The first `embed` run records its model in the `meta` table, and from then on `embed` and every semantic search refuse a different configured `embed_model`, since vectors from different models can't be compared. A query whose dimension differs from the stored vectors is refused the same way.
 
-**Reset:**
+**Reset:** quit anything that has the database open first (Claude Desktop, which runs the MCP server, plus any `serve` or TUI session), then delete the database together with its WAL side files:
 ```bash
-rm ~/.local/share/what-was-said/what-was-said.db   # Linux; on macOS the file is in ~/Library/Application Support/what-was-said/
+rm ~/.local/share/what-was-said/what-was-said.db{,-wal,-shm}   # Linux; on macOS the files are in ~/Library/Application Support/what-was-said/
 ```
+A process that still has the old database open keeps reading the deleted file, and leftover `-wal`/`-shm` files break the next database created at that path.
 
 **Rebuild embeddings** (also the way to switch embedding models):
 ```sql

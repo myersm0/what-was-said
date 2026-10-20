@@ -204,7 +204,34 @@ fn register_vec_extension() {
 	});
 }
 
+/// WAL-mode side files left behind when the database file was deleted.
+fn orphaned_wal_files(path: &Path) -> Vec<PathBuf> {
+	if path.exists() {
+		return Vec::new();
+	}
+	["-wal", "-shm"]
+		.iter()
+		.map(|suffix| {
+			let mut name = path.as_os_str().to_owned();
+			name.push(suffix);
+			PathBuf::from(name)
+		})
+		.filter(|side| side.exists())
+		.collect()
+}
+
 fn open_db(path: &Path) -> Result<rusqlite::Connection> {
+	let orphans = orphaned_wal_files(path);
+	if !orphans.is_empty() {
+		let listed: Vec<String> = orphans.iter().map(|side| side.display().to_string()).collect();
+		anyhow::bail!(
+			"{} doesn't exist but its write-ahead log files do: {}. Another process may still have the \
+			 old database open (Claude Desktop's MCP server, `serve`, or the TUI). Quit it, delete these \
+			 files, then run the command again.",
+			path.display(),
+			listed.join(", "),
+		);
+	}
 	if let Some(parent) = path.parent() {
 		std::fs::create_dir_all(parent)?;
 	}
