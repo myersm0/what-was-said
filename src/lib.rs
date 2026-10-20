@@ -15,6 +15,7 @@ pub mod prompts;
 pub mod projects;
 pub mod query;
 pub mod serve;
+pub mod stable_hash;
 pub mod storage;
 pub mod sync;
 pub mod ingest;

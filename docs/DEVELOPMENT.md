@@ -80,7 +80,7 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 - `position`: Order within document
 - `author`, `timestamp`: For conversations
 - `heading_title`, `heading_level`: For structured docs
-- `minhash`: Per-entry MinHash signature
+- `minhash`: Per-entry MinHash signature. Signatures, extract prompt hashes and derive source hashes all come from `stable_hash` (SipHash-1-3 with a zero key, fed bytes the way std's `Hash` impls do), not `std`'s `DefaultHasher`, whose algorithm may change in any Rust release; a change there would silently stop new signatures from matching stored ones
 
 **chunks**: Text fragments for search indexing. Entries are split into chunks of ~300 words. Cascades on entry deletion.
 - `chunk_index`: Position within entry
