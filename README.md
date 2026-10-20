@@ -274,7 +274,10 @@ hit_chars = 1000            # characters per excerpt
 list_limit = 20             # rows per list_documents (max_list_limit = 100)
 claims_limit = 10           # (max_claims_limit = 30)
 document_chars = 24000      # get_document budget per call
+# semantic_min_similarity = 0.55  # off by default; drops weaker semantic hits
 ```
+
+Semantic hits always report their cosine similarity, and each document its `best_similarity`, so the model can tell a strong match from filler. `semantic_min_similarity` additionally drops hits below the floor and reports how many documents it dropped as `below_min_similarity`. Where the boundary between a match and filler falls depends on the embedding model and the corpus, so set it only after looking at scores for real queries.
 
 ---
 

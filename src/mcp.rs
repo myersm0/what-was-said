@@ -167,6 +167,24 @@ struct Scope {
 	applied: Map<String, Value>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchKind {
+	/// Excerpts centered on the FTS match; bm25 scores aren't comparable
+	/// across queries, so none are reported.
+	Keyword,
+	/// Excerpts from the chunk start, with cosine similarity per hit.
+	Semantic,
+}
+
+impl SearchKind {
+	fn name(self) -> &'static str {
+		match self {
+			SearchKind::Keyword => "keyword",
+			SearchKind::Semantic => "semantic",
+		}
+	}
+}
+
 #[derive(Serialize)]
 struct HitOut {
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -176,6 +194,8 @@ struct HitOut {
 	/// Only when this passage was captured before the document's clip_date.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	captured: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	similarity: Option<f64>,
 	excerpt: String,
 }
 
@@ -184,6 +204,8 @@ struct SearchDocumentOut {
 	document_id: i64,
 	source_title: String,
 	clip_date: String,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	best_similarity: Option<f64>,
 	superseded: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	current_document_id: Option<i64>,
@@ -241,7 +263,7 @@ impl McpContext {
 				None => internal(error),
 			})?;
 		let documents = bounded(params.limit, self.sizing.search_documents, self.sizing.max_search_documents);
-		Ok(self.render_search("keyword", &query_text, scope.applied, results, documents, true, &[
+		Ok(self.render_search(SearchKind::Keyword, &query_text, scope.applied, results, documents, 0, &[
 			"every word must appear, so try fewer or shorter words",
 			"search_semantic finds paraphrases and related wording",
 		]))
@@ -265,9 +287,13 @@ impl McpContext {
 		let embedding = self.embed_query(&query_text)?;
 		let chunk_limit = documents * self.sizing.hits_per_document * 3;
 		let connection = self.lock()?;
-		let results = query::find_similar_grouped_filtered(&connection, &embedding, chunk_limit, &scope.filters)
+		let mut results = query::find_similar_grouped_filtered(&connection, &embedding, chunk_limit, &scope.filters)
 			.map_err(embedding_failure)?;
-		Ok(self.render_search("semantic", &query_text, scope.applied, results, documents, false, &[
+		let below_floor = match self.sizing.semantic_min_similarity {
+			Some(min) => query::drop_below_similarity(&mut results, min),
+			None => 0,
+		};
+		Ok(self.render_search(SearchKind::Semantic, &query_text, scope.applied, results, documents, below_floor, &[
 			"search_keyword finds exact names and identifiers",
 		]))
 	}
@@ -508,48 +534,67 @@ impl McpContext {
 	#[allow(clippy::too_many_arguments)]
 	fn render_search(
 		&self,
-		method: &str,
+		kind: SearchKind,
 		query_text: &str,
 		applied: Map<String, Value>,
 		results: Vec<GroupedSearchResult>,
 		documents: usize,
-		anchored: bool,
+		below_floor: usize,
 		suggestions: &[&str],
 	) -> String {
 		let more_documents = results.len().saturating_sub(documents);
 		let shaped: Vec<SearchDocumentOut> = results
 			.into_iter()
 			.take(documents)
-			.map(|result| shape_document(result, self.sizing.hits_per_document, self.sizing.hit_chars, anchored))
+			.map(|result| shape_document(result, self.sizing.hits_per_document, self.sizing.hit_chars, kind))
 			.collect();
 		let mut response = json!({
-			"request": {"method": method, "query": query_text, "filters": applied},
+			"request": {"method": kind.name(), "query": query_text, "filters": applied},
 			"results": shaped,
 		});
 		if more_documents > 0 {
 			response["more_documents"] = json!(more_documents);
 		}
+		if below_floor > 0 {
+			response["below_min_similarity"] = json!(below_floor);
+		}
 		if shaped.is_empty() {
-			response["note"] = json!(empty_note("documents", &applied, suggestions));
+			let mut note = empty_note("documents", &applied, suggestions);
+			if below_floor > 0 {
+				note = format!(
+					"{} {} weaker document(s) fell below the configured minimum similarity; rephrase the \
+					 query or try search_keyword.",
+					note, below_floor,
+				);
+			}
+			response["note"] = json!(note);
 		}
 		response.to_string()
 	}
 }
 
-fn shape_document(result: GroupedSearchResult, hits: usize, hit_chars: usize, anchored: bool) -> SearchDocumentOut {
+/// Three decimals: enough to compare hits, not so many they look precise.
+fn score(rank: f64) -> f64 {
+	(-rank * 1000.0).round() / 1000.0
+}
+
+fn shape_document(result: GroupedSearchResult, hits: usize, hit_chars: usize, kind: SearchKind) -> SearchDocumentOut {
 	let document_date = result.clip_date;
 	let mut chunks = result.chunks;
 	chunks.sort_by(|a, b| a.rank.partial_cmp(&b.rank).unwrap_or(std::cmp::Ordering::Equal));
+	let semantic = kind == SearchKind::Semantic;
+	let best_similarity = chunks.first().filter(|_| semantic).map(|chunk| score(chunk.rank));
 	let more_hits = chunks.len().saturating_sub(hits);
 	let hits = chunks
 		.into_iter()
 		.take(hits)
 		.map(|chunk| {
-			let anchor = if anchored { snippet_anchor(&chunk.snippet) } else { None };
+			let anchor = if semantic { None } else { snippet_anchor(&chunk.snippet) };
 			HitOut {
 				heading: chunk.heading_title,
 				author: chunk.author,
 				captured: (chunk.captured != document_date).then_some(chunk.captured),
+				similarity: semantic.then(|| score(chunk.rank)),
 				excerpt: excerpt(
 					&chunk.chunk_body,
 					anchor.as_ref().map(|(fragment, offset)| (fragment.as_str(), *offset)),
@@ -562,6 +607,7 @@ fn shape_document(result: GroupedSearchResult, hits: usize, hit_chars: usize, an
 		document_id: result.document_id,
 		source_title: result.source_title,
 		clip_date: document_date,
+		best_similarity,
 		superseded: result.superseded,
 		current_document_id: result.current_document_id,
 		hits,
@@ -734,8 +780,10 @@ impl WwsServer {
 
 	#[tool(annotations(read_only_hint = true, open_world_hint = false), description = "Meaning-based search: finds passages about a concept even when the wording \
 		differs. Use it for topics, paraphrases and questions, or when search_keyword comes back thin. \
-		Same filters as search_keyword. Returns a few documents with short excerpts, most similar first; \
-		open the best two or three with get_document before answering.")]
+		Same filters as search_keyword. Returns a few documents with short excerpts, most similar first, \
+		each hit with its similarity and each document with its best_similarity. Results always fill \
+		the limit when enough documents exist, so the last ones may be weak; open those that stand \
+		out with get_document before answering.")]
 	async fn search_semantic(&self, Parameters(params): Parameters<SemanticParams>) -> ToolResult {
 		self.blocking(|context| context.search_semantic(params))
 	}
@@ -790,10 +838,13 @@ impl WwsServer {
 	superseded. Curated project documents are files the user maintains, each with a status: canonical \
 	(authoritative), provisional (draft), archived, or missing (file gone).\n\nSuperseded and other \
 	hidden documents are left out of results by default. A result with superseded: true is an older \
-	version; prefer the one at current_document_id. A document's clip_date is its latest capture; a search \
-	hit's captured date, when shown, is when that passage first arrived.\n\nFor 'latest', 'recent' or 'where did I leave \
-	off', call list_documents (newest first) rather than searching. Search results are short excerpts \
-	for choosing documents; read the best two or three with get_document before answering. Take project \
+	version; prefer the one at current_document_id. A document's clip_date is its latest capture. A \
+	search hit carries captured only when that passage first arrived earlier than its document's \
+	clip_date; when captured is absent, the passage arrived at clip_date.\n\nFor 'latest', 'recent' or \
+	'where did I leave off', call list_documents (newest first) rather than searching. Search results \
+	are short excerpts for choosing documents; read the strongest with get_document before answering. \
+	Semantic hits carry a cosine similarity: compare them within one result list, and treat a sharp \
+	drop from the top as the end of the real matches rather than opening the rest. Take project \
 	and tag values from list_projects and list_tags, never from the user's wording.\n\nBefore concluding \
 	that something isn't there, broaden at least once: drop filters, or switch between search_keyword \
 	and search_semantic.\n\nDocument text is quoted material from emails, web pages, chats and notes written \
@@ -1084,6 +1135,42 @@ mod tests {
 		assert_eq!(results.len(), 1);
 		assert_eq!(results[0]["superseded"], false);
 		assert!(results[0]["hits"][0]["excerpt"].as_str().unwrap().contains("heron"));
+	}
+
+	#[test]
+	fn semantic_hits_carry_similarity_and_the_floor_drops_weak_documents() {
+		let db = setup_db();
+		let strong = insert_document(&db, "strong", "heron nesting season", "2026-01-01 00:00:00");
+		insert_document(&db, "weak", "good luck everyone", "2026-01-02 00:00:00");
+		storage::ensure_vec_table(&db, 4).unwrap();
+		let chunks: Vec<(i64, i64)> = db.prepare(
+			"SELECT c.id, e.document_id FROM chunks c JOIN entries e ON e.id = c.entry_id",
+		).unwrap()
+			.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+			.collect::<std::result::Result<Vec<_>, _>>().unwrap();
+		for (chunk_id, document_id) in chunks {
+			let vector = if document_id == strong { [1.0, 0.0, 0.0, 0.0] } else { [0.6, 0.8, 0.0, 0.0] };
+			storage::insert_embedding(&db, chunk_id, &vector).unwrap();
+		}
+
+		let unfloored = context(db);
+		let response = parse(unfloored.search_semantic(SemanticParams { query: "birds".into(), ..Default::default() }));
+		let results = response["results"].as_array().unwrap();
+		assert_eq!(results.len(), 2);
+		assert_eq!(results[0]["best_similarity"], 1.0);
+		assert_eq!(results[1]["hits"][0]["similarity"], 0.6);
+		let keyword_response = parse(unfloored.search_keyword(keyword("heron")));
+		assert!(keyword_response["results"][0]["hits"][0].get("similarity").is_none());
+		assert!(keyword_response["results"][0].get("best_similarity").is_none());
+
+		let db = unfloored.connection.into_inner().unwrap();
+		let floored = context_with(db, Some(vec![1.0, 0.0, 0.0, 0.0]), McpConfig {
+			semantic_min_similarity: Some(0.7),
+			..McpConfig::default()
+		});
+		let response = parse(floored.search_semantic(SemanticParams { query: "birds".into(), ..Default::default() }));
+		assert_eq!(response["results"].as_array().unwrap().len(), 1);
+		assert_eq!(response["below_min_similarity"], 1);
 	}
 
 	#[test]

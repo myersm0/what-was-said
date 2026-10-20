@@ -541,6 +541,18 @@ pub fn group_similar_results(
 	grouped
 }
 
+/// Drops semantic hits whose cosine similarity is below `min`, then documents
+/// left with none; returns how many documents were dropped. Hit ranks are the
+/// unweighted negated similarity, so this compares raw scores.
+pub fn drop_below_similarity(results: &mut Vec<GroupedSearchResult>, min: f64) -> usize {
+	let before = results.len();
+	for result in results.iter_mut() {
+		result.chunks.retain(|chunk| -chunk.rank >= min);
+	}
+	results.retain(|result| !result.chunks.is_empty());
+	before - results.len()
+}
+
 /// Ranks sort ascending (bm25 and negated similarity), usually negative but
 /// positive for a negative cosine similarity; a weight below 1 must worsen either.
 fn weighted(rank: f64, weight: f64) -> f64 {
@@ -1264,5 +1276,21 @@ mod visibility_tests {
 		assert!(by_score.iter().all(|r| r.document_id != newest));
 		let by_date = search_filtered(&db, "quokka", SearchSortColumn::Date, &SearchFilters::default()).unwrap();
 		assert_eq!(by_date[0].document_id, newest);
+	}
+
+	#[test]
+	fn similarity_floor_drops_weak_hits_then_empty_documents() {
+		let hit = |rank: f64| ChunkHit {
+			entry_id: 1, entry_position: 0, chunk_index: 0, chunk_body: String::new(), snippet: String::new(),
+			author: None, heading_title: None, rank, captured: String::new(),
+		};
+		let document = |id: i64, ranks: &[f64]| GroupedSearchResult {
+			document_id: id, source_title: String::new(), clip_date: String::new(), best_rank: ranks[0],
+			superseded: false, current_document_id: None, chunks: ranks.iter().map(|r| hit(*r)).collect(),
+		};
+		let mut results = vec![document(1, &[-0.72, -0.41]), document(2, &[-0.50])];
+		assert_eq!(drop_below_similarity(&mut results, 0.55), 1);
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].chunks.len(), 1);
 	}
 }

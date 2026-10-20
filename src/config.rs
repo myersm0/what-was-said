@@ -81,6 +81,10 @@ pub struct McpConfig {
 	pub claims_limit: usize,
 	pub max_claims_limit: usize,
 	pub document_chars: usize,
+	/// Semantic hits below this cosine similarity are dropped. Off by default:
+	/// the boundary between a match and filler depends on the embedding model
+	/// and corpus, so calibrate it against real queries first.
+	pub semantic_min_similarity: Option<f64>,
 }
 
 impl Default for McpConfig {
@@ -95,6 +99,7 @@ impl Default for McpConfig {
 			claims_limit: 10,
 			max_claims_limit: 30,
 			document_chars: 24_000,
+			semantic_min_similarity: None,
 		}
 	}
 }
@@ -178,6 +183,11 @@ impl Config {
 				skip: entry.skip,
 				extract: entry.extract,
 			});
+		}
+		if let Some(min) = raw.mcp.semantic_min_similarity {
+			if !(-1.0..=1.0).contains(&min) {
+				anyhow::bail!("[mcp] semantic_min_similarity must be between -1 and 1, got {}", min);
+			}
 		}
 		Ok(Config { doctypes, mcp: raw.mcp })
 	}
@@ -959,6 +969,9 @@ mod mcp_config_tests {
 		assert_eq!(config.mcp.search_documents, 3);
 		assert_eq!(config.mcp.document_chars, McpConfig::default().document_chars);
 		assert_eq!(Config::parse("").unwrap().mcp, McpConfig::default());
+		let floored = Config::parse("[mcp]\nsemantic_min_similarity = 0.55\n").unwrap();
+		assert_eq!(floored.mcp.semantic_min_similarity, Some(0.55));
+		assert!(Config::parse("[mcp]\nsemantic_min_similarity = 55\n").is_err());
 	}
 
 	#[test]
