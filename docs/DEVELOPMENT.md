@@ -100,6 +100,8 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 - `model`: Which LLM produced the extraction
 - `prompt_hash`: Hash of the prompt text, for staleness detection
 
+**claim_extractions**: One row per document recording its last claim extraction (model, prompt hash, time, claim count), including runs that found no claims. Staleness is decided from this table, not from whether claims exist.
+
 **vec_claims**: sqlite-vec `vec0` virtual table for semantic search over claims. Separate from `vec_chunks` because claims and chunks are different semantic objects with different query purposes and re-embedding lifecycles. Created lazily on first `what-was-said embed` after claims exist.
 
 **document_relations**: One row per near-duplicate decision made at ingest, recording that two documents belong to one version family. The document-level sibling of the planned `claim_links` table (same cross-reference shape — a pair, a relation type, a score, optional LLM commentary — at a different granularity). A row carries no direction, no chain, and no current flag: under out-of-order insertion the newcomer (`from_document_id`) can be the older document, so the pair is treated as unordered. Which member is current is derived by sorting the family by `(clip_date, id)`; the `superseded` tag is a recomputed cache, not read from these rows. Written for every resolution, so it is also a complete audit trail.
@@ -189,16 +191,16 @@ Key functions:
 - `derive_brief()`: Resolves prompt via `config.resolve_brief_prompt()`, assembles via `prompts::brief_summary_prompt()`, or copies detailed directly for short documents (under `short_threshold`)
 
 ### extract.rs
-LLM claim extraction. Pure orchestration: iterates documents, calls `prompts.rs` for prompt construction, calls `backend.chat()`, parses and stores results.
+LLM claim extraction. Pure orchestration: iterates documents, calls `prompts.rs` for prompt construction, calls `backend.chat_sampled()` with the configured sampling (temperature 0 and a fixed seed by default, so the same text yields the same claims), parses and stores results.
 
 Key functions:
-- `run()`: Selects documents needing extraction (missing claims or stale model/prompt), deletes existing claims, re-extracts, stores results
-- `run_status()`: Reports extraction progress (documents with/without claims, total claim count)
-- `extract_document()`: Resolves framing and rules from config, assembles prompt via `prompts::claim_extraction_prompt()`, calls LLM, parses response, inserts claims
-- `parse_claims()`: Lenient line parser. Strips bullet markers (`- `, `* `), numbered prefixes (`1. `), bracket labels (`[kind]`), and skips blank lines and preamble. Returns clean claim strings.
-- `resolve_author()`: If all entries in a document share a single author, inherits it for claims
+- `run()`: Reads the rules once and each doctype's framing once per run, selects documents whose last recorded extraction used a different model or prompt hash (or none), and for each one deletes the old claims, re-extracts, and records the run in `claim_extractions`, even when it found no claims
+- `run_status()`: Reports extraction progress (documents extracted, with claims, never extracted, total claims)
+- `extract_document()`: Assembles the prompt via `prompts::claim_extraction_prompt()`, calls the LLM, parses the response, attributes and inserts claims
+- `parse_claims()`: Lenient line parser. Strips bullet markers (`- `, `* `) and numbered prefixes (`1. `), splits off a leading bracket label as a candidate speaker, and skips blank lines and preamble
+- `match_author()`: A candidate speaker becomes the claim's author only if it matches one of the document's entry authors, ignoring case, spacing and a trailing `<address>`; otherwise the label is dropped. A document with a single entry author attributes every claim to it
 
-Staleness detection: each claim stores the `model` and `prompt_hash` that produced it. `get_documents_needing_extraction(model, prompt_hash)` returns documents whose claims don't match the current config, enabling automatic incremental re-extraction when the model or prompt changes.
+Staleness detection: `claim_extractions` records each document's last extraction: model, prompt hash, time, and claim count. The prompt hash (`prompts::compute_extract_prompt_hash`) covers the rules and the doctype's framing; an unframed document keeps the rules-only hash. So editing a framing re-extracts only the doctypes that use it, and a document that yielded no claims isn't retried until the model or prompt changes. `delete_claims_for_document` removes the claims' vectors and the extraction record along with the claims: claim ids are reused after a delete, so a leftover vector would be taken for a new claim's.
 
 ### prompts.rs
 Single source of truth for all prompt construction. Contains default prompt text and assembly functions. No config loading or file I/O — takes resolved values as parameters.

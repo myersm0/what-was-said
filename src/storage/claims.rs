@@ -54,12 +54,74 @@ pub fn get_claims_for_document(connection: &Connection, document_id: i64) -> Res
 	Ok(claims)
 }
 
+/// Also removes the claims' vectors, since claim ids are reused after a
+/// delete and a leftover vector would be taken for the new claim's, and the
+/// extraction record, so an interrupted re-extraction is retried.
 pub fn delete_claims_for_document(connection: &Connection, document_id: i64) -> Result<usize> {
+	if super::vec_claims_table_exists(connection) {
+		connection.execute(
+			"DELETE FROM vec_claims WHERE claim_id IN (SELECT id FROM claims WHERE document_id = ?1)",
+			params![document_id],
+		)?;
+	}
+	connection.execute("DELETE FROM claim_extractions WHERE document_id = ?1", params![document_id])?;
 	let count = connection.execute(
 		"DELETE FROM claims WHERE document_id = ?1",
 		params![document_id],
 	)?;
 	Ok(count)
+}
+
+/// The last extraction of a document, recorded even when it found no claims.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtractionState {
+	pub document_id: i64,
+	pub doctype_name: Option<String>,
+	/// `(model, prompt_hash)` of the last extraction, if any.
+	pub extracted_with: Option<(String, String)>,
+}
+
+pub fn extraction_states(connection: &Connection) -> Result<Vec<ExtractionState>> {
+	let mut stmt = connection.prepare(
+		"SELECT d.id, d.doctype_name, x.model, x.prompt_hash
+		 FROM documents d LEFT JOIN claim_extractions x ON x.document_id = d.id
+		 ORDER BY d.id",
+	)?;
+	let states = stmt
+		.query_map([], |row| {
+			let model: Option<String> = row.get(2)?;
+			let prompt_hash: Option<String> = row.get(3)?;
+			Ok(ExtractionState {
+				document_id: row.get(0)?,
+				doctype_name: row.get(1)?,
+				extracted_with: model.zip(prompt_hash),
+			})
+		})?
+		.collect::<std::result::Result<Vec<_>, _>>()?;
+	Ok(states)
+}
+
+pub fn record_extraction(
+	connection: &Connection,
+	document_id: i64,
+	model: &str,
+	prompt_hash: &str,
+	claim_count: usize,
+) -> Result<()> {
+	let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+	connection.execute(
+		"INSERT INTO claim_extractions (document_id, model, prompt_hash, extracted_at, claim_count)
+		 VALUES (?1, ?2, ?3, ?4, ?5)
+		 ON CONFLICT(document_id) DO UPDATE SET
+			model = excluded.model, prompt_hash = excluded.prompt_hash,
+			extracted_at = excluded.extracted_at, claim_count = excluded.claim_count",
+		params![document_id, model, prompt_hash, now, claim_count as i64],
+	)?;
+	Ok(())
+}
+
+pub fn extracted_documents_count(connection: &Connection) -> Result<i64> {
+	Ok(connection.query_row("SELECT COUNT(*) FROM claim_extractions", [], |row| row.get(0))?)
 }
 
 pub fn claim_count(connection: &Connection) -> Result<i64> {
@@ -76,21 +138,3 @@ pub fn documents_with_claims_count(connection: &Connection) -> Result<i64> {
 	Ok(count)
 }
 
-pub fn get_documents_needing_extraction(
-	connection: &Connection,
-	model: &str,
-	prompt_hash: &str,
-) -> Result<Vec<i64>> {
-	let mut stmt = connection.prepare(
-		"SELECT d.id FROM documents d
-		 WHERE NOT EXISTS (
-			SELECT 1 FROM claims c
-			WHERE c.document_id = d.id AND c.model = ?1 AND c.prompt_hash = ?2
-		 )"
-	)?;
-	let ids = stmt
-		.query_map(params![model, prompt_hash], |r| r.get(0))?
-		.filter_map(|r| r.ok())
-		.collect();
-	Ok(ids)
-}

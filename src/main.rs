@@ -490,12 +490,14 @@ fn main() -> Result<()> {
 			if status {
 				if json_output {
 					let total_docs = storage::document_count(&connection)?;
+					let extracted = storage::extracted_documents_count(&connection)?;
 					let docs_with = storage::documents_with_claims_count(&connection)?;
 					let total_claims = storage::claim_count(&connection)?;
 					println!("{}", serde_json::to_string_pretty(&serde_json::json!({
 						"total_docs": total_docs,
+						"extracted_docs": extracted,
 						"docs_with_claims": docs_with,
-						"missing": total_docs - docs_with,
+						"missing": total_docs - extracted,
 						"total_claims": total_claims,
 					}))?);
 				} else {

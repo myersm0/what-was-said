@@ -178,7 +178,7 @@ fn backfill_shingle_counts(connection: &Connection) -> Result<()> {
 
 /// Bumped whenever `migrate` changes the schema. Read-only consumers refuse a
 /// database at any other version rather than migrating it themselves.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// How long a statement waits on another process's write lock before failing.
 pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -334,6 +334,14 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 			value TEXT NOT NULL
 		);
 
+		CREATE TABLE IF NOT EXISTS claim_extractions (
+			document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+			model TEXT NOT NULL,
+			prompt_hash TEXT NOT NULL,
+			extracted_at TEXT NOT NULL,
+			claim_count INTEGER NOT NULL
+		);
+
 		CREATE TABLE IF NOT EXISTS document_relations (
 			id INTEGER PRIMARY KEY,
 			from_document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -354,11 +362,11 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 		CREATE INDEX IF NOT EXISTS document_relations_to ON document_relations(to_document_id);
 		",
 	)?;
-	migrate(connection)?;
+	migrate(connection, version)?;
 	Ok(())
 }
 
-fn migrate(connection: &Connection) -> Result<()> {
+fn migrate(connection: &Connection, previous_version: i64) -> Result<()> {
 	let entries_sql: String = connection.query_row(
 		"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
 		[],
@@ -526,6 +534,32 @@ fn migrate(connection: &Connection) -> Result<()> {
 				",
 			)?;
 			connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+		}
+	}
+	if previous_version < 3 {
+		// Extraction runs were inferred from claims before the ledger existed,
+		// so documents that yielded no claims were re-extracted on every run.
+		connection.execute_batch(
+			"INSERT OR IGNORE INTO claim_extractions (document_id, model, prompt_hash, extracted_at, claim_count)
+			 SELECT document_id, MAX(model), MAX(prompt_hash), MAX(created_at), COUNT(*)
+			 FROM claims GROUP BY document_id;",
+		)?;
+		// Re-extraction used to delete claims but not their vectors.
+		if vec_claims_table_exists(connection) {
+			let orphaned = connection.execute(
+				"DELETE FROM vec_claims WHERE claim_id NOT IN (SELECT id FROM claims)", [],
+			)?;
+			if orphaned > 0 {
+				eprintln!("removed {} claim vectors whose claims were deleted", orphaned);
+			}
+		}
+		if vec_table_exists(connection) {
+			let orphaned = connection.execute(
+				"DELETE FROM vec_chunks WHERE chunk_id NOT IN (SELECT id FROM chunks)", [],
+			)?;
+			if orphaned > 0 {
+				eprintln!("removed {} chunk vectors whose chunks were deleted", orphaned);
+			}
 		}
 	}
 	connection.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))?;
@@ -847,26 +881,56 @@ mod tests {
 	}
 
 	#[test]
-	fn documents_needing_extraction_checks_staleness() {
+	fn extraction_ledger_records_zero_claim_runs_and_clears_on_delete() {
 		let db = setup_db();
 		let doc1 = insert_test_document(&db, "Doc1", "content one");
 		let doc2 = insert_test_document(&db, "Doc2", "content two");
+		let states = extraction_states(&db).unwrap();
+		assert_eq!(states.len(), 2);
+		assert!(states.iter().all(|state| state.extracted_with.is_none()));
 
-		let needing = get_documents_needing_extraction(&db, "model-a", "hash-1").unwrap();
-		assert_eq!(needing.len(), 2);
+		record_extraction(&db, doc1.0, "model-a", "hash-1", 0).unwrap();
+		record_extraction(&db, doc2.0, "model-a", "hash-1", 3).unwrap();
+		record_extraction(&db, doc2.0, "model-b", "hash-2", 1).unwrap();
+		let states = extraction_states(&db).unwrap();
+		assert_eq!(states[0].extracted_with, Some(("model-a".to_string(), "hash-1".to_string())));
+		assert_eq!(states[1].extracted_with, Some(("model-b".to_string(), "hash-2".to_string())));
+		assert_eq!(extracted_documents_count(&db).unwrap(), 2);
 
-		insert_claim(&db, doc1.0, None, None, "A claim.", "model-a", "hash-1").unwrap();
-		let needing = get_documents_needing_extraction(&db, "model-a", "hash-1").unwrap();
-		assert_eq!(needing.len(), 1);
-		assert_eq!(needing[0], doc2.0);
+		delete_claims_for_document(&db, doc1.0).unwrap();
+		assert!(extraction_states(&db).unwrap()[0].extracted_with.is_none());
+	}
 
-		// changing model makes doc1 stale again
-		let needing = get_documents_needing_extraction(&db, "model-b", "hash-1").unwrap();
-		assert_eq!(needing.len(), 2);
+	#[test]
+	fn deleting_claims_removes_their_vectors() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		ensure_vec_claims_table(&db, 4).unwrap();
+		let claim = insert_claim(&db, doc_id.0, None, None, "Old claim.", "m", "h").unwrap();
+		insert_claim_embedding(&db, claim, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+		assert_eq!(count_claims_with_embeddings(&db).unwrap(), 1);
 
-		// changing prompt_hash makes doc1 stale again
-		let needing = get_documents_needing_extraction(&db, "model-a", "hash-2").unwrap();
-		assert_eq!(needing.len(), 2);
+		delete_claims_for_document(&db, doc_id.0).unwrap();
+		assert_eq!(count_claims_with_embeddings(&db).unwrap(), 0);
+		let reused = insert_claim(&db, doc_id.0, None, None, "New claim.", "m", "h").unwrap();
+		assert_eq!(reused, claim, "SQLite reuses the highest deleted rowid");
+		assert_eq!(get_claims_without_embeddings(&db, None).unwrap().len(), 1);
+	}
+
+	#[test]
+	fn upgrading_to_version_3_backfills_the_ledger_and_drops_orphan_vectors() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		insert_claim(&db, doc_id.0, None, None, "A claim.", "model-a", "hash-1").unwrap();
+		ensure_vec_claims_table(&db, 4).unwrap();
+		insert_claim_embedding(&db, 999, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+		db.execute_batch("DELETE FROM claim_extractions; PRAGMA user_version = 2;").unwrap();
+
+		initialize(&db).unwrap();
+		let states = extraction_states(&db).unwrap();
+		assert_eq!(states[0].extracted_with, Some(("model-a".to_string(), "hash-1".to_string())));
+		assert_eq!(count_claims_with_embeddings(&db).unwrap(), 0);
+		assert_eq!(schema_version(&db).unwrap(), SCHEMA_VERSION);
 	}
 
 	#[test]

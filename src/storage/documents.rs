@@ -191,6 +191,7 @@ pub fn replace_document_children(connection: &Connection, document_id: i64) -> R
 		}
 	}
 	connection.execute("DELETE FROM claims WHERE document_id = ?1", params![document_id])?;
+	connection.execute("DELETE FROM claim_extractions WHERE document_id = ?1", params![document_id])?;
 	connection.execute("DELETE FROM entries WHERE document_id = ?1", params![document_id])?;
 	connection.execute("DELETE FROM derived_content WHERE document_id = ?1", params![document_id])?;
 	Ok(())

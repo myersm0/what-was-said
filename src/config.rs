@@ -3,6 +3,7 @@ use regex::Regex;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+use crate::llm::Sampling;
 use crate::types::MergeStrategy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -689,15 +690,28 @@ struct ExtractConfigToml {
 	#[serde(default)]
 	framings: std::collections::HashMap<String, String>,
 	rules: Option<String>,
+	temperature: Option<f32>,
+	seed: Option<i64>,
 }
 
 fn default_extract_model() -> String { "gemma3:27b".to_string() }
+
+/// Greedy decoding with a fixed seed, so the same text yields the same claims.
+const DEFAULT_EXTRACT_SAMPLING: Sampling = Sampling { temperature: Some(0.0), seed: Some(42) };
+
+fn extract_sampling(temperature: Option<f32>, seed: Option<i64>) -> Sampling {
+	Sampling {
+		temperature: temperature.or(DEFAULT_EXTRACT_SAMPLING.temperature),
+		seed: seed.or(DEFAULT_EXTRACT_SAMPLING.seed),
+	}
+}
 
 #[derive(Debug, Clone)]
 pub struct ExtractConfig {
 	pub model: String,
 	pub framings: std::collections::HashMap<String, String>,
 	pub rules_path: Option<String>,
+	pub sampling: Sampling,
 }
 
 impl Default for ExtractConfig {
@@ -706,6 +720,19 @@ impl Default for ExtractConfig {
 			model: default_extract_model(),
 			framings: std::collections::HashMap::new(),
 			rules_path: None,
+			sampling: DEFAULT_EXTRACT_SAMPLING,
+		}
+	}
+}
+
+/// A configured prompt file that can't be read is reported rather than
+/// silently replaced, since the fallback changes every extraction.
+fn read_prompt_file(kind: &str, path: &str) -> Option<String> {
+	match std::fs::read_to_string(path) {
+		Ok(text) => Some(text),
+		Err(error) => {
+			eprintln!("warning: {} file {} is unreadable ({}); using the fallback", kind, path, error);
+			None
 		}
 	}
 }
@@ -727,36 +754,25 @@ impl ExtractConfig {
 			model: raw.model,
 			framings,
 			rules_path: raw.rules.map(|p| expand_tilde(&p)),
+			sampling: extract_sampling(raw.temperature, raw.seed),
 		})
 	}
 
+	/// The doctype's framing, else the `default` framing, else none. Reads
+	/// the file on every call, so callers cache per doctype.
 	pub fn get_framing(&self, doctype_name: Option<&str>) -> Option<String> {
-		if let Some(dt) = doctype_name {
-			if let Some(path) = self.framings.get(dt) {
-				if let Ok(text) = std::fs::read_to_string(path) {
-					return Some(text);
-				}
-			}
-		}
-		if let Some(path) = self.framings.get("default") {
-			if let Ok(text) = std::fs::read_to_string(path) {
+		if let Some(path) = doctype_name.and_then(|dt| self.framings.get(dt)) {
+			if let Some(text) = read_prompt_file("extract framing", path) {
 				return Some(text);
 			}
 		}
-		None
+		self.framings.get("default").and_then(|path| read_prompt_file("extract framing", path))
 	}
 
 	pub fn get_rules(&self) -> String {
-		if let Some(path) = &self.rules_path {
-			if let Ok(text) = std::fs::read_to_string(path) {
-				return text;
-			}
-		}
-		crate::prompts::default_extract_rules().to_string()
-	}
-
-	pub fn prompt_hash(&self) -> String {
-		crate::prompts::compute_prompt_hash(&self.get_rules())
+		self.rules_path.as_deref()
+			.and_then(|path| read_prompt_file("extract rules", path))
+			.unwrap_or_else(|| crate::prompts::default_extract_rules().to_string())
 	}
 }
 
@@ -787,22 +803,14 @@ impl Default for DeriveSectionToml {
 	}
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct ExtractSectionToml {
 	model: Option<String>,
 	#[serde(default)]
 	framings: std::collections::HashMap<String, String>,
 	rules: Option<String>,
-}
-
-impl Default for ExtractSectionToml {
-	fn default() -> Self {
-		ExtractSectionToml {
-			model: None,
-			framings: std::collections::HashMap::new(),
-			rules: None,
-		}
-	}
+	temperature: Option<f32>,
+	seed: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -903,6 +911,7 @@ impl LlmsConfig {
 				.map(|(k, v)| (k, expand_tilde(&v)))
 				.collect(),
 			rules_path: extract_raw.rules.map(|p| expand_tilde(&p)),
+			sampling: extract_sampling(extract_raw.temperature, extract_raw.seed),
 		};
 
 		let diff = DiffConfig {

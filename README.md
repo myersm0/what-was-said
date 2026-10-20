@@ -360,7 +360,9 @@ Built-in themes are compiled into the binary. Custom themes are TOML files with 
 
 **Document relations** — Each near-duplicate decision is persisted as a row in `document_relations`, recording the two documents, the similarity, the shared block size, and the resolution (`superseded` or `kept_both`). A row records only that two documents belong to one version family; it carries no direction and no current flag. Which member is current is *derived* by sorting the family by `(clip_date, id)` — so the `superseded` tag is a recomputed cache, rewritten wholesale for an affected family on every insert, never pointer-surgered. `what-was-said relations repair [--family DOC_ID]` re-runs that recomputation over every family (or one), which fixes any family left mis-tagged by older versions of the ingester. The relations table is also a queryable audit trail and the input to diff summaries: `what-was-said diff` generates an LLM description of what changed between each pair (from only the non-overlapping regions, not the full documents) and stores it on the relation, with the model and prompt hash for staleness detection — so changing the model or prompt re-summarizes automatically. The same summary can be generated on demand during an interactive ingest prompt via the `[v]iew LLM summary` option, which also stores it on the relation.
 
-**Claim extraction** — LLM-extracted atomic propositions from documents. Claims are not facts: they represent what was stated, with provenance and attribution preserved. Each claim records its source document, author (when known), the extraction model, and a prompt hash for staleness detection. An adaptive prompt handles all document types; source-format framings (email attribution, voice memo context) can be configured for structural hints. Claims are embedded into a separate `vec_claims` table for semantic search independent of chunks. Running `what-was-said extract` automatically detects documents needing extraction — including those whose claims were produced by a different model or prompt than what's currently configured.
+**Claim extraction** — LLM-extracted atomic propositions from documents. Claims are not facts: they represent what was stated, with provenance and attribution preserved. Each claim records its source document, author (when known), the extraction model, and a prompt hash for staleness detection. An adaptive prompt handles all document types; source-format framings (email attribution, voice memo context) can be configured for structural hints. Claims are embedded into a separate `vec_claims` table for semantic search independent of chunks. Running `what-was-said extract` automatically detects documents needing extraction — including those whose claims were produced by a different model or prompt than what's currently configured. The prompt hash covers the rules and the doctype's framing, so editing a framing re-extracts only the doctypes that use it. Each run is recorded per document, so a document that yielded no claims isn't sent to the model again until the model or prompt changes.
+
+A claim's author is set when the document has a single author, or, in threads, when the model prefixes the claim with a speaker (`[Alice Wilson] ...`, which the shipped conversation framing asks for) that matches one of the document's entry authors, ignoring case, spacing and a trailing `<address>`. Any other prefix is dropped and the author left unset, so a misattributed or invented name can't get in.
 
 ---
 
@@ -467,6 +469,8 @@ short = "~/.config/what-was-said/prompts/detailed_short.txt"
 
 [extract]
 model = "gemma3:27b"             # claim extraction; falls back to top-level model
+temperature = 0.0                # default; greedy decoding so the same text yields the same claims
+seed = 42                        # default
 [extract.framings]
 email = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
 

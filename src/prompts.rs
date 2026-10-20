@@ -61,6 +61,16 @@ pub fn compute_prompt_hash(rules: &str) -> String {
 	format!("{:016x}", crate::stable_hash::hash_str(rules))
 }
 
+/// Covers everything in the extraction prompt except the document, so an
+/// edited framing re-extracts the doctypes that use it. Unframed documents
+/// keep the rules-only hash they had before framings were included.
+pub fn compute_extract_prompt_hash(rules: &str, framing: Option<&str>) -> String {
+	match framing {
+		Some(framing) => format!("{:016x}", crate::stable_hash::hash_strs([rules, framing])),
+		None => compute_prompt_hash(rules),
+	}
+}
+
 pub fn default_detailed_prompt(tier: LengthTier) -> &'static str {
 	match tier {
 		LengthTier::Short => DEFAULT_DETAILED_SHORT,
