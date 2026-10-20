@@ -721,7 +721,7 @@ impl WwsServer {
 
 #[tool_router]
 impl WwsServer {
-	#[tool(description = "Full-text search for exact words, names, identifiers, commands or phrases. \
+	#[tool(annotations(read_only_hint = true, open_world_hint = false), description = "Full-text search for exact words, names, identifiers, commands or phrases. \
 		`query` is plain text: every word must appear (prefix-matched) and a \"quoted phrase\" must appear \
 		as written. Punctuation inside words is fine (nrg-svc-hcpx, file.zip). There are no operators, and \
 		filters never go in the query text (not project:x or author:y); use the separate parameters. \
@@ -732,7 +732,7 @@ impl WwsServer {
 		self.blocking(|context| context.search_keyword(params))
 	}
 
-	#[tool(description = "Meaning-based search: finds passages about a concept even when the wording \
+	#[tool(annotations(read_only_hint = true, open_world_hint = false), description = "Meaning-based search: finds passages about a concept even when the wording \
 		differs. Use it for topics, paraphrases and questions, or when search_keyword comes back thin. \
 		Same filters as search_keyword. Returns a few documents with short excerpts, most similar first; \
 		open the best two or three with get_document before answering.")]
@@ -740,7 +740,7 @@ impl WwsServer {
 		self.blocking(|context| context.search_semantic(params))
 	}
 
-	#[tool(description = "Searches atomic claims extracted from documents: what someone asserted, \
+	#[tool(annotations(read_only_hint = true, open_world_hint = false), description = "Searches atomic claims extracted from documents: what someone asserted, \
 		decided, believed or planned, with attribution. Use it for questions like 'what did we decide \
 		about X' or 'who said Y'; to find passages instead, use search_semantic or search_keyword. Each \
 		claim names its document; open it with get_document to check the context. Only documents \
@@ -749,7 +749,7 @@ impl WwsServer {
 		self.blocking(|context| context.search_claims(params))
 	}
 
-	#[tool(description = "Full text of one document by id: entries in order with headings and \
+	#[tool(annotations(read_only_hint = true, open_world_hint = false), description = "Full text of one document by id: entries in order with headings and \
 		authors, plus tags, project status and supersession. Long documents are cut at a character \
 		budget; the response then gives the total size and the offset to continue from. If superseded \
 		is true, prefer the document at current_document_id.")]
@@ -757,7 +757,7 @@ impl WwsServer {
 		self.blocking(|context| context.get_document(params))
 	}
 
-	#[tool(description = "Lists documents without a search term, newest first by default. Use it for \
+	#[tool(annotations(read_only_hint = true, open_world_hint = false), description = "Lists documents without a search term, newest first by default. Use it for \
 		'latest', 'recent', 'what's new', 'where did I leave off' and 'what's in project X'. Rows carry \
 		id, titles, clip date, doctype, project status, tags and a brief summary when one exists; open \
 		documents with get_document.")]
@@ -765,19 +765,19 @@ impl WwsServer {
 		self.blocking(|context| context.list_documents(params))
 	}
 
-	#[tool(description = "Registered curated projects with document counts by status. Call this \
+	#[tool(annotations(read_only_hint = true, open_world_hint = false), description = "Registered curated projects with document counts by status. Call this \
 		before using a project parameter: only these exact names are valid.")]
 	async fn list_projects(&self) -> ToolResult {
 		self.blocking(|context| context.list_projects())
 	}
 
-	#[tool(description = "Tags in use with document counts, including [includes] parent tags and \
+	#[tool(annotations(read_only_hint = true, open_world_hint = false), description = "Tags in use with document counts, including [includes] parent tags and \
 		whether each is hidden by default. Use exact names from here for tag parameters.")]
 	async fn list_tags(&self) -> ToolResult {
 		self.blocking(|context| context.list_tags())
 	}
 
-	#[tool(description = "Corpus overview: document, chunk, embedding and claim counts, the clip date \
+	#[tool(annotations(read_only_hint = true, open_world_hint = false), description = "Corpus overview: document, chunk, embedding and claim counts, the clip date \
 		range, doctypes, and whether semantic and claim search are available.")]
 	async fn stats(&self) -> ToolResult {
 		self.blocking(|context| context.stats())
