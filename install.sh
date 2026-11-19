@@ -47,6 +47,9 @@ main() {
 	tar xzf "${tmpdir}/what-was-said.tar.gz" -C "$tmpdir"
 
 	mkdir -p "$BIN_DIR"
+	# Replace the file rather than overwrite it in place: on macOS, rewriting a
+	# signed binary's inode gets the next launch killed (SIGKILL, "Killed: 9").
+	rm -f "${BIN_DIR}/what-was-said"
 	cp "${tmpdir}/${artifact}" "${BIN_DIR}/what-was-said"
 	chmod +x "${BIN_DIR}/what-was-said"
 	info "Installed binary to ${BIN_DIR}/what-was-said"
