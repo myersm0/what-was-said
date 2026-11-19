@@ -2,16 +2,12 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde::Serialize;
 
+use crate::config::TagConfig;
+use crate::projects::ProjectRegistration;
 use crate::storage;
 use crate::util;
 
-pub use crate::storage::{DocumentListOrder, FtsQueryError, ListedDocument};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchSortColumn {
-	Score,
-	Date,
-}
+pub use crate::storage::{DocumentListOrder, FtsQueryError, ListedDocument, SearchSortColumn};
 
 #[derive(Serialize)]
 pub struct GroupedSearchResult {
@@ -57,18 +53,143 @@ pub struct SearchFilters {
 }
 
 impl SearchFilters {
-	fn author_ref(&self) -> Option<&str> {
-		self.author.as_deref()
-	}
-	fn date_from_ref(&self) -> Option<&str> {
-		self.date_from.as_deref()
-	}
 	fn date_to_bound(&self) -> Option<String> {
 		self.date_to.as_deref().map(inclusive_upper_bound)
 	}
-	fn project_ref(&self) -> Option<&str> {
-		self.project.as_deref()
+
+	/// Borrowed for storage; `date_to` is the caller's `date_to_bound()`.
+	fn passage<'a>(&'a self, date_to: &'a Option<String>) -> storage::PassageFilters<'a> {
+		storage::PassageFilters {
+			author_like: self.author.as_deref(),
+			date_from: self.date_from.as_deref(),
+			date_to: date_to.as_deref(),
+			project: self.project.as_deref(),
+			excluded_tags: &self.excluded_tags,
+			required_tags: &self.required_tags,
+		}
 	}
+}
+
+/// A filter value the caller can fix: an unregistered project, a tag no
+/// document carries, a malformed date. Serve maps it to 400, MCP to a tool error.
+#[derive(Debug)]
+pub struct FilterError {
+	pub field: &'static str,
+	pub message: String,
+}
+
+impl std::fmt::Display for FilterError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(&self.message)
+	}
+}
+
+impl std::error::Error for FilterError {}
+
+fn filter_error(field: &'static str, message: String) -> anyhow::Error {
+	anyhow::Error::new(FilterError { field, message })
+}
+
+/// Filter values as a caller supplied them, before validation.
+#[derive(Debug, Clone, Default)]
+pub struct FilterInput {
+	pub author: Option<String>,
+	pub date_from: Option<String>,
+	pub date_to: Option<String>,
+	pub project: Option<String>,
+	pub tag: Option<String>,
+	pub include_hidden: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedFilters {
+	pub filters: SearchFilters,
+	/// The requested tag, normalized, before `[includes]` expansion.
+	pub tag: Option<String>,
+	/// Default-hidden tags left visible because the required tag names them.
+	pub unhidden_tags: Vec<String>,
+}
+
+/// The validation inputs that stay fixed for a server's lifetime, shared by
+/// MCP and serve so the two cannot accept different filter values.
+pub struct FilterContext<'a> {
+	pub tag_config: &'a TagConfig,
+	pub default_excluded_tags: &'a [String],
+	pub projects: &'a [ProjectRegistration],
+}
+
+impl FilterContext<'_> {
+	/// Blank values count as absent. Dates are normalized to the clip-date form;
+	/// a project must be listed by `list_projects`, and a tag must be carried by
+	/// at least one document. Asking for a default-hidden tag shows it.
+	pub fn resolve(&self, connection: &Connection, input: FilterInput) -> Result<ResolvedFilters> {
+		let author = present(input.author);
+		let date_from = present(input.date_from).map(|value| normalize_date("date_from", &value)).transpose()?;
+		let date_to = present(input.date_to).map(|value| normalize_date("date_to", &value)).transpose()?;
+		if let (Some(from), Some(to)) = (&date_from, &date_to) {
+			if from.as_str() > inclusive_upper_bound(to).as_str() {
+				return Err(filter_error("date_from", format!("date_from {} is after date_to {}.", from, to)));
+			}
+		}
+		let project = present(input.project);
+		if let Some(project) = &project {
+			self.check_project(connection, project)?;
+		}
+		let tag = present(input.tag).map(|tag| tag.to_lowercase());
+		let required_tags = match &tag {
+			Some(tag) => {
+				let expanded = self.tag_config.expand_required_tag(tag);
+				if storage::count_documents_with_any_tag(connection, &expanded)? == 0 {
+					return Err(filter_error("tag", format!("No document carries the tag '{}' or any tag it includes.", tag)));
+				}
+				expanded
+			}
+			None => Vec::new(),
+		};
+		let mut excluded_tags = if input.include_hidden {
+			Vec::new()
+		} else {
+			self.default_excluded_tags.to_vec()
+		};
+		let unhidden_tags: Vec<String> = excluded_tags.iter().filter(|t| required_tags.contains(t)).cloned().collect();
+		excluded_tags.retain(|t| !required_tags.contains(t));
+		Ok(ResolvedFilters {
+			filters: SearchFilters { author, date_from, date_to, project, excluded_tags, required_tags },
+			tag,
+			unhidden_tags,
+		})
+	}
+
+	fn check_project(&self, connection: &Connection, project: &str) -> Result<()> {
+		let known = list_projects(connection, self.projects)?;
+		if known.iter().any(|listing| listing.name == project) {
+			return Ok(());
+		}
+		let names: Vec<&str> = known.iter().map(|listing| listing.name.as_str()).collect();
+		Err(filter_error("project", if names.is_empty() {
+			format!("'{}' is not a curated project: none are registered.", project)
+		} else {
+			format!("'{}' is not a registered curated project (known: {}).", project, names.join(", "))
+		}))
+	}
+}
+
+fn present(value: Option<String>) -> Option<String> {
+	value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// `YYYY-MM-DD`, or `YYYY-MM-DD HH:MM:SS` with a space or `T`, returned in the
+/// canonical clip-date form so string comparison in SQL is sound.
+fn normalize_date(field: &'static str, value: &str) -> Result<String> {
+	if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+		return Ok(date.format("%Y-%m-%d").to_string());
+	}
+	chrono::NaiveDateTime::parse_from_str(&value.replacen('T', " ", 1), "%Y-%m-%d %H:%M:%S")
+		.map(|parsed| parsed.format("%Y-%m-%d %H:%M:%S").to_string())
+		.map_err(|_| filter_error(field, format!(
+			"{} must be a date in YYYY-MM-DD form (or YYYY-MM-DD HH:MM:SS), got '{}'.",
+			field, value,
+		)))
 }
 
 pub fn search(
@@ -86,10 +207,7 @@ pub fn search_filtered(
 	filters: &SearchFilters,
 ) -> Result<Vec<GroupedSearchResult>> {
 	let date_to = filters.date_to_bound();
-	let rows = storage::raw_fts_search(
-		connection, query, filters.author_ref(), filters.date_from_ref(), date_to.as_deref(),
-		filters.project_ref(), &filters.excluded_tags, &filters.required_tags,
-	)?;
+	let rows = storage::raw_fts_search(connection, query, sort_by, &filters.passage(&date_to))?;
 	let mut results = group_fts_results(rows, sort_by);
 	annotate_supersession(connection, &mut results)?;
 	if sort_by == SearchSortColumn::Score {
@@ -113,11 +231,7 @@ pub fn find_similar_grouped_filtered(
 	filters: &SearchFilters,
 ) -> Result<Vec<GroupedSearchResult>> {
 	let date_to = filters.date_to_bound();
-	let chunks = storage::find_similar_chunks_filtered(
-		connection, query_embedding, limit,
-		filters.author_ref(), filters.date_from_ref(), date_to.as_deref(),
-		filters.project_ref(), &filters.excluded_tags, &filters.required_tags,
-	)?;
+	let chunks = storage::find_similar_chunks_filtered(connection, query_embedding, limit, &filters.passage(&date_to))?;
 	let mut results = group_similar_results(chunks);
 	annotate_supersession(connection, &mut results)?;
 	demote_superseded(&mut results);
@@ -132,7 +246,8 @@ pub fn find_similar_claims_filtered(
 	filters: &SearchFilters,
 ) -> Result<Vec<storage::SimilarClaim>> {
 	storage::find_similar_claims(
-		connection, query_embedding, limit, &filters.excluded_tags, &filters.required_tags,
+		connection, query_embedding, limit, filters.author.as_deref(),
+		&filters.excluded_tags, &filters.required_tags,
 	)
 }
 
@@ -288,11 +403,7 @@ fn demote_superseded(results: &mut [GroupedSearchResult]) {
 		return;
 	}
 	for result in results.iter_mut().filter(|r| r.superseded) {
-		result.best_rank = if result.best_rank < 0.0 {
-			result.best_rank * SUPERSEDED_WEIGHT
-		} else {
-			result.best_rank / SUPERSEDED_WEIGHT
-		};
+		result.best_rank = weighted(result.best_rank, SUPERSEDED_WEIGHT);
 	}
 	results.sort_by(|a, b| a.best_rank.partial_cmp(&b.best_rank).unwrap_or(std::cmp::Ordering::Equal));
 }
@@ -323,8 +434,7 @@ pub fn group_fts_results(
 ) -> Vec<GroupedSearchResult> {
 	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
 	for row in rows {
-		let weight = status_weight(row.doc_status.as_deref());
-		let weighted_rank = row.rank * weight;
+		let weighted_rank = weighted(row.rank, status_weight(row.doc_status.as_deref()));
 		let hit = ChunkHit {
 			entry_id: row.entry_id,
 			entry_position: row.entry_position,
@@ -388,8 +498,7 @@ pub fn group_similar_results(
 	let mut grouped: Vec<GroupedSearchResult> = Vec::new();
 	for chunk in chunks {
 		let rank = -(chunk.similarity as f64);
-		let weight = status_weight(chunk.doc_status.as_deref());
-		let weighted_rank = rank * weight;
+		let weighted_rank = weighted(rank, status_weight(chunk.doc_status.as_deref()));
 		let hit = ChunkHit {
 			entry_id: 0,
 			entry_position: chunk.entry_position,
@@ -431,6 +540,28 @@ pub fn group_similar_results(
 	});
 
 	grouped
+}
+
+/// Drops semantic hits whose cosine similarity is below `min`, then documents
+/// left with none; returns how many documents were dropped. Hit ranks are the
+/// unweighted negated similarity, so this compares raw scores.
+pub fn drop_below_similarity(results: &mut Vec<GroupedSearchResult>, min: f64) -> usize {
+	let before = results.len();
+	for result in results.iter_mut() {
+		result.chunks.retain(|chunk| -chunk.rank >= min);
+	}
+	results.retain(|result| !result.chunks.is_empty());
+	before - results.len()
+}
+
+/// Ranks sort ascending (bm25 and negated similarity), usually negative but
+/// positive for a negative cosine similarity; a weight below 1 must worsen either.
+fn weighted(rank: f64, weight: f64) -> f64 {
+	if rank < 0.0 {
+		rank * weight
+	} else {
+		rank / weight
+	}
 }
 
 fn status_weight(status: Option<&str>) -> f64 {
@@ -1053,5 +1184,114 @@ mod visibility_tests {
 		embed_all_chunks(&db, |_| vec![1.0, 0.0, 0.0, 0.0]);
 		let semantic = find_similar_grouped_filtered(&db, &[1.0, 0.0, 0.0, 0.0], 5, &SearchFilters::default()).unwrap();
 		assert_eq!(semantic.iter().map(|r| r.document_id).collect::<Vec<_>>(), vec![new_version, old_version]);
+	}
+
+	fn registration(name: &str) -> ProjectRegistration {
+		ProjectRegistration {
+			name: name.to_string(),
+			manifest_path: std::path::PathBuf::from(format!("/p/{}/documents.toml", name)),
+			root: std::path::PathBuf::from(format!("/p/{}", name)),
+		}
+	}
+
+	fn field_of(error: anyhow::Error) -> &'static str {
+		error.downcast_ref::<FilterError>().expect("a FilterError").field
+	}
+
+	#[test]
+	fn resolve_validates_and_normalizes_filter_values() {
+		let db = setup_db();
+		let id = insert_document(&db, "thread", "x", "2026-10-01 09:00:00");
+		storage::add_tag(&db, id, "balsa").unwrap();
+		let tag_config = TagConfig::default();
+		let projects = vec![registration("meetings")];
+		let context = FilterContext { tag_config: &tag_config, default_excluded_tags: &[], projects: &projects };
+		let resolve = |input: FilterInput| context.resolve(&db, input);
+
+		let resolved = resolve(FilterInput {
+			date_from: Some(" 2026-01-05 ".into()),
+			date_to: Some("2026-10-01T09:00:00".into()),
+			project: Some("meetings".into()),
+			tag: Some("Balsa".into()),
+			author: Some("  ".into()),
+			..Default::default()
+		}).unwrap();
+		assert_eq!(resolved.filters.date_from.as_deref(), Some("2026-01-05"));
+		assert_eq!(resolved.filters.date_to.as_deref(), Some("2026-10-01 09:00:00"));
+		assert_eq!(resolved.tag.as_deref(), Some("balsa"));
+		assert_eq!(resolved.filters.required_tags, vec!["balsa"]);
+		assert!(resolved.filters.author.is_none());
+
+		assert_eq!(field_of(resolve(FilterInput { date_from: Some("2026-10-01xyz".into()), ..Default::default() }).unwrap_err()), "date_from");
+		assert_eq!(field_of(resolve(FilterInput { date_to: Some("last week".into()), ..Default::default() }).unwrap_err()), "date_to");
+		assert_eq!(field_of(resolve(FilterInput {
+			date_from: Some("2026-10-02".into()),
+			date_to: Some("2026-10-01".into()),
+			..Default::default()
+		}).unwrap_err()), "date_from");
+		assert!(resolve(FilterInput {
+			date_from: Some("2026-10-01 12:00:00".into()),
+			date_to: Some("2026-10-01".into()),
+			..Default::default()
+		}).is_ok());
+		let project_error = resolve(FilterInput { project: Some("montre".into()), ..Default::default() }).unwrap_err();
+		assert!(project_error.to_string().contains("meetings"), "{}", project_error);
+		assert_eq!(field_of(project_error), "project");
+		assert_eq!(field_of(resolve(FilterInput { tag: Some("montre".into()), ..Default::default() }).unwrap_err()), "tag");
+	}
+
+	#[test]
+	fn requiring_a_hidden_tag_shows_it() {
+		let db = setup_db();
+		let archived = insert_document(&db, "old plan", "wombat logistics", "2026-01-01 00:00:00");
+		storage::add_tag(&db, archived, "archived").unwrap();
+		insert_document(&db, "new plan", "wombat logistics revised", "2026-02-01 00:00:00");
+		let tag_config = TagConfig::default();
+		let hidden = vec!["archived".to_string(), "junk".to_string()];
+		let context = FilterContext { tag_config: &tag_config, default_excluded_tags: &hidden, projects: &[] };
+
+		let resolved = context.resolve(&db, FilterInput { tag: Some("archived".into()), ..Default::default() }).unwrap();
+		assert_eq!(resolved.unhidden_tags, vec!["archived"]);
+		assert_eq!(resolved.filters.excluded_tags, vec!["junk"]);
+		let results = search_filtered(&db, "wombat", SearchSortColumn::Score, &resolved.filters).unwrap();
+		assert_eq!(results.iter().map(|r| r.document_id).collect::<Vec<_>>(), vec![archived]);
+	}
+
+	#[test]
+	fn weights_worsen_positive_and_negative_ranks() {
+		assert!(weighted(-2.0, 0.5) > -2.0);
+		assert!(weighted(0.3, 0.5) > 0.3);
+		assert_eq!(weighted(-2.0, 1.0), -2.0);
+	}
+
+	#[test]
+	fn date_sorted_keyword_search_finds_newest_beyond_the_rank_cutoff() {
+		let db = setup_db();
+		for n in 0..205 {
+			insert_document(&db, &format!("old {}", n), "quokka quokka quokka", &format!("2025-01-01 00:{:02}:{:02}", n / 60, n % 60));
+		}
+		let filler = "unrelated words about something else entirely ".repeat(20);
+		let newest = insert_document(&db, "newest", &format!("{} quokka", filler), "2026-06-01 00:00:00");
+
+		let by_score = search_filtered(&db, "quokka", SearchSortColumn::Score, &SearchFilters::default()).unwrap();
+		assert!(by_score.iter().all(|r| r.document_id != newest));
+		let by_date = search_filtered(&db, "quokka", SearchSortColumn::Date, &SearchFilters::default()).unwrap();
+		assert_eq!(by_date[0].document_id, newest);
+	}
+
+	#[test]
+	fn similarity_floor_drops_weak_hits_then_empty_documents() {
+		let hit = |rank: f64| ChunkHit {
+			entry_id: 1, entry_position: 0, chunk_index: 0, chunk_body: String::new(), snippet: String::new(),
+			author: None, heading_title: None, rank, captured: String::new(),
+		};
+		let document = |id: i64, ranks: &[f64]| GroupedSearchResult {
+			document_id: id, source_title: String::new(), clip_date: String::new(), best_rank: ranks[0],
+			superseded: false, current_document_id: None, chunks: ranks.iter().map(|r| hit(*r)).collect(),
+		};
+		let mut results = vec![document(1, &[-0.72, -0.41]), document(2, &[-0.50])];
+		assert_eq!(drop_below_similarity(&mut results, 0.55), 1);
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].chunks.len(), 1);
 	}
 }

@@ -4,7 +4,7 @@ use serde::Serialize;
 use zerocopy::IntoBytes;
 
 use super::documents::chunk_count;
-use super::{push_tag_conditions, where_clause};
+use super::{push_tag_conditions, where_clause, PassageFilters};
 
 #[derive(Debug)]
 pub struct ChunkForEmbedding {
@@ -109,50 +109,34 @@ pub fn find_similar_chunks(
 	query_embedding: &[f32],
 	limit: usize,
 ) -> Result<Vec<SimilarChunk>> {
-	find_similar_chunks_filtered(connection, query_embedding, limit, None, None, None, None, &[], &[])
+	find_similar_chunks_filtered(connection, query_embedding, limit, &PassageFilters::default())
 }
 
-/// Above this many candidate chunks, a required-tag filter falls back from an
-/// exact scan to KNN with an enlarged fetch, trading recall for bounded cost.
-/// At 4096 dimensions the exact ceiling is ~80 MB of embeddings read per query.
+/// Above this many candidate chunks, a project or required-tag filter falls
+/// back from an exact scan to KNN with an enlarged fetch, trading recall for
+/// bounded cost. At 4096 dimensions the exact ceiling is ~80 MB of embeddings
+/// read per query.
 const EXACT_SCAN_MAX_CHUNKS: i64 = 5_000;
-
-struct ChunkFilters<'a> {
-	author_like: Option<&'a str>,
-	date_from: Option<&'a str>,
-	date_to: Option<&'a str>,
-	project: Option<&'a str>,
-	excluded_tags: &'a [String],
-	required_tags: &'a [String],
-}
 
 pub fn find_similar_chunks_filtered(
 	connection: &Connection,
 	query_embedding: &[f32],
 	limit: usize,
-	author_like: Option<&str>,
-	date_from: Option<&str>,
-	date_to: Option<&str>,
-	project_filter: Option<&str>,
-	excluded_tags: &[String],
-	required_tags: &[String],
+	filters: &PassageFilters,
 ) -> Result<Vec<SimilarChunk>> {
-	let filters = ChunkFilters {
-		author_like, date_from, date_to, project: project_filter, excluded_tags, required_tags,
-	};
-	find_similar_chunks_routed(connection, query_embedding, limit, &filters, EXACT_SCAN_MAX_CHUNKS)
+	find_similar_chunks_routed(connection, query_embedding, limit, filters, EXACT_SCAN_MAX_CHUNKS)
 }
 
 fn find_similar_chunks_routed(
 	connection: &Connection,
 	query_embedding: &[f32],
 	limit: usize,
-	filters: &ChunkFilters,
+	filters: &PassageFilters,
 	exact_scan_max_chunks: i64,
 ) -> Result<Vec<SimilarChunk>> {
-	let exact = filters.project.is_some()
-		|| (!filters.required_tags.is_empty()
-			&& count_tagged_chunks(connection, filters.required_tags)? <= exact_scan_max_chunks);
+	check_vector_dimension(connection, "vec_chunks", query_embedding.len())?;
+	let scoped = filters.project.is_some() || !filters.required_tags.is_empty();
+	let exact = scoped && count_scoped_chunks(connection, filters)? <= exact_scan_max_chunks;
 	let results = if exact {
 		find_similar_chunks_exact(connection, query_embedding, filters)?
 	} else {
@@ -161,12 +145,17 @@ fn find_similar_chunks_routed(
 	Ok(finish_similar_chunks(results, limit, filters))
 }
 
-/// O(total chunks): entries has no document_id index, so this walks chunks and
-/// probes `document_tags` by primary key.
-fn count_tagged_chunks(connection: &Connection, required_tags: &[String]) -> Result<i64> {
+/// Chunks in the project and/or carrying a required tag. O(total chunks):
+/// entries has no document_id index, so this walks chunks and probes
+/// `documents` and `document_tags` by primary key.
+fn count_scoped_chunks(connection: &Connection, filters: &PassageFilters) -> Result<i64> {
 	let mut conditions = Vec::new();
 	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-	push_tag_conditions(&mut conditions, &mut param_values, &[], required_tags);
+	if let Some(project) = filters.project {
+		conditions.push(format!("d.project = ?{}", param_values.len() + 1));
+		param_values.push(Box::new(project.to_string()));
+	}
+	push_tag_conditions(&mut conditions, &mut param_values, &[], filters.required_tags);
 	let sql = format!(
 		"SELECT COUNT(*) FROM chunks c
 		 JOIN entries e ON e.id = c.entry_id
@@ -182,11 +171,12 @@ fn find_similar_chunks_knn(
 	connection: &Connection,
 	query_embedding: &[f32],
 	limit: usize,
-	filters: &ChunkFilters,
+	filters: &PassageFilters,
 ) -> Result<Vec<SimilarChunk>> {
 	let has_post_knn_filter = filters.author_like.is_some()
 		|| filters.date_from.is_some()
 		|| filters.date_to.is_some()
+		|| filters.project.is_some()
 		|| !filters.excluded_tags.is_empty()
 		|| !filters.required_tags.is_empty();
 	let fetch_limit = if has_post_knn_filter { limit * 5 } else { limit };
@@ -196,6 +186,10 @@ fn find_similar_chunks_knn(
 		Box::new(fetch_limit as i64),
 	];
 	let mut conditions = Vec::new();
+	if let Some(project) = filters.project {
+		conditions.push(format!("d.project = ?{}", param_values.len() + 1));
+		param_values.push(Box::new(project.to_string()));
+	}
 	push_tag_conditions(&mut conditions, &mut param_values, filters.excluded_tags, filters.required_tags);
 	let sql = format!(
 		"WITH knn AS (
@@ -231,7 +225,7 @@ fn find_similar_chunks_knn(
 fn find_similar_chunks_exact(
 	connection: &Connection,
 	query_embedding: &[f32],
-	filters: &ChunkFilters,
+	filters: &PassageFilters,
 ) -> Result<Vec<SimilarChunk>> {
 	let mut conditions = Vec::new();
 	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -285,7 +279,7 @@ fn similar_chunk_from_row(row: &rusqlite::Row, similarity: f32) -> rusqlite::Res
 fn finish_similar_chunks(
 	mut results: Vec<SimilarChunk>,
 	limit: usize,
-	filters: &ChunkFilters,
+	filters: &PassageFilters,
 ) -> Vec<SimilarChunk> {
 	if let Some(author_pattern) = filters.author_like {
 		let pattern_lower = author_pattern.to_lowercase();
@@ -345,6 +339,114 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 		return 0.0;
 	}
 	dot / (norm_a.sqrt() * norm_b.sqrt())
+}
+
+// --- embedding model guard ---
+
+const EMBEDDING_MODEL_KEY: &str = "embedding_model";
+
+/// A query or stored vector that can't be compared with the vectors already in
+/// the database: a different model or dimension. Not fixable by retrying.
+#[derive(Debug)]
+pub struct EmbeddingMismatch(pub String);
+
+impl std::fmt::Display for EmbeddingMismatch {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(&self.0)
+	}
+}
+
+impl std::error::Error for EmbeddingMismatch {}
+
+pub fn recorded_embedding_model(connection: &Connection) -> Result<Option<String>> {
+	match connection.query_row(
+		"SELECT value FROM meta WHERE key = ?1", [EMBEDDING_MODEL_KEY], |row| row.get(0),
+	) {
+		Ok(model) => Ok(Some(model)),
+		Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+		Err(error) => Err(error.into()),
+	}
+}
+
+/// Refuses a configured embed model other than the one recorded by `embed`.
+/// Databases embedded before the model was recorded pass until the next `embed`.
+pub fn check_embedding_model(connection: &Connection, model: &str) -> Result<()> {
+	match recorded_embedding_model(connection)? {
+		Some(recorded) if recorded != model => Err(EmbeddingMismatch(format!(
+			"stored embeddings were computed with {} but the configured embed model is {}; set \
+			 embed_model back to {} (changing models means re-embedding the whole corpus; see \
+			 \"Rebuild embeddings\" in the README)",
+			recorded, model, recorded,
+		)).into()),
+		_ => Ok(()),
+	}
+}
+
+/// The `float[N]` dimension `table` was created with, if it exists.
+fn vec_table_dimension(connection: &Connection, table: &str) -> Result<Option<usize>> {
+	let sql: Option<String> = match connection.query_row(
+		"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |row| row.get(0),
+	) {
+		Ok(sql) => sql,
+		Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+		Err(error) => return Err(error.into()),
+	};
+	Ok(sql.and_then(|sql| {
+		let start = sql.find("float[")? + "float[".len();
+		let end = start + sql[start..].find(']')?;
+		sql[start..end].trim().parse().ok()
+	}))
+}
+
+fn check_vector_dimension(connection: &Connection, table: &str, dimension: usize) -> Result<()> {
+	match vec_table_dimension(connection, table)? {
+		Some(declared) if declared != dimension => Err(EmbeddingMismatch(format!(
+			"{} holds {}-dimension vectors but the query embedding has {}; the configured embed \
+			 model is not the one the corpus was embedded with",
+			table, declared, dimension,
+		)).into()),
+		_ => Ok(()),
+	}
+}
+
+/// Called by `embed` once it knows the model's dimension: checks the model and
+/// dimension against what is stored, then records the model if nothing was.
+pub fn adopt_embedding_model(connection: &Connection, model: &str, dimension: usize) -> Result<()> {
+	check_embedding_model(connection, model)?;
+	check_vector_dimension(connection, "vec_chunks", dimension)?;
+	check_vector_dimension(connection, "vec_claims", dimension)?;
+	if recorded_embedding_model(connection)?.is_none() {
+		if count_chunks_with_embeddings(connection)? + count_claims_with_embeddings(connection)? > 0 {
+			eprintln!(
+				"recording {} as the embedding model; existing vectors predate model tracking and are \
+				 assumed to come from it",
+				model,
+			);
+		}
+		connection.execute(
+			"INSERT INTO meta (key, value) VALUES (?1, ?2)",
+			params![EMBEDDING_MODEL_KEY, model],
+		)?;
+	}
+	Ok(())
+}
+
+/// Drops the claim vector table; the next `embed` recreates and refills it.
+/// vec0 tables need the sqlite-vec module to drop, so the stock `sqlite3`
+/// shell can't do this.
+pub fn drop_claim_vectors(connection: &Connection) -> Result<()> {
+	connection.execute_batch("DROP TABLE IF EXISTS vec_claims;")?;
+	Ok(())
+}
+
+/// Drops both vector tables and the recorded embedding model, so the next
+/// `embed` starts over with whatever model is configured.
+pub fn drop_all_vectors(connection: &Connection) -> Result<()> {
+	let transaction = connection.unchecked_transaction()?;
+	transaction.execute_batch("DROP TABLE IF EXISTS vec_chunks; DROP TABLE IF EXISTS vec_claims;")?;
+	transaction.execute("DELETE FROM meta WHERE key = ?1", [EMBEDDING_MODEL_KEY])?;
+	transaction.commit()?;
+	Ok(())
 }
 
 // --- vec_claims ---
@@ -439,20 +541,27 @@ pub struct SimilarClaim {
 	pub current_document_id: Option<i64>,
 }
 
+/// Always fetches `limit * 5` neighbors: filters apply after the KNN, and
+/// collapsing a version family's duplicate claims frees slots to refill.
 pub fn find_similar_claims(
 	connection: &Connection,
 	query_embedding: &[f32],
 	limit: usize,
+	author_like: Option<&str>,
 	excluded_tags: &[String],
 	required_tags: &[String],
 ) -> Result<Vec<SimilarClaim>> {
-	let has_post_knn_filter = !excluded_tags.is_empty() || !required_tags.is_empty();
-	let fetch_limit = if has_post_knn_filter { limit * 5 } else { limit };
+	check_vector_dimension(connection, "vec_claims", query_embedding.len())?;
+	let fetch_limit = limit * 5;
 	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
 		Box::new(query_embedding.as_bytes().to_vec()),
 		Box::new(fetch_limit as i64),
 	];
 	let mut conditions = Vec::new();
+	if let Some(author) = author_like {
+		conditions.push(format!("LOWER(c.author) LIKE ?{}", param_values.len() + 1));
+		param_values.push(Box::new(format!("%{}%", author.to_lowercase())));
+	}
 	push_tag_conditions(&mut conditions, &mut param_values, excluded_tags, required_tags);
 	let sql = format!(
 		"WITH knn AS (
@@ -487,15 +596,44 @@ pub fn find_similar_claims(
 			})
 		})?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
-	results.truncate(limit);
 
 	for claim in &mut results {
 		let status = super::supersession_status(connection, claim.document_id)?;
 		claim.superseded = status.superseded;
 		claim.current_document_id = status.current_document_id;
 	}
-
+	let mut results = collapse_family_duplicates(results);
+	results.truncate(limit);
 	Ok(results)
+}
+
+fn normalized_claim(content: &str) -> String {
+	content.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Versions of one document often yield the same claim; keep one copy per
+/// family, at the best-ranked copy's position, preferring the current
+/// version's so the claim cites the document to read.
+fn collapse_family_duplicates(results: Vec<SimilarClaim>) -> Vec<SimilarClaim> {
+	let mut kept: Vec<SimilarClaim> = Vec::with_capacity(results.len());
+	let mut seen: std::collections::HashMap<(i64, String), usize> = std::collections::HashMap::new();
+	for claim in results {
+		let family = claim.current_document_id.unwrap_or(claim.document_id);
+		match seen.entry((family, normalized_claim(&claim.content))) {
+			std::collections::hash_map::Entry::Occupied(slot) => {
+				let index = *slot.get();
+				if kept[index].superseded && !claim.superseded {
+					let similarity = kept[index].similarity.max(claim.similarity);
+					kept[index] = SimilarClaim { similarity, ..claim };
+				}
+			}
+			std::collections::hash_map::Entry::Vacant(slot) => {
+				slot.insert(kept.len());
+				kept.push(claim);
+			}
+		}
+	}
+	kept
 }
 
 #[cfg(test)]
@@ -552,10 +690,7 @@ mod tests {
 		crate::storage::add_tag(&db, tagged, "lab-meeting").unwrap();
 
 		let required = vec!["lab-meeting".to_string()];
-		let filters = ChunkFilters {
-			author_like: None, date_from: None, date_to: None, project: None,
-			excluded_tags: &[], required_tags: &required,
-		};
+		let filters = PassageFilters { required_tags: &required, ..Default::default() };
 		let query = [1.0, 0.0, 0.0, 0.0];
 		for exact_scan_max_chunks in [0, EXACT_SCAN_MAX_CHUNKS] {
 			let results = find_similar_chunks_routed(&db, &query, 1, &filters, exact_scan_max_chunks).unwrap();
@@ -571,6 +706,102 @@ mod tests {
 		insert_embedded_document(&db, "plain", &[1.0, 0.0, 0.0, 0.0]);
 		let tagged = insert_embedded_document(&db, "tagged", &[1.0, 0.0, 0.0, 0.0]);
 		crate::storage::add_tag(&db, tagged, "lab-meeting").unwrap();
-		assert_eq!(count_tagged_chunks(&db, &["lab-meeting".to_string()]).unwrap(), 1);
+		let required = vec!["lab-meeting".to_string()];
+		assert_eq!(count_scoped_chunks(&db, &PassageFilters { required_tags: &required, ..Default::default() }).unwrap(), 1);
+	}
+
+	#[test]
+	fn project_filter_holds_on_both_exact_and_knn_paths() {
+		let db = setup_db();
+		ensure_vec_table(&db, 4).unwrap();
+		insert_embedded_document(&db, "closest, no project", &[1.0, 0.0, 0.0, 0.0]);
+		let in_project = insert_embedded_document(&db, "in project", &[0.5, 0.5, 0.0, 0.0]);
+		db.execute("UPDATE documents SET project = 'meetings' WHERE id = ?1", params![in_project]).unwrap();
+
+		let filters = PassageFilters { project: Some("meetings"), ..Default::default() };
+		assert_eq!(count_scoped_chunks(&db, &filters).unwrap(), 1);
+		let query = [1.0, 0.0, 0.0, 0.0];
+		for exact_scan_max_chunks in [0, EXACT_SCAN_MAX_CHUNKS] {
+			let results = find_similar_chunks_routed(&db, &query, 5, &filters, exact_scan_max_chunks).unwrap();
+			let documents: Vec<i64> = results.iter().map(|r| r.document_id).collect();
+			assert_eq!(documents, vec![in_project], "threshold {}", exact_scan_max_chunks);
+		}
+	}
+
+	#[test]
+	fn embedding_model_is_recorded_once_and_enforced() {
+		let db = setup_db();
+		check_embedding_model(&db, "model-a").unwrap();
+		adopt_embedding_model(&db, "model-a", 4).unwrap();
+		assert_eq!(recorded_embedding_model(&db).unwrap().as_deref(), Some("model-a"));
+		adopt_embedding_model(&db, "model-a", 4).unwrap();
+
+		let error = check_embedding_model(&db, "model-b").unwrap_err();
+		assert!(error.downcast_ref::<EmbeddingMismatch>().is_some());
+		assert!(error.to_string().contains("model-a"), "{}", error);
+		assert!(adopt_embedding_model(&db, "model-b", 4).is_err());
+	}
+
+	#[test]
+	fn mismatched_dimensions_are_refused_before_searching() {
+		let db = setup_db();
+		ensure_vec_table(&db, 4).unwrap();
+		insert_embedded_document(&db, "doc", &[1.0, 0.0, 0.0, 0.0]);
+		assert_eq!(vec_table_dimension(&db, "vec_chunks").unwrap(), Some(4));
+		assert_eq!(vec_table_dimension(&db, "vec_claims").unwrap(), None);
+
+		let error = find_similar_chunks(&db, &[1.0, 0.0, 0.0], 5).unwrap_err();
+		assert!(error.downcast_ref::<EmbeddingMismatch>().is_some(), "{}", error);
+		assert!(adopt_embedding_model(&db, "model-a", 3).is_err());
+		assert!(adopt_embedding_model(&db, "model-a", 4).is_ok());
+	}
+
+	#[test]
+	fn dropping_vectors_resets_what_embed_checks() {
+		let db = setup_db();
+		adopt_embedding_model(&db, "model-a", 4).unwrap();
+		ensure_vec_table(&db, 4).unwrap();
+		ensure_vec_claims_table(&db, 4).unwrap();
+
+		drop_claim_vectors(&db).unwrap();
+		assert!(!vec_claims_table_exists(&db));
+		assert!(vec_table_exists(&db), "chunk vectors survive a claims rebuild");
+		assert_eq!(recorded_embedding_model(&db).unwrap().as_deref(), Some("model-a"));
+		drop_claim_vectors(&db).unwrap();
+
+		ensure_vec_claims_table(&db, 4).unwrap();
+		drop_all_vectors(&db).unwrap();
+		assert!(!vec_table_exists(&db));
+		assert!(!vec_claims_table_exists(&db));
+		assert_eq!(recorded_embedding_model(&db).unwrap(), None);
+		adopt_embedding_model(&db, "model-b", 8).unwrap();
+		assert_eq!(recorded_embedding_model(&db).unwrap().as_deref(), Some("model-b"));
+	}
+
+	fn similar_claim(claim_id: i64, document_id: i64, content: &str, similarity: f32, current: Option<i64>) -> SimilarClaim {
+		SimilarClaim {
+			claim_id,
+			document_id,
+			source_title: String::new(),
+			content: content.to_string(),
+			author: None,
+			similarity,
+			superseded: current.is_some(),
+			current_document_id: current,
+		}
+	}
+
+	#[test]
+	fn family_duplicates_collapse_to_the_current_version() {
+		let collapsed = collapse_family_duplicates(vec![
+			similar_claim(90, 8, "Cite Montre with the BibTeX entry.", 0.71, Some(9)),
+			similar_claim(55, 3, "Unrelated claim.", 0.65, None),
+			similar_claim(103, 9, "cite  montre with the BibTeX entry.", 0.70, None),
+			similar_claim(104, 4, "Cite Montre with the BibTeX entry.", 0.60, None),
+		]);
+		let ids: Vec<i64> = collapsed.iter().map(|claim| claim.claim_id).collect();
+		assert_eq!(ids, vec![103, 55, 104], "same text in another family is kept");
+		assert!(!collapsed[0].superseded);
+		assert_eq!(collapsed[0].similarity, 0.71);
 	}
 }

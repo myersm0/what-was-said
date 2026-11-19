@@ -1,6 +1,17 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
+use super::PassageFilters;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchSortColumn {
+	Score,
+	Date,
+}
+
+/// Matching chunks fetched per keyword search, before grouping by document.
+const FTS_CANDIDATE_LIMIT: usize = 200;
+
 /// Keyword input that FTS5 cannot parse (column selectors like `project:x`,
 /// unbalanced quotes, stray operators). A client error, not an internal one.
 #[derive(Debug)]
@@ -66,38 +77,42 @@ pub fn fts_match_expression(query: &str) -> String {
 	terms.join(" ")
 }
 
+/// The best `FTS_CANDIDATE_LIMIT` matching chunks by rank, or the newest by
+/// document clip date for `SearchSortColumn::Date`, so a date-sorted search
+/// can't miss recent documents that rank poorly. O(matching chunks) either way:
+/// FTS5 scores every match before the sort.
 pub fn raw_fts_search(
 	connection: &Connection,
 	query: &str,
-	author_like: Option<&str>,
-	date_from: Option<&str>,
-	date_to: Option<&str>,
-	project_filter: Option<&str>,
-	excluded_tags: &[String],
-	required_tags: &[String],
+	sort_by: SearchSortColumn,
+	filters: &PassageFilters,
 ) -> Result<Vec<ChunkSearchResult>> {
 	let prefix_query = fts_match_expression(query);
 
 	let mut conditions = vec!["chunks_fts MATCH ?1".to_string()];
 	let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(prefix_query.clone())];
 
-	if let Some(author) = author_like {
+	if let Some(author) = filters.author_like {
 		conditions.push(format!("LOWER(e.author) LIKE ?{}", param_values.len() + 1));
 		param_values.push(Box::new(format!("%{}%", author.to_lowercase())));
 	}
-	if let Some(from) = date_from {
+	if let Some(from) = filters.date_from {
 		conditions.push(format!("e.clip_date >= ?{}", param_values.len() + 1));
 		param_values.push(Box::new(from.to_string()));
 	}
-	if let Some(to) = date_to {
+	if let Some(to) = filters.date_to {
 		conditions.push(format!("e.clip_date <= ?{}", param_values.len() + 1));
 		param_values.push(Box::new(to.to_string()));
 	}
-	if let Some(project) = project_filter {
+	if let Some(project) = filters.project {
 		conditions.push(format!("d.project = ?{}", param_values.len() + 1));
 		param_values.push(Box::new(project.to_string()));
 	}
-	super::push_tag_conditions(&mut conditions, &mut param_values, excluded_tags, required_tags);
+	super::push_tag_conditions(&mut conditions, &mut param_values, filters.excluded_tags, filters.required_tags);
+	let order_by = match sort_by {
+		SearchSortColumn::Score => "f.rank",
+		SearchSortColumn::Date => "d.clip_date DESC, f.rank",
+	};
 
 	let sql = format!(
 		"SELECT c.id, c.entry_id, e.document_id, c.body, c.chunk_index, e.position,
@@ -109,9 +124,11 @@ pub fn raw_fts_search(
 		 JOIN entries e ON e.id = c.entry_id
 		 JOIN documents d ON d.id = e.document_id
 		 WHERE {}
-		 ORDER BY f.rank
-		 LIMIT 200",
+		 ORDER BY {}
+		 LIMIT {}",
 		conditions.join(" AND "),
+		order_by,
+		FTS_CANDIDATE_LIMIT,
 	);
 
 	let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();

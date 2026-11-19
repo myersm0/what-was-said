@@ -17,6 +17,18 @@ use rusqlite::Connection;
 
 use crate::types::MergeStrategy;
 
+/// The passage-level filters every search path takes, borrowed from
+/// `query::SearchFilters` with `date_to` already widened to cover its day.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PassageFilters<'a> {
+	pub author_like: Option<&'a str>,
+	pub date_from: Option<&'a str>,
+	pub date_to: Option<&'a str>,
+	pub project: Option<&'a str>,
+	pub excluded_tags: &'a [String],
+	pub required_tags: &'a [String],
+}
+
 /// The single SQL form of tag-based filtering, shared by every search path:
 /// a `NOT EXISTS` (hiding) or `EXISTS` (requiring) against `document_tags`
 /// over an already-expanded tag list.
@@ -164,7 +176,48 @@ fn backfill_shingle_counts(connection: &Connection) -> Result<()> {
 	Ok(())
 }
 
+/// Bumped whenever `migrate` changes the schema. Read-only consumers refuse a
+/// database at any other version rather than migrating it themselves.
+pub const SCHEMA_VERSION: i64 = 3;
+
+/// How long a statement waits on another process's write lock before failing.
+pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn schema_version(connection: &Connection) -> Result<i64> {
+	Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+}
+
+/// For long-lived consumers that only read (mcp, serve): no DDL, no migration,
+/// and `query_only` so no statement can write even by mistake.
+pub fn prepare_read_only(connection: &Connection) -> Result<()> {
+	connection.busy_timeout(BUSY_TIMEOUT)?;
+	let version = schema_version(connection)?;
+	if version < SCHEMA_VERSION {
+		anyhow::bail!(
+			"database schema is at version {} but this build expects {}; run any write-capable \
+			 command once to migrate it (e.g. `what-was-said stats` with the same --db)",
+			version, SCHEMA_VERSION,
+		);
+	}
+	if version > SCHEMA_VERSION {
+		anyhow::bail!(
+			"database schema is at version {}, newer than this build ({}); use a newer what-was-said",
+			version, SCHEMA_VERSION,
+		);
+	}
+	connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA query_only = ON;")?;
+	Ok(())
+}
+
 pub fn initialize(connection: &Connection) -> Result<()> {
+	connection.busy_timeout(BUSY_TIMEOUT)?;
+	let version = schema_version(connection)?;
+	if version > SCHEMA_VERSION {
+		anyhow::bail!(
+			"database schema is at version {}, newer than this build ({}); refusing to migrate it backward",
+			version, SCHEMA_VERSION,
+		);
+	}
 	connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 	connection.execute_batch("PRAGMA journal_mode=WAL;")?;
 	connection.execute_batch(
@@ -276,6 +329,19 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 
 		CREATE INDEX IF NOT EXISTS claims_document_id ON claims(document_id);
 
+		CREATE TABLE IF NOT EXISTS meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS claim_extractions (
+			document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+			model TEXT NOT NULL,
+			prompt_hash TEXT NOT NULL,
+			extracted_at TEXT NOT NULL,
+			claim_count INTEGER NOT NULL
+		);
+
 		CREATE TABLE IF NOT EXISTS document_relations (
 			id INTEGER PRIMARY KEY,
 			from_document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -296,11 +362,11 @@ pub fn initialize(connection: &Connection) -> Result<()> {
 		CREATE INDEX IF NOT EXISTS document_relations_to ON document_relations(to_document_id);
 		",
 	)?;
-	migrate(connection)?;
+	migrate(connection, version)?;
 	Ok(())
 }
 
-fn migrate(connection: &Connection) -> Result<()> {
+fn migrate(connection: &Connection, previous_version: i64) -> Result<()> {
 	let entries_sql: String = connection.query_row(
 		"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
 		[],
@@ -470,6 +536,33 @@ fn migrate(connection: &Connection) -> Result<()> {
 			connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 		}
 	}
+	if previous_version < 3 {
+		// Extraction runs were inferred from claims before the ledger existed,
+		// so documents that yielded no claims were re-extracted on every run.
+		connection.execute_batch(
+			"INSERT OR IGNORE INTO claim_extractions (document_id, model, prompt_hash, extracted_at, claim_count)
+			 SELECT document_id, MAX(model), MAX(prompt_hash), MAX(created_at), COUNT(*)
+			 FROM claims GROUP BY document_id;",
+		)?;
+		// Re-extraction used to delete claims but not their vectors.
+		if vec_claims_table_exists(connection) {
+			let orphaned = connection.execute(
+				"DELETE FROM vec_claims WHERE claim_id NOT IN (SELECT id FROM claims)", [],
+			)?;
+			if orphaned > 0 {
+				eprintln!("removed {} claim vectors whose claims were deleted", orphaned);
+			}
+		}
+		if vec_table_exists(connection) {
+			let orphaned = connection.execute(
+				"DELETE FROM vec_chunks WHERE chunk_id NOT IN (SELECT id FROM chunks)", [],
+			)?;
+			if orphaned > 0 {
+				eprintln!("removed {} chunk vectors whose chunks were deleted", orphaned);
+			}
+		}
+	}
+	connection.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))?;
 	Ok(())
 }
 
@@ -526,6 +619,31 @@ mod tests {
 		let chunks = chunking::chunk_text(body);
 		insert_chunks(connection, entry_id, &chunks).unwrap();
 		doc_id
+	}
+
+	#[test]
+	fn initialize_records_schema_version() {
+		let db = setup_db();
+		assert_eq!(schema_version(&db).unwrap(), SCHEMA_VERSION);
+	}
+
+	#[test]
+	fn read_only_connections_cannot_write() {
+		let db = setup_db();
+		insert_test_document(&db, "Doc", "some content");
+		prepare_read_only(&db).unwrap();
+		assert_eq!(document_count(&db).unwrap(), 1);
+		assert!(db.execute("DELETE FROM documents", []).is_err());
+		assert_eq!(document_count(&db).unwrap(), 1);
+	}
+
+	#[test]
+	fn read_only_open_refuses_unmigrated_and_newer_databases() {
+		let db = rusqlite::Connection::open_in_memory().unwrap();
+		assert!(prepare_read_only(&db).unwrap_err().to_string().contains("migrate"));
+		db.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION + 1)).unwrap();
+		assert!(prepare_read_only(&db).unwrap_err().to_string().contains("newer"));
+		assert!(initialize(&db).unwrap_err().to_string().contains("newer"));
 	}
 
 	#[test]
@@ -763,26 +881,56 @@ mod tests {
 	}
 
 	#[test]
-	fn documents_needing_extraction_checks_staleness() {
+	fn extraction_ledger_records_zero_claim_runs_and_clears_on_delete() {
 		let db = setup_db();
 		let doc1 = insert_test_document(&db, "Doc1", "content one");
 		let doc2 = insert_test_document(&db, "Doc2", "content two");
+		let states = extraction_states(&db).unwrap();
+		assert_eq!(states.len(), 2);
+		assert!(states.iter().all(|state| state.extracted_with.is_none()));
 
-		let needing = get_documents_needing_extraction(&db, "model-a", "hash-1").unwrap();
-		assert_eq!(needing.len(), 2);
+		record_extraction(&db, doc1.0, "model-a", "hash-1", 0).unwrap();
+		record_extraction(&db, doc2.0, "model-a", "hash-1", 3).unwrap();
+		record_extraction(&db, doc2.0, "model-b", "hash-2", 1).unwrap();
+		let states = extraction_states(&db).unwrap();
+		assert_eq!(states[0].extracted_with, Some(("model-a".to_string(), "hash-1".to_string())));
+		assert_eq!(states[1].extracted_with, Some(("model-b".to_string(), "hash-2".to_string())));
+		assert_eq!(extracted_documents_count(&db).unwrap(), 2);
 
-		insert_claim(&db, doc1.0, None, None, "A claim.", "model-a", "hash-1").unwrap();
-		let needing = get_documents_needing_extraction(&db, "model-a", "hash-1").unwrap();
-		assert_eq!(needing.len(), 1);
-		assert_eq!(needing[0], doc2.0);
+		delete_claims_for_document(&db, doc1.0).unwrap();
+		assert!(extraction_states(&db).unwrap()[0].extracted_with.is_none());
+	}
 
-		// changing model makes doc1 stale again
-		let needing = get_documents_needing_extraction(&db, "model-b", "hash-1").unwrap();
-		assert_eq!(needing.len(), 2);
+	#[test]
+	fn deleting_claims_removes_their_vectors() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		ensure_vec_claims_table(&db, 4).unwrap();
+		let claim = insert_claim(&db, doc_id.0, None, None, "Old claim.", "m", "h").unwrap();
+		insert_claim_embedding(&db, claim, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+		assert_eq!(count_claims_with_embeddings(&db).unwrap(), 1);
 
-		// changing prompt_hash makes doc1 stale again
-		let needing = get_documents_needing_extraction(&db, "model-a", "hash-2").unwrap();
-		assert_eq!(needing.len(), 2);
+		delete_claims_for_document(&db, doc_id.0).unwrap();
+		assert_eq!(count_claims_with_embeddings(&db).unwrap(), 0);
+		let reused = insert_claim(&db, doc_id.0, None, None, "New claim.", "m", "h").unwrap();
+		assert_eq!(reused, claim, "SQLite reuses the highest deleted rowid");
+		assert_eq!(get_claims_without_embeddings(&db, None).unwrap().len(), 1);
+	}
+
+	#[test]
+	fn upgrading_to_version_3_backfills_the_ledger_and_drops_orphan_vectors() {
+		let db = setup_db();
+		let doc_id = insert_test_document(&db, "Doc", "content");
+		insert_claim(&db, doc_id.0, None, None, "A claim.", "model-a", "hash-1").unwrap();
+		ensure_vec_claims_table(&db, 4).unwrap();
+		insert_claim_embedding(&db, 999, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+		db.execute_batch("DELETE FROM claim_extractions; PRAGMA user_version = 2;").unwrap();
+
+		initialize(&db).unwrap();
+		let states = extraction_states(&db).unwrap();
+		assert_eq!(states[0].extracted_with, Some(("model-a".to_string(), "hash-1".to_string())));
+		assert_eq!(count_claims_with_embeddings(&db).unwrap(), 0);
+		assert_eq!(schema_version(&db).unwrap(), SCHEMA_VERSION);
 	}
 
 	#[test]
@@ -827,7 +975,7 @@ mod tests {
 		insert_claim_embedding(&db, c2, &emb_b).unwrap();
 
 		let query: Vec<f32> = vec![0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-		let results = find_similar_claims(&db, &query, 2, &[], &[]).unwrap();
+		let results = find_similar_claims(&db, &query, 2, None, &[], &[]).unwrap();
 		assert_eq!(results.len(), 2);
 		assert_eq!(results[0].claim_id, c1);
 		assert!(results[0].similarity > results[1].similarity);
@@ -926,12 +1074,12 @@ mod tests {
 		insert_claim_embedding(&db, new_claim, &[0.9, 0.1, 0.0, 0.0]).unwrap();
 		let query = vec![1.0, 0.0, 0.0, 0.0];
 
-		let hidden = find_similar_claims(&db, &query, 10, &["superseded".to_string()], &[]).unwrap();
+		let hidden = find_similar_claims(&db, &query, 10, None, &["superseded".to_string()], &[]).unwrap();
 		assert_eq!(hidden.len(), 1);
 		assert_eq!(hidden[0].claim_id, new_claim);
 		assert!(!hidden[0].superseded);
 
-		let shown = find_similar_claims(&db, &query, 10, &[], &[]).unwrap();
+		let shown = find_similar_claims(&db, &query, 10, None, &[], &[]).unwrap();
 		assert_eq!(shown.len(), 2);
 		let old_hit = shown.iter().find(|c| c.claim_id == old_claim).unwrap();
 		assert!(old_hit.superseded);
@@ -954,7 +1102,7 @@ mod tests {
 		insert_claim_embedding(&db, tagged_claim, &[0.5, 0.5, 0.0, 0.0]).unwrap();
 		let query = vec![1.0, 0.0, 0.0, 0.0];
 
-		let results = find_similar_claims(&db, &query, 1, &[], &["lab-meeting".to_string()]).unwrap();
+		let results = find_similar_claims(&db, &query, 1, None, &[], &["lab-meeting".to_string()]).unwrap();
 		assert_eq!(results.len(), 1);
 		assert_eq!(results[0].claim_id, tagged_claim);
 	}

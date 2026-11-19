@@ -126,13 +126,7 @@ pub fn compute_document_source_hash(connection: &Connection, document_id: i64) -
 		.query_map(params![document_id], |row| row.get(0))?
 		.collect::<std::result::Result<Vec<_>, _>>()?;
 
-	use std::collections::hash_map::DefaultHasher;
-	use std::hash::{Hash, Hasher};
-	let mut hasher = DefaultHasher::new();
-	for body in &bodies {
-		body.hash(&mut hasher);
-	}
-	Ok(format!("{:016x}", hasher.finish()))
+	Ok(format!("{:016x}", crate::stable_hash::hash_strs(bodies.iter().map(String::as_str))))
 }
 
 #[derive(Debug, Serialize)]

@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::config::{OpenAiAuth, OpenAiConfig};
-use crate::llm::LlmBackend;
+use crate::llm::{LlmBackend, Sampling};
 
 #[derive(Serialize)]
 struct ChatMessage {
@@ -18,6 +18,10 @@ struct ChatRequest {
 	messages: Vec<ChatMessage>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	response_format: Option<ResponseFormat>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	temperature: Option<f32>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	seed: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -174,13 +178,14 @@ impl OpenAiClient {
 	}
 }
 
-impl LlmBackend for OpenAiClient {
-	fn generate(
+impl OpenAiClient {
+	fn generate_sampled(
 		&self,
 		prompt: &str,
 		model: &str,
 		system: Option<&str>,
 		format: Option<&str>,
+		sampling: Sampling,
 	) -> Result<String> {
 		let mut messages = Vec::new();
 		if let Some(system_prompt) = system {
@@ -205,6 +210,8 @@ impl LlmBackend for OpenAiClient {
 			model: model.to_string(),
 			messages,
 			response_format,
+			temperature: sampling.temperature,
+			seed: sampling.seed,
 		};
 
 		let token = self.get_bearer_token()?;
@@ -224,6 +231,22 @@ impl LlmBackend for OpenAiClient {
 			.next()
 			.map(|c| c.message.content)
 			.context("no response from OpenAI API")
+	}
+}
+
+impl LlmBackend for OpenAiClient {
+	fn generate(
+		&self,
+		prompt: &str,
+		model: &str,
+		system: Option<&str>,
+		format: Option<&str>,
+	) -> Result<String> {
+		self.generate_sampled(prompt, model, system, format, Sampling::default())
+	}
+
+	fn chat_sampled(&self, prompt: &str, model: &str, sampling: Sampling) -> Result<String> {
+		self.generate_sampled(prompt, model, None, None, sampling)
 	}
 
 	fn embed(&self, text: &str, model: &str) -> Result<Vec<f32>> {

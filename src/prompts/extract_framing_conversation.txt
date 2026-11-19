@@ -1,2 +1,4 @@
-This is a conversation thread (email or chat messages). Each message has an author. Attribute claims to their speaker when authorship is indicated.
+This is a conversation thread (email or chat messages). Each message begins with its author in square brackets, such as [Alice Wilson]. Attribute claims to their speaker when authorship is indicated.
+
+When a claim states what one particular author said, asked, proposed, or decided, begin its line with that author in square brackets, copied exactly as it appears in the thread, then a space and the claim: [Alice Wilson] Alice Wilson suggested trying the --no-stat-cache flag. The claim text itself should still name the person. When a claim has no single author, such as an agreed outcome or background fact, write it without a prefix. This speaker prefix is the one exception to the rule below against labels.
 

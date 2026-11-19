@@ -121,6 +121,7 @@ what-was-said in 42
 **Enrich**
 ```bash
 what-was-said embed              # compute embeddings (chunks + claims)
+what-was-said embed --rebuild claims   # drop claim vectors and re-embed them (or --rebuild all)
 what-was-said derive             # generate summaries (missing only)
 what-was-said derive --force     # regenerate all
 what-was-said derive --status    # check progress
@@ -215,7 +216,7 @@ The source line is matched against doctype patterns in `config.toml` to determin
 
 ## API server
 
-`what-was-said serve` starts a localhost JSON API for programmatic access — the agent-facing interface, with the DB connection held open to avoid per-call process spawn overhead.
+`what-was-said serve` starts a localhost JSON API for programmatic access — the agent-facing interface, with the DB connection held open to avoid per-call process spawn overhead. Like `mcp`, it opens the database read-only and needs an existing, migrated database. Requests must carry a `Host` of `127.0.0.1:<port>` or `localhost:<port>`; anything else gets a 403, which blocks DNS-rebinding attacks from web pages open in a browser.
 
 | Endpoint | Description |
 |---|---|
@@ -227,13 +228,13 @@ The source line is matched against doctype patterns in `config.toml` to determin
 | `GET /get/:id` | Full document with entries and chunks |
 | `GET /entries/:doc_id` | Entries for a document |
 | `GET /claims/doc/:doc_id` | Claims extracted from a document |
-| `GET /claims/similar?q=...&limit=N&tag=...&include_hidden=true` | Semantic search over claims |
+| `GET /claims/similar?q=...&limit=N&author=...&tag=...&include_hidden=true` | Semantic search over claims; a claim repeated across versions of one document is returned once, from the current version |
 | `GET /stats` | Database statistics |
 | `GET /derive/status` | Derivation progress |
 
-All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP status codes; keyword input FTS5 cannot parse is a 400.
+All responses are JSON. Errors return `{"error": "..."}` with appropriate HTTP status codes. Input the caller can fix is a 400: keyword input FTS5 cannot parse, an unknown `sort`, a malformed date (`YYYY-MM-DD` or `YYYY-MM-DD HH:MM:SS`), a `project` that isn't registered, or a `tag` no document carries. A missing dependency (Ollama unreachable, embeddings not computed yet) is a 503. Filter validation is shared with the MCP server, so both accept exactly the same values. `limit` on the similarity endpoints is capped at 100.
 
-`tag` keeps only documents carrying that tag or one it includes through `[includes]`. Keyword queries are plain text: each word is matched literally as a prefix (so `nrg-svc-hcpx` or `file.zip` work) and `"quoted phrases"` match as written; there are no operators. A date-only `date_to` covers that whole day.
+`tag` keeps only documents carrying that tag or one it includes through `[includes]`; asking for a tag that is hidden by default (e.g. `tag=archived`) shows it without needing `include_hidden`. Keyword queries are plain text: each word is matched literally as a prefix (so `nrg-svc-hcpx` or `file.zip` work) and `"quoted phrases"` match as written; there are no operators. A date-only `date_to` covers that whole day.
 
 Search endpoints hide documents tagged with a default-excluded tag (`superseded`, `junk`, etc. per `tags.toml`) unless `include_hidden=true`. Direct fetches always return the requested document. Whenever a superseded document appears in a response — by opt-in, direct fetch, or a claim sourced from it — it carries `superseded: true` and `current_document_id` pointing at the family's current version, so a consumer can always route to the live document. Non-superseded documents carry `superseded: false`.
 
@@ -241,7 +242,7 @@ Search endpoints hide documents tagged with a default-excluded tag (`superseded`
 
 ## MCP server
 
-`what-was-said mcp` runs a read-only [MCP](https://modelcontextprotocol.io) server on stdio, so Claude Desktop can query the database directly. It opens the database itself (no `serve` needed) and refuses to start if the database file doesn't exist, rather than creating an empty one.
+`what-was-said mcp` runs a read-only [MCP](https://modelcontextprotocol.io) server on stdio, so Claude Desktop can query the database directly. It opens the database itself (no `serve` needed), read-only: it never creates, migrates, or writes to the database, and refuses to start if the file doesn't exist or its schema is out of date. After upgrading the binary, run any other command once (e.g. `what-was-said stats`) to migrate.
 
 Tools: `search_keyword`, `search_semantic`, `search_claims`, `get_document`, `list_documents`, `list_projects`, `list_tags`, and `stats`. Searches return a few documents with short excerpts, sized for choosing what to open; `get_document` returns the full text up to a character budget and states how to continue past it. Superseded documents are hidden and annotated exactly as in `serve`. A `project` or `tag` value that cannot match anything is returned as a tool error naming the valid choices. If Ollama is unreachable, the semantic and claim tools return an error and the rest keep working.
 
@@ -274,7 +275,10 @@ hit_chars = 1000            # characters per excerpt
 list_limit = 20             # rows per list_documents (max_list_limit = 100)
 claims_limit = 10           # (max_claims_limit = 30)
 document_chars = 24000      # get_document budget per call
+# semantic_min_similarity = 0.55  # off by default; drops weaker semantic hits
 ```
+
+Semantic hits always report their cosine similarity, and each document its `best_similarity`, so the model can tell a strong match from filler. `semantic_min_similarity` additionally drops hits below the floor and reports how many documents it dropped as `below_min_similarity`. Where the boundary between a match and filler falls depends on the embedding model and the corpus, so set it only after looking at scores for real queries.
 
 ---
 
@@ -357,7 +361,9 @@ Built-in themes are compiled into the binary. Custom themes are TOML files with 
 
 **Document relations** — Each near-duplicate decision is persisted as a row in `document_relations`, recording the two documents, the similarity, the shared block size, and the resolution (`superseded` or `kept_both`). A row records only that two documents belong to one version family; it carries no direction and no current flag. Which member is current is *derived* by sorting the family by `(clip_date, id)` — so the `superseded` tag is a recomputed cache, rewritten wholesale for an affected family on every insert, never pointer-surgered. `what-was-said relations repair [--family DOC_ID]` re-runs that recomputation over every family (or one), which fixes any family left mis-tagged by older versions of the ingester. The relations table is also a queryable audit trail and the input to diff summaries: `what-was-said diff` generates an LLM description of what changed between each pair (from only the non-overlapping regions, not the full documents) and stores it on the relation, with the model and prompt hash for staleness detection — so changing the model or prompt re-summarizes automatically. The same summary can be generated on demand during an interactive ingest prompt via the `[v]iew LLM summary` option, which also stores it on the relation.
 
-**Claim extraction** — LLM-extracted atomic propositions from documents. Claims are not facts: they represent what was stated, with provenance and attribution preserved. Each claim records its source document, author (when known), the extraction model, and a prompt hash for staleness detection. An adaptive prompt handles all document types; source-format framings (email attribution, voice memo context) can be configured for structural hints. Claims are embedded into a separate `vec_claims` table for semantic search independent of chunks. Running `what-was-said extract` automatically detects documents needing extraction — including those whose claims were produced by a different model or prompt than what's currently configured.
+**Claim extraction** — LLM-extracted atomic propositions from documents. Claims are not facts: they represent what was stated, with provenance and attribution preserved. Each claim records its source document, author (when known), the extraction model, and a prompt hash for staleness detection. An adaptive prompt handles all document types; source-format framings (email attribution, voice memo context) can be configured for structural hints. Claims are embedded into a separate `vec_claims` table for semantic search independent of chunks. Running `what-was-said extract` automatically detects documents needing extraction — including those whose claims were produced by a different model or prompt than what's currently configured. The prompt hash covers the rules and the doctype's framing, so editing a framing re-extracts only the doctypes that use it. Each run is recorded per document, so a document that yielded no claims isn't sent to the model again until the model or prompt changes.
+
+A claim's author is set when the document has a single author, or, in threads, when the model prefixes the claim with a speaker (`[Alice Wilson] ...`, which the shipped conversation framing asks for) that matches one of the document's entry authors, ignoring case, spacing and a trailing `<address>`. Any other prefix is dropped and the author left unset, so a misattributed or invented name can't get in.
 
 ---
 
@@ -445,7 +451,7 @@ model = "gpt-4.1-mini"
 embed_model = "text-embedding-3-small"
 
 [openai]
-base_url = "https://api.openai.wustl.edu/models/v1"
+base_url = "https://openai.example.org/v1"
 auth = "oauth"
 oauth_token_url = "https://login.microsoftonline.com/.../oauth2/v2.0/token"
 oauth_scope = "api://.../.default"
@@ -464,6 +470,8 @@ short = "~/.config/what-was-said/prompts/detailed_short.txt"
 
 [extract]
 model = "gemma3:27b"             # claim extraction; falls back to top-level model
+temperature = 0.0                # default; greedy decoding so the same text yields the same claims
+seed = 42                        # default
 [extract.framings]
 email = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
 
@@ -492,21 +500,22 @@ Available colors: `red`, `green`, `blue`, `cyan`, `magenta`, `yellow`, `white`, 
 
 ## Database
 
-SQLite at `~/Library/Application Support/what-was-said/what-was-said.db` on macOS or `~/.local/share/what-was-said/what-was-said.db` on Linux (override with `--db`), with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`.
+SQLite at `~/Library/Application Support/what-was-said/what-was-said.db` on macOS or `~/.local/share/what-was-said/what-was-said.db` on Linux (override with `--db`), with WAL mode and foreign key enforcement enabled. All parent-child relationships use `ON DELETE CASCADE`. The schema version is kept in `PRAGMA user_version`; `mcp` and `serve` refuse a database at any other version instead of migrating it.
 
-**Reset:**
-```bash
-rm ~/.local/share/what-was-said/what-was-said.db   # Linux; on macOS the file is in ~/Library/Application Support/what-was-said/
-```
+The first `embed` run records its model in the `meta` table, and from then on `embed` and every semantic search refuse a different configured `embed_model`, since vectors from different models can't be compared. A query whose dimension differs from the stored vectors is refused the same way.
 
-**Rebuild embeddings:**
-```sql
-DROP TABLE vec_chunks;
-DROP TABLE IF EXISTS vec_claims;
-```
+**Reset:** quit anything that has the database open first (Claude Desktop, which runs the MCP server, plus any `serve` or TUI session), then delete the database together with its WAL side files:
 ```bash
-what-was-said embed
+rm ~/.local/share/what-was-said/what-was-said.db{,-wal,-shm}   # Linux; on macOS the files are in ~/Library/Application Support/what-was-said/
 ```
+A process that still has the old database open keeps reading the deleted file, and leftover `-wal`/`-shm` files break the next database created at that path.
+
+**Rebuild embeddings** (also the way to switch embedding models: set the new `embed_model` first):
+```bash
+what-was-said embed --rebuild all      # drops chunk and claim vectors and the recorded model
+what-was-said embed --rebuild claims   # claim vectors only, re-embedded with the recorded model
+```
+The vector tables are sqlite-vec virtual tables, so the stock `sqlite3` shell can't drop them (`no such module: vec0`); use `--rebuild`.
 
 **Re-extract claims:**
 ```bash

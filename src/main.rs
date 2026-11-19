@@ -132,6 +132,11 @@ enum Command {
 	Embed {
 		#[arg(long, help = "Limit number of chunks to embed")]
 		limit: Option<usize>,
+		/// Drop stored vectors before embedding. `claims` re-embeds claims only;
+		/// `all` also drops chunk vectors and the recorded embedding model, which
+		/// is how to switch models.
+		#[arg(long, value_enum)]
+		rebuild: Option<RebuildScope>,
 	},
 
 	/// Generate LLM summaries
@@ -184,6 +189,21 @@ enum Command {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+enum RebuildScope {
+	Claims,
+	All,
+}
+
+impl From<RebuildScope> for embed::Rebuild {
+	fn from(scope: RebuildScope) -> Self {
+		match scope {
+			RebuildScope::Claims => embed::Rebuild::Claims,
+			RebuildScope::All => embed::Rebuild::All,
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum SearchMethod {
 	Exact,
 	Semantic,
@@ -196,17 +216,66 @@ fn default_db_path() -> PathBuf {
 		.join("what-was-said.db")
 }
 
-fn open_db(path: &Path) -> Result<rusqlite::Connection> {
-	if let Some(parent) = path.parent() {
-		std::fs::create_dir_all(parent)?;
-	}
+fn register_vec_extension() {
 	VEC_INIT.call_once(|| unsafe {
 		rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
 			sqlite_vec::sqlite3_vec_init as *const (),
 		)));
 	});
+}
+
+/// WAL-mode side files left behind when the database file was deleted.
+fn orphaned_wal_files(path: &Path) -> Vec<PathBuf> {
+	if path.exists() {
+		return Vec::new();
+	}
+	["-wal", "-shm"]
+		.iter()
+		.map(|suffix| {
+			let mut name = path.as_os_str().to_owned();
+			name.push(suffix);
+			PathBuf::from(name)
+		})
+		.filter(|side| side.exists())
+		.collect()
+}
+
+fn open_db(path: &Path) -> Result<rusqlite::Connection> {
+	let orphans = orphaned_wal_files(path);
+	if !orphans.is_empty() {
+		let listed: Vec<String> = orphans.iter().map(|side| side.display().to_string()).collect();
+		anyhow::bail!(
+			"{} doesn't exist but its write-ahead log files do: {}. Another process may still have the \
+			 old database open (Claude Desktop's MCP server, `serve`, or the TUI). Quit it, delete these \
+			 files, then run the command again.",
+			path.display(),
+			listed.join(", "),
+		);
+	}
+	if let Some(parent) = path.parent() {
+		std::fs::create_dir_all(parent)?;
+	}
+	register_vec_extension();
 	let connection = rusqlite::Connection::open(path)?;
 	storage::initialize(&connection)?;
+	Ok(connection)
+}
+
+/// Never creates or migrates: a missing file or an out-of-date schema is an error.
+fn open_db_read_only(path: &Path) -> Result<rusqlite::Connection> {
+	if !path.exists() {
+		anyhow::bail!(
+			"no database at {}; pass --db with the absolute path of an existing database",
+			path.display(),
+		);
+	}
+	register_vec_extension();
+	let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+		| rusqlite::OpenFlags::SQLITE_OPEN_URI
+		| rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+	let connection = rusqlite::Connection::open_with_flags(path, flags)
+		.with_context(|| format!("opening {}", path.display()))?;
+	storage::prepare_read_only(&connection)?;
 	Ok(connection)
 }
 
@@ -233,13 +302,11 @@ fn main() -> Result<()> {
 		Some(config_file.as_path()).filter(|p| p.exists()),
 	)?;
 	let mut llms = config::LlmsConfig::load(&config_dir)?;
-	if matches!(cli.command, Some(Command::Mcp)) && !db_path.exists() {
-		anyhow::bail!(
-			"no database at {}; pass --db with the absolute path of an existing database",
-			db_path.display(),
-		);
-	}
-	let connection = open_db(&db_path)?;
+	let connection = if matches!(cli.command, Some(Command::Mcp) | Some(Command::Serve { .. })) {
+		open_db_read_only(&db_path)?
+	} else {
+		open_db(&db_path)?
+	};
 	let json_output = cli.json;
 
 	if let Some(b) = &cli.backend {
@@ -346,6 +413,7 @@ fn main() -> Result<()> {
 						anyhow::bail!("no embeddings yet - run 'what-was-said embed' first");
 					}
 
+					storage::check_embedding_model(&connection, &embed_model)?;
 					let backend = create_backend(&llms.backend)?;
 					let query_embedding = backend.embed(&query, &embed_model)?;
 					let results = query::find_similar_grouped_filtered(&connection, &query_embedding, 10, &filters)?;
@@ -436,9 +504,9 @@ fn main() -> Result<()> {
 				}
 			}
 		}
-		Some(Command::Embed { limit }) => {
+		Some(Command::Embed { limit, rebuild }) => {
 			let backend = create_backend(&llms.backend)?;
-			embed::run(&connection, backend.as_ref(), &embed_model, limit)?;
+			embed::run(&connection, backend.as_ref(), &embed_model, limit, rebuild.map(Into::into))?;
 		}
 		Some(Command::Derive { missing, stale, bad_detailed, bad_brief, force, status, limit }) => {
 			let derive_config = &llms.derive;
@@ -469,12 +537,14 @@ fn main() -> Result<()> {
 			if status {
 				if json_output {
 					let total_docs = storage::document_count(&connection)?;
+					let extracted = storage::extracted_documents_count(&connection)?;
 					let docs_with = storage::documents_with_claims_count(&connection)?;
 					let total_claims = storage::claim_count(&connection)?;
 					println!("{}", serde_json::to_string_pretty(&serde_json::json!({
 						"total_docs": total_docs,
+						"extracted_docs": extracted,
 						"docs_with_claims": docs_with,
-						"missing": total_docs - docs_with,
+						"missing": total_docs - extracted,
 						"total_claims": total_claims,
 					}))?);
 				} else {

@@ -1,14 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
+use crate::stable_hash::SeededStrHasher;
 use crate::types::{MINHASH_SIZE, MinHashSignature};
-
-fn hash_with_seed(seed: usize, token: &str) -> u64 {
-	let mut hasher = DefaultHasher::new();
-	seed.hash(&mut hasher);
-	token.hash(&mut hasher);
-	hasher.finish()
-}
 
 fn tokenize(text: &str) -> Vec<String> {
 	let words: Vec<String> = text
@@ -33,8 +24,9 @@ pub fn minhash(text: &str) -> MinHashSignature {
 	let tokens = tokenize(text);
 	let mut signature = [u64::MAX; MINHASH_SIZE];
 	for token in &tokens {
+		let mut hasher = SeededStrHasher::new(token);
 		for i in 0..MINHASH_SIZE {
-			let hash = hash_with_seed(i, token);
+			let hash = hasher.hash(i);
 			if hash < signature[i] {
 				signature[i] = hash;
 			}

@@ -1,6 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LengthTier {
 	Short,
@@ -61,9 +58,17 @@ pub fn default_diff_instructions() -> &'static str {
 }
 
 pub fn compute_prompt_hash(rules: &str) -> String {
-	let mut hasher = DefaultHasher::new();
-	rules.hash(&mut hasher);
-	format!("{:016x}", hasher.finish())
+	format!("{:016x}", crate::stable_hash::hash_str(rules))
+}
+
+/// Covers everything in the extraction prompt except the document, so an
+/// edited framing re-extracts the doctypes that use it. Unframed documents
+/// keep the rules-only hash they had before framings were included.
+pub fn compute_extract_prompt_hash(rules: &str, framing: Option<&str>) -> String {
+	match framing {
+		Some(framing) => format!("{:016x}", crate::stable_hash::hash_strs([rules, framing])),
+		None => compute_prompt_hash(rules),
+	}
 }
 
 pub fn default_detailed_prompt(tier: LengthTier) -> &'static str {
