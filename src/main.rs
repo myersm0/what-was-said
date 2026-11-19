@@ -132,6 +132,11 @@ enum Command {
 	Embed {
 		#[arg(long, help = "Limit number of chunks to embed")]
 		limit: Option<usize>,
+		/// Drop stored vectors before embedding. `claims` re-embeds claims only;
+		/// `all` also drops chunk vectors and the recorded embedding model, which
+		/// is how to switch models.
+		#[arg(long, value_enum)]
+		rebuild: Option<RebuildScope>,
 	},
 
 	/// Generate LLM summaries
@@ -181,6 +186,21 @@ enum Command {
 		#[arg(long, help = "Sync only the named project")]
 		project: Option<String>,
 	},
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RebuildScope {
+	Claims,
+	All,
+}
+
+impl From<RebuildScope> for embed::Rebuild {
+	fn from(scope: RebuildScope) -> Self {
+		match scope {
+			RebuildScope::Claims => embed::Rebuild::Claims,
+			RebuildScope::All => embed::Rebuild::All,
+		}
+	}
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -484,9 +504,9 @@ fn main() -> Result<()> {
 				}
 			}
 		}
-		Some(Command::Embed { limit }) => {
+		Some(Command::Embed { limit, rebuild }) => {
 			let backend = create_backend(&llms.backend)?;
-			embed::run(&connection, backend.as_ref(), &embed_model, limit)?;
+			embed::run(&connection, backend.as_ref(), &embed_model, limit, rebuild.map(Into::into))?;
 		}
 		Some(Command::Derive { missing, stale, bad_detailed, bad_brief, force, status, limit }) => {
 			let derive_config = &llms.derive;

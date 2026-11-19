@@ -4,12 +4,42 @@ use rusqlite::Connection;
 use crate::llm::LlmBackend;
 use crate::storage;
 
+/// Stored vectors to drop before embedding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rebuild {
+	/// Claim vectors only, embedded again with the recorded model.
+	Claims,
+	/// Chunk and claim vectors and the recorded model, so the configured
+	/// model becomes the new one.
+	All,
+}
+
 pub fn run(
 	connection: &Connection,
 	backend: &dyn LlmBackend,
 	embed_model: &str,
 	limit: Option<usize>,
+	rebuild: Option<Rebuild>,
 ) -> Result<()> {
+	match rebuild {
+		Some(Rebuild::Claims) => {
+			// Check first, so a mismatched model fails before anything is dropped.
+			storage::check_embedding_model(connection, embed_model)?;
+			storage::drop_claim_vectors(connection)?;
+			println!("dropped claim vectors");
+		}
+		Some(Rebuild::All) => {
+			let previous = storage::recorded_embedding_model(connection)?;
+			storage::drop_all_vectors(connection)?;
+			match previous {
+				Some(previous) if previous != embed_model => {
+					println!("dropped all vectors; switching from {} to {}", previous, embed_model);
+				}
+				_ => println!("dropped all vectors"),
+			}
+		}
+		None => {}
+	}
 	storage::check_embedding_model(connection, embed_model)?;
 	let chunk_pending = storage::count_chunks_without_embeddings(connection)?;
 	let chunk_existing = storage::count_chunks_with_embeddings(connection)?;

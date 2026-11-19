@@ -121,6 +121,7 @@ what-was-said in 42
 **Enrich**
 ```bash
 what-was-said embed              # compute embeddings (chunks + claims)
+what-was-said embed --rebuild claims   # drop claim vectors and re-embed them (or --rebuild all)
 what-was-said derive             # generate summaries (missing only)
 what-was-said derive --force     # regenerate all
 what-was-said derive --status    # check progress
@@ -509,15 +510,12 @@ rm ~/.local/share/what-was-said/what-was-said.db{,-wal,-shm}   # Linux; on macOS
 ```
 A process that still has the old database open keeps reading the deleted file, and leftover `-wal`/`-shm` files break the next database created at that path.
 
-**Rebuild embeddings** (also the way to switch embedding models):
-```sql
-DROP TABLE vec_chunks;
-DROP TABLE IF EXISTS vec_claims;
-DELETE FROM meta WHERE key = 'embedding_model';
-```
+**Rebuild embeddings** (also the way to switch embedding models: set the new `embed_model` first):
 ```bash
-what-was-said embed
+what-was-said embed --rebuild all      # drops chunk and claim vectors and the recorded model
+what-was-said embed --rebuild claims   # claim vectors only, re-embedded with the recorded model
 ```
+The vector tables are sqlite-vec virtual tables, so the stock `sqlite3` shell can't drop them (`no such module: vec0`); use `--rebuild`.
 
 **Re-extract claims:**
 ```bash

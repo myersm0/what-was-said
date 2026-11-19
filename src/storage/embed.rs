@@ -431,6 +431,24 @@ pub fn adopt_embedding_model(connection: &Connection, model: &str, dimension: us
 	Ok(())
 }
 
+/// Drops the claim vector table; the next `embed` recreates and refills it.
+/// vec0 tables need the sqlite-vec module to drop, so the stock `sqlite3`
+/// shell can't do this.
+pub fn drop_claim_vectors(connection: &Connection) -> Result<()> {
+	connection.execute_batch("DROP TABLE IF EXISTS vec_claims;")?;
+	Ok(())
+}
+
+/// Drops both vector tables and the recorded embedding model, so the next
+/// `embed` starts over with whatever model is configured.
+pub fn drop_all_vectors(connection: &Connection) -> Result<()> {
+	let transaction = connection.unchecked_transaction()?;
+	transaction.execute_batch("DROP TABLE IF EXISTS vec_chunks; DROP TABLE IF EXISTS vec_claims;")?;
+	transaction.execute("DELETE FROM meta WHERE key = ?1", [EMBEDDING_MODEL_KEY])?;
+	transaction.commit()?;
+	Ok(())
+}
+
 // --- vec_claims ---
 
 pub fn vec_claims_table_exists(connection: &Connection) -> bool {
@@ -736,6 +754,28 @@ mod tests {
 		assert!(error.downcast_ref::<EmbeddingMismatch>().is_some(), "{}", error);
 		assert!(adopt_embedding_model(&db, "model-a", 3).is_err());
 		assert!(adopt_embedding_model(&db, "model-a", 4).is_ok());
+	}
+
+	#[test]
+	fn dropping_vectors_resets_what_embed_checks() {
+		let db = setup_db();
+		adopt_embedding_model(&db, "model-a", 4).unwrap();
+		ensure_vec_table(&db, 4).unwrap();
+		ensure_vec_claims_table(&db, 4).unwrap();
+
+		drop_claim_vectors(&db).unwrap();
+		assert!(!vec_claims_table_exists(&db));
+		assert!(vec_table_exists(&db), "chunk vectors survive a claims rebuild");
+		assert_eq!(recorded_embedding_model(&db).unwrap().as_deref(), Some("model-a"));
+		drop_claim_vectors(&db).unwrap();
+
+		ensure_vec_claims_table(&db, 4).unwrap();
+		drop_all_vectors(&db).unwrap();
+		assert!(!vec_table_exists(&db));
+		assert!(!vec_claims_table_exists(&db));
+		assert_eq!(recorded_embedding_model(&db).unwrap(), None);
+		adopt_embedding_model(&db, "model-b", 8).unwrap();
+		assert_eq!(recorded_embedding_model(&db).unwrap().as_deref(), Some("model-b"));
 	}
 
 	fn similar_claim(claim_id: i64, document_id: i64, content: &str, similarity: f32, current: Option<i64>) -> SimilarClaim {
