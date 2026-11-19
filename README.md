@@ -450,7 +450,7 @@ model = "gpt-4.1-mini"
 embed_model = "text-embedding-3-small"
 
 [openai]
-base_url = "https://api.openai.wustl.edu/models/v1"
+base_url = "https://openai.example.org/v1"
 auth = "oauth"
 oauth_token_url = "https://login.microsoftonline.com/.../oauth2/v2.0/token"
 oauth_scope = "api://.../.default"

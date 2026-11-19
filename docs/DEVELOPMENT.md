@@ -12,8 +12,8 @@ Personal knowledge base for clipped documents with full-text and semantic search
        │              │              │              │           │
        ▼              ▼              ▼              ▼           ▼
 ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
-│  ingest   │  │  query    │  │  derive   │  │   tui/    │  │   serve   │
-│(parse, or-│  │(group +   │  │  (LLM)    │  │(ratatui)  │  │  (axum)   │
+│  ingest   │  │  query    │  │  derive   │  │   tui/    │  │serve + mcp│
+│(parse, or-│  │(group +   │  │  (LLM)    │  │(ratatui)  │  │axum, rmcp │
 │chestrate  │  │rank)      │  └───────────┘  └───────────┘  └───────────┘
 └───────────┘  └───────────┘  ┌───────────┐
        │             │        │  extract  │
@@ -34,11 +34,13 @@ Personal knowledge base for clipped documents with full-text and semantic search
                     └───────────┘
 ```
 
-`LlmBackend` is used by derive, extract, diff, tui, and serve. Ingestion is deterministic by default — no LLM dependency for parsing, chunking, dup detection, or storage. The one exception is the interactive near-duplicate prompt's optional `[v]iew LLM summary` action, which is on demand only and degrades gracefully when no backend is configured (see ingest.rs).
+`LlmBackend` is used by derive, extract, diff, tui, serve, and mcp. Ingestion is deterministic by default — no LLM dependency for parsing, chunking, dup detection, or storage. The one exception is the interactive near-duplicate prompt's optional `[v]iew LLM summary` action, which is on demand only and degrades gracefully when no backend is configured (see ingest.rs).
 
 Alongside `ingest` (captured clips) there is a second deterministic ingestion path: `sync` brings curated project documents into the same Document → Entry → Chunk store, reading project/manifest config via `projects`. Both feed `storage`; neither needs an LLM.
 
-`query` sits between storage and the UI layers (tui, serve, CLI). It owns search result grouping, dedup, and ranking. Both tui and serve call the same query functions.
+`query` sits between storage and the UI layers (tui, serve, mcp, CLI). It owns search result grouping, dedup, ranking, and filter validation, and every UI layer calls the same query functions.
+
+`serve` and `mcp` are the two long-lived consumers, and both are read-only: they open an existing database without creating or migrating it, and set `query_only` on the connection (decision 29). Every other command opens the database writable and migrates it.
 
 `prompts` is used by derive, extract, and diff for prompt construction, and by config for prompt hashing.
 
@@ -68,7 +70,7 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 - `merge_strategy`: none | positional (for conversations that grow over time)
 - `document_minhash`: MinHash signature over full document body, used for near-duplicate detection at ingest
 - `document_shingle_count`: Number of distinct 3-word shingles in the document body, stored at ingest and back-filled for existing rows by migration. The set cardinality that lets the containment signal recover an approximate intersection from the Jaccard estimate without a text fetch (see ingest.rs near-duplicate detection). NULL only for rows a partial migration hasn't reached, in which case the containment signal is skipped for that candidate
-- `clip_date`: When the document was captured (parsed from the filename when possible, else ingest time). The ordering key for version families — within a family, the maximum by `(clip_date, id)` is the current document
+- `clip_date`: The document's latest capture (parsed from the filename when possible, else ingest time), stored as `YYYY-MM-DD HH:MM:SS` in local time. Date filters and "latest" ordering compare it as a string, so every writer uses this one form (decision 38). The ordering key for version families — within a family, the maximum by `(clip_date, id)` is the current document
 - `clip_date_source`: How `clip_date` was obtained — `filename` | `content` | `metadata` | `ingest_fallback`. Currently only `filename` and `ingest_fallback` are produced; a family containing any `ingest_fallback` member is ordered by ingest time and so warns that "latest" may be unreliable. `content`/`metadata` are reserved for future date-extraction work
 - `project`, `relative_path`: Curated project identity (`(project, relative_path)` is the sync upsert key); both NULL for captured docs. A partial `UNIQUE` index on the pair, `WHERE project IS NOT NULL AND relative_path IS NOT NULL`, enforces uniqueness without affecting captured docs
 - `content_hash`: SHA-256 of file contents, for skip-if-unchanged during sync
@@ -79,6 +81,7 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 **entries**: Logical segments within a document (messages, paragraphs, sections). Cascades on document deletion.
 - `position`: Order within document
 - `author`, `timestamp`: For conversations
+- `clip_date`: When this entry was first captured. It equals the document's `clip_date` unless the entry arrived in an earlier clip of a positionally merged conversation. Search hits report it as `captured`, and search date filters apply to it (decision 38)
 - `heading_title`, `heading_level`: For structured docs
 - `minhash`: Per-entry MinHash signature. Signatures, extract prompt hashes and derive source hashes all come from `stable_hash` (SipHash-1-3 with a zero key, fed bytes the way std's `Hash` impls do), not `std`'s `DefaultHasher`, whose algorithm may change in any Rust release; a change there would silently stop new signatures from matching stored ones
 
@@ -94,13 +97,15 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 
 **derived_content**: LLM-generated summaries (brief + detailed) with quality tracking, model provenance, and source hashing for staleness detection.
 
-**claims**: LLM-extracted atomic propositions from documents. Each claim is a self-contained sentence with provenance back to its source document and (optionally) entry. Stores the extraction model and a hash of the prompt text used, enabling incremental re-extraction when the model or prompt changes.
+**claims**: LLM-extracted atomic propositions from documents. Each claim is a self-contained sentence with provenance back to its source document and (optionally) entry. Stores the extraction model and prompt hash as provenance; whether a document needs re-extraction is decided from `claim_extractions`. `id` is `INTEGER PRIMARY KEY` without `AUTOINCREMENT`, so SQLite reuses the highest deleted ids, and anything keyed by claim id (`vec_claims` rows) must be deleted along with the claim (decision 46).
 - `content`: The claim text
-- `author`: Inherited from the entry when a single author is known
+- `author`: The claim's speaker when the extraction names one that matches an entry author, or the document's only entry author; otherwise NULL (see extract.rs)
 - `model`: Which LLM produced the extraction
-- `prompt_hash`: Hash of the prompt text, for staleness detection
+- `prompt_hash`: Hash of the extraction rules plus the doctype's framing (see extract.rs)
 
 **claim_extractions**: One row per document recording its last claim extraction (model, prompt hash, time, claim count), including runs that found no claims. Staleness is decided from this table, not from whether claims exist.
+
+**meta**: Key–value facts about the whole database. Currently one key, `embedding_model`, written by the first `embed` (see Embeddings).
 
 **vec_claims**: sqlite-vec `vec0` virtual table for semantic search over claims. Separate from `vec_chunks` because claims and chunks are different semantic objects with different query purposes and re-embedding lifecycles. Created lazily on first `what-was-said embed` after claims exist.
 
@@ -113,14 +118,29 @@ Document (1) ──► Entry (n) ──► Chunk (n)
 - `summary`, `summary_model`, `summary_prompt_hash`, `summarized_at`: LLM diff summary and its provenance, for staleness detection
 - `UNIQUE(from_document_id, to_document_id)`; both endpoints indexed
 
+### Schema version
+
+`PRAGMA user_version` holds the schema version, `storage::SCHEMA_VERSION`. `initialize()` runs `migrate()` for every write-capable command and stamps the current version when it finishes; it refuses a database newer than the build. Read-only consumers call `prepare_read_only()` instead, which refuses any version but the current one and tells the user to run a write-capable command such as `stats` (decision 30).
+
+| Version | Change |
+|---|---|
+| 0 | Any database from before versioning; `migrate()`'s structural checks bring it up to date |
+| 1 | `user_version` introduced |
+| 2 | `meta` table, recording the embedding model |
+| 3 | `claim_extractions` ledger, seeded from existing claims; chunk and claim vectors whose rows were deleted are removed |
+
+Bump `SCHEMA_VERSION` whenever `migrate()` changes the schema, and add a row here.
+
 ## Module Responsibilities
 
 ### main.rs
-CLI parsing via clap derive API and command dispatch. Registers the sqlite-vec extension via `sqlite3_auto_extension`. Contains `open_db()` for connection setup and `create_backend()` factory that returns `Box<dyn LlmBackend>` based on `BackendConfig`.
+CLI parsing via clap derive API and command dispatch. Registers the sqlite-vec extension via `sqlite3_auto_extension`. Contains `open_db()`, which creates and migrates the database, `open_db_read_only()` for `mcp` and `serve`, which does neither (decision 29), and the `create_backend()` factory that returns `Box<dyn LlmBackend>` based on `BackendConfig`.
 
 The `--config` flag specifies the config directory (default: `dirs::config_dir()/what-was-said`, i.e. `~/Library/Application Support/what-was-said/` on macOS and `~/.config/what-was-said/` on Linux). `LlmsConfig::load` reads all LLM configuration (backend, auth, model defaults, and per-task overrides) from `llms.toml` within this directory, falling back to the legacy `backend.toml`/`derive.toml`/`extract.toml` files when `llms.toml` is absent. CLI flags (`--backend`, `--ollama`, `--model`, `--embed-model`) are optional overrides; `--model` overrides both the general and diff models. All CLI backend/model flags are `Option<String>` — no hardcoded defaults in clap.
 
-Subcommands: ingest (file or directory), about (with `--method=[exact|semantic]`), in, dump, stats, embed, derive, extract, diff, relations repair (with `--family`), relations scan, serve, sync, browse (default).
+Subcommands: ingest (file or directory), about (with `--method=[exact|semantic]`), in, dump, stats, embed, derive, extract, diff, relations repair (with `--family`), relations scan, serve, mcp, sync, browse (default).
+
+`open_db()` refuses to start when the database file is gone but its `-wal`/`-shm` files remain, naming them (decision 49). `open_db_read_only()` refuses a path that doesn't exist rather than creating an empty database.
 
 Global flags: `--db`, `--config`, `--backend`, `--ollama`, `--model`, `--embed-model`, `--theme`, `--json`.
 
@@ -146,11 +166,14 @@ The primary constructor is `from_config(&OpenAiConfig)`, taking its configuratio
 Translates the `format: Some("json")` parameter to OpenAI's `response_format: {"type": "json_object"}`.
 
 ### serve.rs
-Axum-based localhost JSON API server. Holds an `AppState` with `Mutex<Connection>` and `Box<dyn LlmBackend>`.
+Axum-based JSON API server bound to 127.0.0.1. Holds an `AppState` with the read-only `Mutex<Connection>`, `Box<dyn LlmBackend>`, and the tag config and project registry, both loaded once at startup. A middleware answers 403 to any request whose `Host` header isn't `127.0.0.1:<port>` or `localhost:<port>`, which blocks DNS rebinding from a web page (decision 36).
 
 Endpoints:
-- `GET /search?q=...&sort=score|date&author=...&date_from=...&date_to=...&include_hidden=true|false` — FTS5 search via `query::search_filtered`, results grouped by document
-- `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...&include_hidden=true|false` — semantic search via `query::find_similar_grouped_filtered`, results grouped by document
+- `GET /search?q=...&sort=score|date&author=...&date_from=...&date_to=...&project=...&tag=...&include_hidden=true|false` — FTS5 search via `query::search_filtered`, results grouped by document
+- `GET /similar?q=...&limit=N&author=...&date_from=...&date_to=...&project=...&tag=...&include_hidden=true|false` — semantic search via `query::find_similar_grouped_filtered`, results grouped by document; `limit` capped at 100
+- `GET /documents?project=...&tag=...&doctype=...&date_from=...&date_to=...&sort=date|date_asc|title&limit=N&include_hidden=true|false` — filtered listing via `query::list_documents`; date filters apply to the document's `clip_date`
+- `GET /projects` — registered projects with document counts by status (`query::list_projects`)
+- `GET /tags` — tags with counts, `[includes]` parents, and default-hidden marking (`query::list_tags`)
 - `GET /get/:id` — full document with entries and chunks
 - `GET /entries/:doc_id` — entries for a document, wrapped as `{document_id, superseded, current_document_id?, entries}`
 - `GET /claims/doc/:doc_id` — claims extracted from a document, wrapped as `{document_id, superseded, current_document_id?, claims}`
@@ -158,28 +181,50 @@ Endpoints:
 - `GET /stats` — document/entry/chunk/embedding/claim counts
 - `GET /derive/status` — derivation progress
 
+Filter parameters go through `query::FilterContext::resolve`, the resolver MCP uses, so the two accept exactly the same values (decision 34). Status codes: 400 for input the caller can fix (an `FtsQueryError`, a `FilterError` with its `field`, an unknown `sort`), 503 for a dependency that isn't ready (Ollama unreachable, no embeddings yet, an `EmbeddingMismatch`), 404 for an unknown id, and 500 otherwise.
+
 Search endpoints hide documents carrying a default-excluded tag (from `tags.toml`, expanded through `[includes]` at startup) unless `include_hidden=true`; `/claims/similar` applies the same exclusion to a claim's source document. Direct fetches (`/get`, `/entries`, `/claims/doc`) always return, annotated. Every document-shaped response carries `superseded: bool`, with `current_document_id` present only when true.
 
 Creates a tokio runtime internally so the rest of the binary stays synchronous.
 
+### mcp.rs
+`what-was-said mcp`: a stdio MCP server for clients such as Claude Desktop, built on the official `rmcp` SDK (decision 32). It has eight tools, all annotated read-only and closed-world: `search_keyword`, `search_semantic`, `search_claims`, `get_document`, `list_documents`, `list_projects`, `list_tags`, and `stats`. The server instructions, in the `#[tool_handler]` attribute, explain hidden and superseded documents, the two dates, how to read similarity scores, and that document text is evidence, never instructions (decision 48).
+
+- `McpContext`: All tool logic, synchronous. Holds the read-only connection behind a `Mutex`, the backend, the tag config, the project registry, and the `[mcp]` sizing from `config.toml`. Tests drive it directly against an in-memory database with a fake backend, without the SDK.
+- `WwsServer`: The thin rmcp adapter. Each tool runs its `McpContext` method through `blocking`, since SQLite and the HTTP call to Ollama both block.
+- Filters go through `query::FilterContext::resolve`, as in serve. A `FilterError` becomes a tool error that names the field and, for a project or tag, the valid choices. Each search and listing response echoes the filters it applied under `request.filters`, including `hidden_tags_shown` when a required tag lifted a default exclusion.
+- `search_semantic` checks the embedding model under the database lock, releases the lock while Ollama embeds the query, then takes it again to search. Each hit carries `similarity` and each document `best_similarity`. When `semantic_min_similarity` is set, weaker hits are dropped and counted as `below_min_similarity` (decision 43).
+- A search hit carries `captured` only when its passage arrived before the document's `clip_date` (decision 38).
+- `get_document` pages by character `offset`, not by entry, because a single entry can exceed the budget. Truncated output gives the total size and the offset to continue from.
+
+Nothing on this path writes to stdout except the protocol itself; diagnostics go to stderr. Like serve, `mcp` opens the database with `open_db_read_only()`.
+
 ### query.rs
-Shared query layer between storage and the UI layers (tui, serve, CLI). Owns search result grouping, deduplication, and ranking, including a status-weight multiplier applied to each document's best rank (curated docs by status; captured docs neutral). No `Connection` parameter on the pure domain functions, making them testable with synthetic data.
+Shared query layer between storage and the UI layers (tui, serve, mcp, CLI). Owns filter validation, search result grouping, deduplication, and ranking, including a status-weight multiplier applied to each document's best rank (curated docs by status; captured docs neutral). No `Connection` parameter on the pure domain functions, making them testable with synthetic data.
 
 **Types**:
 - `GroupedSearchResult`: Documents with nested `ChunkHit` vectors, carrying the supersession annotation (`superseded`, `current_document_id`)
 - `ChunkHit`: A single search hit within a document
 - `SearchSortColumn`: Score or Date
-- `SearchFilters`: Author, date_from, date_to, project, excluded_tags — shared by TUI, serve, and CLI. `excluded_tags` is an already-expanded tag list (via `TagConfig::expand_filter_tags`) pushed into storage SQL as a `NOT EXISTS` against `document_tags`; empty means no tag-based hiding
+- `SearchFilters`: Author, date_from, date_to, project, excluded_tags, required_tags — shared by TUI, serve, MCP, and CLI. `excluded_tags` is an already-expanded tag list (via `TagConfig::expand_filter_tags`) pushed into storage SQL as a `NOT EXISTS` against `document_tags`; empty means no tag-based hiding. `required_tags` is one requested tag expanded through `[includes]`, pushed down as an `EXISTS`. Converted to `storage::PassageFilters` for the storage calls
+- `FilterInput` → `FilterContext::resolve` → `ResolvedFilters`: Validation shared by serve and MCP (decision 34). `FilterContext` holds what stays fixed for a server's lifetime (tag config, expanded default exclusions, project registry). `resolve` treats blank values as absent, normalizes dates, checks the project against `list_projects` and the tag against the documents that carry it, and lifts the default exclusion of a requested hidden tag, reporting it in `unhidden_tags` (decision 35)
+- `FilterError`: A value the caller can fix, with the offending `field`. Serve maps it to 400 and MCP to a tool error
+- `ListFilters`, `ProjectListing`, `TagListing`: Inputs and rows for the listing functions
 
 **Composed functions** (call storage, then group):
 - `search()` / `search_filtered()`: FTS5 search via `storage::raw_fts_search`, then group/dedup/sort
 - `find_similar_grouped()` / `find_similar_grouped_filtered()`: semantic search via `storage::find_similar_chunks_filtered`, then group/sort
+- `find_similar_claims_filtered()`: claim search via `storage::find_similar_claims`, with the same tag filtering
+- `list_documents()`, `list_projects()`, `list_tags()`: filtered listing and enumeration for `/documents`, `/projects`, `/tags` and the matching MCP tools (decision 51)
 - `strip_fts_markers()`: removes FTS5 snippet highlight control characters from grouped results
 
 **Pure domain functions** (no DB, testable with synthetic row data):
 - `group_fts_results()`: groups `ChunkSearchResult` rows by document, deduplicates similar snippets, sorts by score or date
 - `group_similar_results()`: groups `SimilarChunk` rows by document, converts similarity to negative rank, sorts by rank
 - `snippets_similar()`: word-overlap similarity check for deduplication
+- `drop_below_similarity()`: removes semantic hits under a floor and returns how many documents it dropped
+
+**Ranking weights**: Ranks sort ascending (FTS5 bm25, or negated cosine similarity). They are usually negative, but a negative similarity gives a positive rank, so `weighted()` multiplies a negative rank and divides a positive one; either way a weight below 1 moves the result down. Curated status weights come from `status_weight`. When hidden documents are included, a superseded result also gets `SUPERSEDED_WEIGHT` (0.5) so an older version's near-identical text can't outrank the current one (decision 40).
 
 ### derive.rs
 LLM summary generation. Pure orchestration: iterates documents, calls `prompts.rs` for prompt construction, calls `backend.chat()`, stores results.
@@ -210,7 +255,8 @@ Single source of truth for all prompt construction. Contains default prompt text
 - `brief_summary_prompt(detailed_summary, instructions)`: Assembles brief summary prompt
 - `claim_extraction_prompt(document_text, rules, framing)`: Assembles claim extraction prompt
 - `document_diff_prompt(added, removed, instructions)`: Assembles the near-duplicate change-summary prompt from the non-overlapping regions of a pair
-- `compute_prompt_hash(rules)`: Hashes rules text for staleness detection
+- `compute_prompt_hash(rules)`: Hashes rules text via `stable_hash`
+- `compute_extract_prompt_hash(rules, framing)`: The extraction prompt hash: rules plus the doctype's framing, or the rules-only hash for an unframed doctype, so unframed documents keep the hash they had before framings were included
 - `default_detailed_prompt(tier)`, `default_brief_prompt()`, `default_extract_rules()`, `default_diff_instructions()`: Built-in fallback prompt text
 
 ### config.rs
@@ -224,9 +270,11 @@ Loads and parses configuration files from the config directory. Handles doctype 
 Key types:
 - `Doctype`: Parsed config entry
 - `DoctypeMatch`: Result of detection, includes parser/preprocessor/merge_strategy
+- `Config`: The doctypes and the `[mcp]` section of `config.toml`
+- `McpConfig`: MCP result sizes (defaults and caps) and the optional `semantic_min_similarity`. `deny_unknown_fields`, so a misspelled key is an error rather than an ignored setting (decision 33)
 - `TagConfig`: Tag hierarchy, default exclusions, color assignments
 - `DeriveConfig`: Model selection, prompt thresholds. `resolve_detailed_prompt(content_len)` checks the prompts map by tier key (`"short"`, `"medium"`, `"long"`), then `"default"`, falling back to built-in defaults via `prompts.rs`. `resolve_brief_prompt()` same pattern.
-- `ExtractConfig`: Model selection, source-format framing paths, rules path. `prompt_hash()` delegates to `prompts::compute_prompt_hash()`.
+- `ExtractConfig`: Model selection, source-format framing paths, rules path, and `sampling` (temperature 0 and seed 42 unless `[extract]` sets them; decision 45). A rules or framing file that is configured but unreadable prints a warning and uses the fallback, rather than switching silently.
 - `DiffConfig`: Model selection for near-duplicate change summaries.
 - `BackendConfig`: Backend selection, model defaults, OpenAI auth configuration
 - `BackendKind`: Enum (`Ollama`, `OpenAi`)
@@ -294,22 +342,24 @@ The `what-was-said sync [--project NAME]` command: brings curated project docume
 Project sync does **not** run near-duplicate detection — project identity is positional, not content-based — and does not embed; run `embed`/`derive`/`extract` afterward. Project docs are labeled `doctype_name = "project_markdown"`, which is just a row label (detection is bypassed); claim/summary/embedding passes pick them up like any other document.
 
 ### storage/
-All SQLite operations. Uses rusqlite directly (no ORM). Integrates sqlite-vec for vector search. Split into submodules, all re-exported from `storage/mod.rs`. Sets `PRAGMA foreign_keys = ON` and `PRAGMA journal_mode=WAL` on initialization for referential integrity and concurrent read access.
+All SQLite operations. Uses rusqlite directly (no ORM). Integrates sqlite-vec for vector search. Split into submodules, all re-exported from `storage/mod.rs`. Sets `PRAGMA foreign_keys = ON` and `PRAGMA journal_mode=WAL` on initialization for referential integrity and concurrent read access. Every connection gets a 5 s `busy_timeout` (decision 31). `initialize()` creates and migrates; `prepare_read_only()`, for mcp and serve, checks the schema version, sets `query_only`, and runs no DDL (decision 29).
 
 Key output types (`SimilarChunk`, `SimilarClaim`, `Claim`, `DumpDocument`, `DumpEntry`, `DocumentContent`, `EntryContent`, `ChunkContent`, `DeriveStatus`) derive `Serialize` for JSON output. Search result grouping types (`GroupedSearchResult`, `ChunkHit`, `SearchSortColumn`) live in `query.rs`.
 
-**mod.rs**: Schema initialization (`initialize()`), foreign keys pragma, WAL mode pragma, `migrate()` for schema upgrades, re-exports, tests.
+**mod.rs**: Schema initialization (`initialize()`), read-only preparation (`prepare_read_only()`), `SCHEMA_VERSION` and `BUSY_TIMEOUT`, foreign keys pragma, WAL mode pragma, `migrate()` for schema upgrades, `PassageFilters` (the author, date, project and tag filters every passage search takes, replacing long positional argument lists), `TagClause` and `tag_exclusion_clause` (the single SQL form of tag filtering), re-exports, tests.
 
-`migrate()` runs on every startup and handles: rebuilding the entries table to add `ON DELETE CASCADE` if missing, adding the `document_minhash` column to documents if missing, adding the project-sync columns (`project`, `relative_path`, `content_hash`, `doc_status`, `doc_role`, `synced_at`) and creating the partial unique index on `(project, relative_path)` if missing, adding the `clip_date_source` column to documents if missing (defaulting existing rows to `ingest_fallback`), adding the `document_shingle_count` column to documents if missing and back-filling it once for every existing row with a signature (recomputing the distinct-shingle count from the row's position-ordered entry bodies joined the same way ingest does, so stored and back-filled counts agree), re-signing any document or entry MinHash blob whose byte length doesn't match the current `MINHASH_SIZE` (recomputed from the same stored-body join; the length guard makes this a no-op on a current database, and it is how the k=32→128 signature widening upgrades existing rows), migrating the claims table if it has the old `kind` column or lacks `prompt_hash` (drops and recreates the table; re-extract to repopulate), creating the `document_relations` table and its indexes if absent (also defensively `ALTER`-ing in any summary columns missing from an older copy), retiring the `pending` resolution if an older `document_relations` CHECK still allows it (a table rebuild under `foreign_keys = OFF`, mapping any stray `pending` rows to `kept_both` and preserving indexes — SQLite cannot `ALTER` a CHECK in place), and cleaning up any orphaned entries/chunks with an FTS rebuild. New columns are appended at the end of `CREATE TABLE` so a fresh database and a migrated one have identical physical column order. The project-column index is created in `migrate()` after the `ALTER`s (not the initial schema batch) so that an upgrading database, whose columns don't yet exist when the batch runs, doesn't fail on the index.
+`migrate()` runs whenever a write-capable command opens the database, never from `mcp` or `serve`, and handles: rebuilding the entries table to add `ON DELETE CASCADE` if missing, adding the `document_minhash` column to documents if missing, adding the project-sync columns (`project`, `relative_path`, `content_hash`, `doc_status`, `doc_role`, `synced_at`) and creating the partial unique index on `(project, relative_path)` if missing, adding the `clip_date_source` column to documents if missing (defaulting existing rows to `ingest_fallback`), adding the `document_shingle_count` column to documents if missing and back-filling it once for every existing row with a signature (recomputing the distinct-shingle count from the row's position-ordered entry bodies joined the same way ingest does, so stored and back-filled counts agree), re-signing any document or entry MinHash blob whose byte length doesn't match the current `MINHASH_SIZE` (recomputed from the same stored-body join; the length guard makes this a no-op on a current database, and it is how the k=32→128 signature widening upgrades existing rows), migrating the claims table if it has the old `kind` column or lacks `prompt_hash` (drops and recreates the table; re-extract to repopulate), creating the `document_relations` table and its indexes if absent (also defensively `ALTER`-ing in any summary columns missing from an older copy), retiring the `pending` resolution if an older `document_relations` CHECK still allows it (a table rebuild under `foreign_keys = OFF`, mapping any stray `pending` rows to `kept_both` and preserving indexes — SQLite cannot `ALTER` a CHECK in place), rewriting `T`-separated clip dates on documents and entries to the canonical `YYYY-MM-DD HH:MM:SS` form, cleaning up any orphaned entries/chunks with an FTS rebuild, and, when coming from a version below 3, seeding `claim_extractions` from existing claims and deleting chunk and claim vectors whose rows no longer exist. That last step can't catch a stale vector sitting on a reused claim id; dropping `vec_claims` and re-embedding does. New columns are appended at the end of `CREATE TABLE` so a fresh database and a migrated one have identical physical column order. The project-column index is created in `migrate()` after the `ALTER`s (not the initial schema batch) so that an upgrading database, whose columns don't yet exist when the batch runs, doesn't fail on the index.
 
 **documents.rs**: Document/entry/chunk CRUD, list/get/dump, counts, merge helpers.
 - `insert_document_with_params()` + `InsertDocumentParams`: Single SQL write path for documents, with `captured(...)` and `project(...)` constructors. `insert_document()` (unchanged signature) and `insert_project_document()` are thin wrappers over it
 - `insert_entry/chunks`: Entry/chunk write path
 - `get_document()`: Read full document with entries and chunks (`DocumentContent` carries project metadata)
 - `list_documents()`: Browse-mode listing with brief summaries, tags, and project metadata (`DocumentSummary`)
+- `list_documents_filtered()` + `DocumentListQuery`: The filtered, limited listing behind `query::list_documents`, ordered by `DocumentListOrder`
+- `project_status_counts()`, `doctype_counts()`, `clip_date_range()`: Enumeration and `stats` helpers
 - `get_project_document(project, relative_path)`: Look up a synced doc and its `content_hash` for the sync upsert
 - `list_project_documents(project)` / `set_document_missing()`: Drive the sync tombstone pass
-- `replace_document_children()`: Deletes a document's vec rows, claims, entries (cascading chunks), and derived_content before a sync re-insert; vec-table rows are deleted by point primary key since vec0 virtual tables don't cascade
+- `replace_document_children()`: Deletes a document's vec rows, claims, extraction record, entries (cascading chunks), and derived_content before a sync re-insert; vec-table rows are deleted by point primary key since vec0 virtual tables don't cascade
 - `update_project_document()`: Updates `content_hash`/`doc_status`/`doc_role`/`synced_at` in place
 - `find_documents_by_merge_key()`: Finds candidates for positional merge
 - `find_dup_candidates()`: Finds documents within a time window that have MinHash signatures, for near-duplicate comparison
@@ -318,15 +368,17 @@ Key output types (`SimilarChunk`, `SimilarClaim`, `Claim`, `DumpDocument`, `Dump
 - `get_relations_needing_summary(model, prompt_hash)`: Relations with a missing or stale summary, for the `diff` command
 
 **search.rs**: Raw FTS5 database access. No grouping or ranking — those live in `query.rs`.
-- `raw_fts_search()`: FTS5 MATCH with snippet generation; author/date/project/tag filters pushed into SQL (project via a `JOIN documents`). Fetches the best 200 chunks by rank, or the 200 from the newest documents when sorting by date. Selects `doc_status` for status-aware ranking. Returns flat `Vec<ChunkSearchResult>`.
+- `fts_match_expression()`: Plain text to an FTS5 expression. `"Quoted phrases"` stay phrases; every other word becomes a quoted prefix term (`file.zip` → `"file.zip"*`), so punctuation is literal and there are no operators (decision 37)
+- `raw_fts_search()`: FTS5 MATCH with snippet generation; author/date/project/tag filters pushed into SQL (project via a `JOIN documents`). Fetches the best 200 chunks by rank, or with `sort=date` the first 200 ordered in SQL by document `clip_date` and then rank (decision 39). Selects `doc_status` for status-aware ranking. Returns flat `Vec<ChunkSearchResult>`. A query FTS5 still can't parse (empty input) is an `FtsQueryError`
 
 **embed.rs**: sqlite-vec integration for both chunks and claims.
 - `ensure_vec_table()`: Creates `vec_chunks` vec0 virtual table with detected embedding dimension
 - `insert_embedding()`: Writes chunk embedding via zerocopy
 - `find_similar_chunks_filtered()`: KNN search via sqlite-vec `MATCH` with cosine distance. When a `project` or required-tag filter is set and the matching documents hold at most 5,000 chunks (`EXACT_SCAN_MAX_CHUNKS`), it branches to an exact cosine scan over just those chunks instead of the global KNN, so scoped recall doesn't depend on the captured corpus size; above the ceiling it uses KNN with the filter in SQL and a `limit * 5` fetch. Both paths dedup overlapping chunks (same entry, intersecting `[start_char, end_char]`, keeping the highest-similarity one) before truncating, since the ~1/3-stride chunker overlaps adjacent chunks
+- `recorded_embedding_model()`, `check_embedding_model()`, `adopt_embedding_model()`: The embedding-model guard (decision 41). `adopt` is called by `embed` once it knows the dimension; `check` by every semantic search surface. A mismatch is an `EmbeddingMismatch`, which serve maps to 503
 - `ensure_vec_claims_table()`: Creates `vec_claims` vec0 virtual table, separate from `vec_chunks`
 - `insert_claim_embedding()`: Writes claim embedding
-- `find_similar_claims()`: KNN search over claims, joining back to `claims` and `documents` for metadata
+- `find_similar_claims()`: KNN search over claims, joining back to `claims` and `documents` for metadata, with author and tag filters. Always fetches `limit * 5` neighbors, then collapses claims whose normalized text repeats within one version family, keeping the current version's copy at the best-ranked position (decision 47)
 - `get_claims_without_embeddings()`: Claims needing embedding
 - `count_claims_with/without_embeddings()`: Progress tracking
 
@@ -337,8 +389,9 @@ Key output types (`SimilarChunk`, `SimilarClaim`, `Claim`, `DumpDocument`, `Dump
 **claims.rs**: Claim CRUD, extraction status, staleness-aware document selection.
 - `insert_claim()`: Write path (document_id, entry_id, author, content, model, prompt_hash)
 - `get_claims_for_document()`: All claims for a document, ordered by id
-- `delete_claims_for_document()`: Bulk delete before re-extraction
-- `get_documents_needing_extraction(model, prompt_hash)`: Returns document ids where no claims match both the current model and prompt hash — handles missing claims, model changes, and prompt changes in a single query
+- `delete_claims_for_document()`: Bulk delete before re-extraction, taking the claims' `vec_claims` rows and the document's `claim_extractions` row with them (decision 46)
+- `extraction_states()`: Each document's doctype and the `(model, prompt_hash)` of its last recorded extraction, if any. `extract` compares these with the current model and each doctype's prompt hash
+- `record_extraction()`: Upserts the document's ledger row after every run, including runs that found no claims
 
 ### util.rs
 Shared string utilities.
@@ -429,6 +482,21 @@ cleanup_patterns = ["^\\s*:\\w+:\\s*$"]
 - `cleanup_patterns`: Regexes for lines to remove
 - `merge_consecutive_same_author`: Combine adjacent same-author entries
 
+**`[mcp]` section** (optional): result sizes for the MCP server. Results are sized for choosing what to open, not for reading in full; the model follows up with `get_document`.
+
+```toml
+[mcp]
+search_documents = 5          # documents per search; max_search_documents = 15
+hits_per_document = 2
+hit_chars = 1000              # characters per excerpt
+list_limit = 20               # rows per list_documents; max_list_limit = 100
+claims_limit = 10             # max_claims_limit = 30
+document_chars = 24000        # get_document budget per call
+# semantic_min_similarity = 0.55   # off by default
+```
+
+Unknown keys are an error. `semantic_min_similarity` stays unset until it has been calibrated on the real corpus (decision 43).
+
 ### llms.toml
 
 All LLM configuration in one file: backend selection, authentication, default models, and per-task overrides. Replaces the legacy `backend.toml`/`derive.toml`/`extract.toml`; if `llms.toml` is absent those three are read as a fallback.
@@ -460,6 +528,8 @@ brief = "~/.config/what-was-said/prompts/brief.txt"
 [extract]
 model = "gemma3:27b"
 rules = "~/.config/what-was-said/prompts/extract_rules.txt"
+# temperature = 0.0   # default
+# seed = 42           # default
 [extract.framings]
 email = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
 slack = "~/.config/what-was-said/prompts/extract_framing_conversation.txt"
@@ -483,7 +553,7 @@ model = "qwen2.5:32b"
 
 **`[derive]` section**: Summary generation. Prompt tier is selected by document content length: short (<`short_threshold`), medium (<`medium_threshold`), long (≥`medium_threshold`). Custom prompts under `[derive.prompts]` are resolved by tier key (`"short"`/`"medium"`/`"long"`), then `"default"`, falling back to built-in defaults. For short documents, the brief summary is copied from the detailed output without an extra LLM call.
 
-**`[extract]` section**: Claim extraction. `rules` is an optional path to a custom extraction-rules prompt (compiled-in adaptive prompt if absent). `[extract.framings]` are optional per-doctype structural hints (e.g. "attribute to speaker"), keyed by doctype name from `config.toml` — not domain instructions, which the adaptive prompt handles.
+**`[extract]` section**: Claim extraction. `rules` is an optional path to a custom extraction-rules prompt (compiled-in adaptive prompt if absent). `[extract.framings]` are optional per-doctype structural hints (e.g. "attribute to speaker"), keyed by doctype name from `config.toml` — not domain instructions, which the adaptive prompt handles. Only the conversation framing asks the model for `[Speaker]` prefixes. `temperature` and `seed` set the extraction sampling (default 0 and 42); they are not part of the prompt hash, so changing them doesn't trigger re-extraction. A configured rules or framing file that can't be read prints a warning and falls back to the default.
 
 **`[diff]` section**: Near-duplicate change summaries. Only `model` for now; the diff instructions are the compiled-in default (a custom prompt path, mirroring `[extract].rules`, is a future addition).
 
@@ -600,9 +670,9 @@ See `examples/parsers/` for working email and Slack preprocessor scripts, and `e
 ### FTS5
 ```
 storage/search.rs (raw DB access):
-1. Convert query to prefix search ("foo bar" → "foo* bar*")
-2. Build SQL with author/date/project filters in WHERE clause (project via JOIN documents)
-3. Execute FTS5 MATCH query with snippet()
+1. Quote each word as a literal prefix term, keeping "quoted phrases" (`file.zip report` → `"file.zip"* "report"*`)
+2. Build SQL with author/date/project/tag filters in WHERE clause (project via JOIN documents)
+3. Execute FTS5 MATCH query with snippet(), ordered by rank, or for sort=date by document clip_date then rank; keep the first 200
 4. Return flat Vec<ChunkSearchResult> (incl. doc_status)
 
 query.rs (grouping/ranking):
@@ -614,10 +684,10 @@ query.rs (grouping/ranking):
 ### Semantic
 ```
 storage/embed.rs (raw DB access):
-1. Embed query text via LlmBackend (default: qwen3-embedding:8b via Ollama)
+1. Check the configured embed model against the one recorded in `meta`, then embed the query text via LlmBackend (default: qwen3-embedding:8b via Ollama); a query dimension that doesn't match the vec table is refused
 2. With --project (or a required tag) and at most 5,000 matching chunks: exact cosine scan over those chunks; otherwise KNN against vec_chunks via sqlite-vec MATCH
 3. Join results back to chunks/entries/documents for metadata (incl. doc_status)
-4. Filter by author/date/project; dedup overlapping chunks (same entry, intersecting char ranges); truncate
+4. Filter by author/date/project/tags; dedup overlapping chunks (same entry, intersecting char ranges); truncate
 5. Return flat Vec<SimilarChunk>
 
 query.rs (grouping/ranking):
@@ -654,17 +724,11 @@ The embed command processes chunks first, then claims, with separate progress re
 
 7. **LLM backend abstraction**: `LlmBackend` trait with `OllamaClient` and `OpenAiClient` implementations. Backend selection and model defaults are configured in `llms.toml`, with CLI flags as overrides. `OpenAiClient` supports both static API keys and OAuth2 client credentials with automatic token refresh, enabling use on machines with institutional OpenAI endpoints.
 
-8. **WAL mode**: SQLite journal_mode=WAL set on initialization. Enables concurrent readers during serve mode without blocking on writes.
+8. **WAL mode**: SQLite journal_mode=WAL set on initialization. Enables concurrent readers during serve mode without blocking on writes. Writers still take a lock, which is why every connection also waits on it (decision 31).
 
-9. **JSON API via serve**: Localhost axum server holding the DB connection open, exposing query functions as JSON endpoints. Designed as the agent-facing interface, avoiding per-call process spawn overhead.
+9. **JSON API via serve**: Localhost axum server holding the DB connection open, exposing query functions as JSON endpoints. Designed as the agent-facing interface, avoiding per-call process spawn overhead. The stdio MCP server (decision 32) puts the same query layer in front of MCP clients such as Claude Desktop.
 
-10. **Foreign key enforcement**: `PRAGMA foreign_keys = ON` set on every connection. All parent-child relationships use `ON DELETE CASCADE`. A migration system in `initialize()` detects old schemas and rebuilds tables as needed, preventing orphaned rows.
-
-11. **Captured vs curated documents**: The system distinguishes evidence (captured clips, identified by content + near-duplicate detection) from actively-maintained project state (curated docs, identified positionally by `(project, relative_path)`). Captured docs accumulate as snapshots and are never edited in place; curated docs sync in place — children replaced on change, vanished files tombstoned `missing`. Near-duplicate detection deliberately does not run for curated docs, since their identity is positional, not content-based. This distinction is metadata on the `documents` table, not a separate table or hierarchy.
-
-12. **Status-aware ranking**: Curated-doc status (`canonical`/`provisional`/`archived`/`missing`) applies a multiplier to a document's best rank during result grouping, so current project truth outranks provisional or archived material. Captured docs carry a neutral weight, so the captured corpus is unaffected. It's a single multiplier in `query.rs`, not a retrieval-layer change.
-
-13. **Project-scoped exact search**: sqlite-vec KNN can't pre-filter, so a global ANN followed by a project filter would let a large captured corpus crowd out a small project's chunks. When `--project` is set, semantic search instead does a brute-force cosine scan over only that project's chunks — instant at the scale of a few hundred chunks, with perfect recall. The scan is capped at 5,000 chunks (~80 MB of 4096-dimension embeddings per query); a project beyond that falls back to KNN with an enlarged fetch, as the required-tag filter does.
+10. **Foreign key enforcement**: `PRAGMA foreign_keys = ON` set on every connection. All parent-child relationships use `ON DELETE CASCADE`. A migration system in `initialize()` detects old schemas and rebuilds tables as needed, preventing orphaned rows, and records the result in `PRAGMA user_version` (decision 30). Virtual tables are outside this guarantee (decision 46).
 
 11. **Near-duplicate detection, and what may merge unattended**: Documents are fingerprinted at ingest using 3-word shingle MinHash signatures and compared against existing docs within a configurable window (default ±180 days). Classification (`classify_by_signature`) draws on four signals: Jaccard similarity, a longest-shared-block heuristic, a containment (overlap-coefficient) signal, and source-title equality. Only a **high Jaccard** (≥ 0.7) merges unattended into a version family; the block, containment, and title signals only ever route a candidate to the interactive prompt. The title signal exists because the MinHash estimate is blurry (standard error ≈ 0.04 near the gray floor at k=128, and it was ≈ 0.09 at the original k=32) and a genuine revision that was also truncated or heavily edited can land below every band — a matching suffix-stripped source title plus even weak similarity (≥ 0.10) is a high-precision re-clip prior that costs nothing (the title is already stored) and, like the other tolerance-grade signals, is confirmed by a human rather than trusted to merge. This asymmetry is deliberate and hard-won: "large shared block" and "one body contained in the other" are each equally the fingerprint of a genuine revision *and* of two distinct documents built on shared boilerplate, a template, or a skeleton. Letting either auto-merge lets one boilerplate-heavy newcomer weld unrelated documents into one family and hide all but the latest — a silent over-*hide* that is worse than the redundant over-*show* it would replace. So tolerance-grade evidence is confirmed by a human; only equivalence-grade Jaccard is trusted to merge on its own. Same-version candidates are linked into a version family; the family's `superseded` tags are then recomputed so the latest by `(clip_date, id)` is current and the rest are tagged `superseded` (both preserved). The block and containment are not computed for a Jaccard-high candidate (they would cost a text fetch plus an O(m·n) LCS the decision doesn't need), so `shared_block_words` is NULL in that case.
 
@@ -678,11 +742,11 @@ The embed command processes chunks first, then claims, with separate progress re
 
 15. **Claim extraction with adaptive prompt**: A single prompt handles all document types. The LLM adapts its extraction to whatever is substantive in the text rather than following per-domain rules. Source-format framings (email attribution, voice memo context) are retained as structural hints only. No stored classification — testing showed models are weak at it, and the claim text itself is the representation.
 
-16. **Incremental re-extraction via model + prompt_hash**: Each claim stores the model and a hash of the prompt rules that produced it. `what-was-said extract` compares against the current config and re-extracts only stale documents. This means changing the configured model or editing the prompt file triggers automatic re-extraction without `--force`.
+16. **Incremental re-extraction via a recorded ledger**: `claim_extractions` records each document's last extraction — model, prompt hash, time, claim count — including runs that found no claims. `what-was-said extract` re-extracts only documents whose record is missing or names a different model or prompt hash, so changing the model or editing a prompt file re-extracts without `--force`. The prompt hash covers the rules and the doctype's framing, so a framing edit re-extracts only the doctypes that use it; unframed documents keep the rules-only hash. Before schema version 3, "needs extraction" was inferred from whether matching claims existed, so a document that legitimately yielded none went back to the model on every run. The general rule: record state rather than inferring it from a side effect.
 
 17. **Separate vec_claims table**: Claims and chunks are different semantic objects — claims are atomic propositions, chunks are text fragments. They have different query purposes (what was said vs. where is it) and different re-embedding lifecycles (re-extract claims without re-chunking). Mixing them in one vector table would couple these concerns.
 
-18. **Query layer between storage and UI**: `query.rs` owns all search result grouping, deduplication, and ranking. TUI, serve, and CLI all call the same functions, preventing divergence. Raw DB access in `storage/search.rs` returns flat rows; `query.rs` composes the pipeline. The grouping functions are testable with synthetic data (no DB needed).
+18. **Query layer between storage and UI**: `query.rs` owns all search result grouping, deduplication, and ranking. TUI, serve, MCP, and CLI all call the same functions, preventing divergence. Raw DB access in `storage/search.rs` returns flat rows; `query.rs` composes the pipeline. The grouping functions are testable with synthetic data (no DB needed).
 
 19. **Centralized prompt construction**: All prompt assembly lives in `prompts.rs`. Derive and extract are pure orchestration — they call prompt functions, then call the LLM, then store results. Custom prompts are resolved by config (per-tier keys for derive, rules/framings for extract), with built-in defaults compiled into the binary. `compute_prompt_hash` lives here too, breaking what was previously a circular dependency between config and extract.
 
@@ -698,13 +762,65 @@ The embed command processes chunks first, then claims, with separate progress re
 
 25. **Exact similarity offline, estimates online**: The MinHash estimate exists to make ingest-time detection O(candidates) with no text fetches; its noise (standard error ≈ 0.04 at k=128, and a hard quantization grid of 1/k) is the price of that speed, and every detection band inherits it. `relations scan`, being offline and infrequent, refuses to pay that price for nothing: it computes exact Jaccard and containment from per-document shingle sets built once, so a scan miss can only mean the pair is genuinely below every band — never an unlucky draw. Recorded human judgments are terminal for scan: an existing `kept_both` or `superseded` pair is never re-asked, and transitive family membership (union-find over `superseded` edges, updated as the scan links) reduces healing a family to its minimum number of decisions.
 
+26. **Captured vs curated documents**: The system distinguishes evidence (captured clips, identified by content + near-duplicate detection) from actively-maintained project state (curated docs, identified positionally by `(project, relative_path)`). Captured docs accumulate as snapshots and are never edited in place; curated docs sync in place — children replaced on change, vanished files tombstoned `missing`. Near-duplicate detection deliberately does not run for curated docs, since their identity is positional, not content-based. This distinction is metadata on the `documents` table, not a separate table or hierarchy.
+
+27. **Status-aware ranking**: Curated-doc status (`canonical`/`provisional`/`archived`/`missing`) applies a multiplier to a document's best rank during result grouping, so current project truth outranks provisional or archived material. Captured docs carry a neutral weight, so the captured corpus is unaffected. It's a single multiplier in `query.rs`, not a retrieval-layer change. When hidden documents are included, superseded versions get a further weight on the same scale (decision 40).
+
+28. **Project-scoped exact search**: sqlite-vec KNN can't pre-filter, so a global ANN followed by a project filter would let a large captured corpus crowd out a small project's chunks. When a project is set (`--project`, or the `project` filter in serve and MCP), semantic search instead does a brute-force cosine scan over only that project's chunks — instant at the scale of a few hundred chunks, with perfect recall. The scan is capped at 5,000 chunks (~80 MB of 4096-dimension embeddings per query); a project beyond that falls back to KNN with an enlarged fetch, as the required-tag filter does. The same routing applies to a required tag, and to the KNN fallback the project filter is pushed into SQL.
+
+29. **Read-only consumers enforced at the connection**: `mcp` and `serve` never create or migrate a database. They open an existing file, refuse any schema version but the current one, and set `PRAGMA query_only`, so no statement can write even by mistake. Every write-capable command (`stats` included) migrates. Before this, the MCP server exposed only read tools but ran migrations, deletions and an FTS rebuild on every startup: a read-only tool list says nothing about what the process does to the database.
+
+30. **Schema version in `PRAGMA user_version`**: `migrate()` stays structural (it inspects the schema and fixes what's missing), but the version it reaches is stamped in `user_version`, giving read-only consumers something cheap and exact to check, and letting a write-capable command refuse a database newer than itself rather than "migrating" it backward. Versions are listed under Data Model → Schema version.
+
+31. **Lock contention**: Every connection sets a 5 s `busy_timeout`, so a reader that meets `extract` or `embed` mid-write waits instead of failing with `SQLITE_BUSY`. Long-lived consumers don't hold the database lock across network calls: MCP semantic search releases it while Ollama embeds the query. Ollama embedding calls time out after 120 s and report the response body on error.
+
+32. **MCP via the `rmcp` SDK, as a thin adapter**: The MCP specification revision of 2026-07-28 changed the handshake, and `rmcp` speaks both the old and new versions; a hand-rolled loop would have had to track that. The cost is API churn, so the dependency is pinned (`~3.4`). Tool logic lives on `McpContext` with no SDK types, and the rmcp layer only adapts, so behavior is tested against an in-memory database with a fake backend. The transport is stdio, so nothing on the MCP path may write to stdout. All tools are annotated read-only and closed-world.
+
+33. **Selection-sized MCP results**: Search and list results are sized for choosing what to open, not for reading: by default 5 documents × 2 hits × 1,000 characters per search, 20 rows per listing, 24,000 characters per `get_document`, each with a hard cap. The sizes live in an optional `[mcp]` section of `config.toml` with `deny_unknown_fields`. `get_document` pages by character offset rather than entry range, because one entry can exceed the budget.
+
+34. **One filter resolver; guessed values are errors**: `query::FilterContext::resolve` validates filters for both serve and MCP, so the two accept exactly the same values. Dates are `YYYY-MM-DD` or `YYYY-MM-DD HH:MM:SS` (space or `T`), normalized to the clip-date form; trailing text is an error, and so is `date_from` after `date_to`. An unregistered project or a tag no document carries is an error that names the valid choices. A tool error that lists the valid values corrects a model on its next call; an empty result invites it to conclude that nothing exists. MCP adds tool-specific hints keyed by the error's field.
+
+35. **Requiring a hidden tag shows it**: `tag=archived` without `include_hidden` used to return nothing, because the default exclusion of `archived` removed exactly the documents the filter required. A required tag now lifts its own default exclusion, and only its own. MCP responses report it as `hidden_tags_shown`; serve doesn't report it.
+
+36. **Localhost API trust boundary**: `serve` binds to 127.0.0.1 and has no authentication. Binding alone doesn't stop a web page from reaching it through DNS rebinding, so every request's `Host` header must be `127.0.0.1:<port>` or `localhost:<port>`. Status codes separate who can fix a failure: 400 for the caller's input, 503 for a missing dependency (Ollama down, no embeddings, model mismatch), 500 for everything else.
+
+37. **Keyword input is literal**: Every word is quoted as an FTS5 prefix term, so punctuation matches literally and there are no operators; `"quoted phrases"` still work. Work text is full of identifiers that FTS5 syntax would otherwise misread (`nrg-svc-hcpx` as a column filter, `Mike's` and `file.zip` as syntax errors), and there is no silent fallback to a different query. `FtsQueryError` remains as a safety net (empty input) and maps to 400.
+
+38. **One name per date**: A document's `clip_date` is its latest capture, always. A search hit's `captured` is its entry's first capture, and is omitted when it equals the document's `clip_date`. Search date filters apply to `captured`; `list_documents` date filters apply to `clip_date`. Both are stored as `YYYY-MM-DD HH:MM:SS` in local time, because comparisons are string comparisons; sync once wrote UTC with a `T`, which broke "latest" ordering, and `migrate()` now rewrites such dates. A date-only upper bound covers the whole day. The bug that prompted this was reporting an entry's capture date under the name `clip_date`: neither value was wrong, but one name carried two meanings.
+
+39. **`sort=date` orders in SQL**: Date-sorted keyword search orders by document `clip_date`, then rank, before the 200-chunk candidate limit. It used to sort only the 200 best-ranked chunks by date, so for a common term it could miss the newest documents entirely.
+
+40. **Superseded results never outrank their current version**: When hidden documents are included, a superseded result gets a 0.5 weight on the status-weight scale (decision 27), since an older version's near-identical text otherwise scores about the same as the current one. Weights are applied sign-aware, because a negative cosine similarity produces a positive rank, and a weight below 1 must worsen a rank of either sign.
+
+41. **The embedding model is recorded and enforced**: The first `embed` records its model in `meta`. From then on `embed` and every semantic search refuse a different configured model, and searches also refuse a query whose dimension doesn't match the vec table. Vectors from different models aren't comparable, and cosine similarity over mismatched lengths would otherwise truncate silently and return confident nonsense. Changing models means dropping both vec tables and the `meta` row, then re-embedding.
+
+42. **Persisted values need a stable definition**: MinHash signatures, extraction prompt hashes and derive source hashes are computed with `stable_hash` (SipHash-1-3 with a zero key), not std's `DefaultHasher`, whose algorithm std reserves the right to change in any release. A change there would have silently stopped new signatures from matching stored ones, with no error. Bytes are fed the way std's `Hash` impls fed them, so stored values didn't change; the implementation was checked against Python's built-in SipHash-1-3, and a test checks it against today's `DefaultHasher`. The embedding model (decision 41) is the same principle applied to vectors.
+
+43. **Scores always; cutoffs after calibration**: Every semantic hit reports its cosine similarity, and every document its `best_similarity`, so the caller can tell a strong match from the filler that a fixed limit always returns. A floor (`[mcp] semantic_min_similarity`) exists but is off by default: where the boundary falls depends on the embedding model and the corpus, so it is set only after looking at scores for real queries. Experience with the personal database suggests roughly 0.55–0.6 for `qwen3-embedding:8b`.
+
+44. **Claim speakers only from known authors**: A `[Name]` prefix in the extraction output becomes the claim's author only if it matches one of the document's entry authors, ignoring case, spacing and a trailing `<address>`; otherwise it is dropped. A document with a single entry author attributes every claim to it. Only the conversation framing asks for prefixes. Previously only single-author documents got authors, and the line parser stripped a leading `[...]`, which is exactly how speaker labels appear.
+
+45. **Deterministic extraction sampling**: Extraction runs at temperature 0 with seed 42 by default, configurable in `[extract]`, so the same text yields the same claims. With non-zero temperature, two versions of a document could yield different claims for identical text, and a claim could exist only in the superseded version. Sampling isn't part of the prompt hash: changing it doesn't re-extract.
+
+46. **Deletes reach what foreign keys can't**: vec0 virtual tables don't take part in `ON DELETE CASCADE`, so every delete path removes vector rows explicitly, by point primary key. Claim ids are `INTEGER PRIMARY KEY` without `AUTOINCREMENT`, so SQLite reuses the highest deleted ids, which turns a leftover vector from an orphan into a wrong answer: a new claim on a reused id looked already embedded and was searched with the old claim's vector. Deleting a document's claims also deletes their vectors and the document's extraction record.
+
+47. **Claim duplicates collapse within a version family**: Each version of a document has its own claims, so the same claim can appear once per version. Claim search collapses claims whose normalized text repeats within one version family, keeping the current version's copy at the best-ranked position. It always fetches `limit * 5` neighbors so the collapse and the filters don't leave the result short.
+
+48. **Document text is untrusted**: Documents are emails, web pages and chats written by many people. The MCP server instructions say document text is evidence to report on, never instructions, even when it is addressed to an AI assistant. That is a mitigation, not a guarantee, so Desktop approval prompts stay on for tools that act (shell tools, for example) in any session that also reads from what-was-said.
+
+49. **Leftover WAL files are an error, not something to recover from**: If the database file is gone but its `-wal`/`-shm` files remain, `open_db` refuses to start and names them. They are usually left by a process that still has the old database open (most often Desktop's MCP server), and a new database created beside them failed with `SQLITE_IOERR_SHORT_READ` (522). Deleting someone else's live WAL is not the program's call.
+
+50. **Fictional test data only**: The repository is public. Tests, examples and generated documentation use fictional names and `example.org` addresses, never real people, addresses or institutional endpoints.
+
+51. **Listing and enumeration for agents**: `list_documents`, `list_projects` and `list_tags` exist because "latest", "what's in project X" and "which tags exist" have no search term. The project registry and `tags.toml` are loaded once at serve/mcp start. Hidden-by-default tags are listed and marked; `[includes]` parents appear even with no direct documents, with counts that include their children; projects that have documents but no registration are listed as `registered: false`.
+
 ## Superseded visibility
 
 Two guarantees: (1) documents carrying a default-excluded tag are hidden from every search surface through the generic `[defaults] exclude` mechanism, and (2) whenever an excluded document does surface (opt-in inclusion or direct fetch), the response is annotated with `superseded: bool` and, when true, `current_document_id` — the family maximum by `(clip_date, id)`, derived at query time via `supersession_status` (which wraps the `superseded_family_ordered` family walk and is the only reader allowed to name the `superseded` tag; `recompute_supersession` remains its only writer).
 
 **Mechanism.** Hiding is one SQL fragment in one place: `tag_exclusion_clause` in `storage/mod.rs` emits `NOT EXISTS (... document_tags ... tag IN (...))`, consumed by `raw_fts_search`, `find_similar_chunks_filtered` (both branches), and `find_similar_claims`. The tag list travels in `SearchFilters.excluded_tags` and is expanded from `TagConfig` (parents in `[includes]` expand to their children, mirroring `doc_matches_filter`) before it reaches SQL. No query path hard-codes the string `superseded` for hiding; hiding a doc tagged `junk` uses the identical path. Post-KNN filtering consumes result slots, so a non-empty exclusion bumps the KNN fetch limit the same way author/date filters do.
 
-**Overrides.** CLI `about --include-all` and the serve query parameter `include_hidden=true` clear the exclusion list for that request. Direct fetches (`in`, `dump`, `/get/:id`, `/entries/:doc_id`, `/claims/doc/:id`) never filter and always annotate.
+**Overrides.** CLI `about --include-all`, the serve query parameter `include_hidden=true`, and the MCP `include_hidden` argument clear the exclusion list for that request. Requiring a default-hidden tag (`tag=archived`) lifts just that tag's exclusion, since asking for it can only mean wanting to see it; MCP reports it as `hidden_tags_shown`; serve applies the same rule without reporting it (decision 35). Direct fetches (`in`, `dump`, `/get/:id`, `/entries/:doc_id`, `/claims/doc/:id`) never filter and always annotate.
 
 **Phase 0 audit** (state before this work): TUI browse and TUI search honored default excludes (search post-hoc via `passes_global_filter`, at the cost of excluded docs consuming semantic result slots); CLI `about`, CLI `dump`, and every serve endpoint applied no tag filtering at all — serve never loaded `TagConfig`. `query.rs`, `storage/search.rs`, and `storage/embed.rs` contained no tag logic. Additionally, `load_tag_config(None)` read `tags.toml` from the data directory rather than the config directory, and the shipped `src/default_tags.toml` was referenced by nothing — so a fresh install had an empty exclude list everywhere.
 
@@ -716,6 +832,7 @@ Two guarantees: (1) documents carrying a default-excluded tag are hidden from ev
 2. Implement logic in the appropriate module (or a new one)
 3. Add a match arm in `main()`
 4. Add the module to `lib.rs` if new
+5. If the command never writes and may run alongside other processes for a long time, add it to the `open_db_read_only()` branch in `main()` (decision 29); otherwise it gets `open_db()` and migrates
 
 ## Adding a New LLM Backend
 
@@ -727,9 +844,13 @@ Two guarantees: (1) documents carrying a default-excluded tag are hidden from ev
 
 ## Common Maintenance Tasks
 
-**Reset database**: Delete `what-was-said.db` under `dirs::data_dir()/what-was-said` (`~/Library/Application Support/` on macOS, `~/.local/share/` on Linux)
+**Reset database**: Quit everything that holds the database open (Claude Desktop, which runs the MCP server, plus any `serve` or TUI session), then delete `what-was-said.db` together with `what-was-said.db-wal` and `what-was-said.db-shm`, under `dirs::data_dir()/what-was-said` (`~/Library/Application Support/` on macOS, `~/.local/share/` on Linux). Leftover side files break the next database created at that path (decision 49)
 
-**Re-embed everything**: `DROP TABLE vec_chunks; DROP TABLE IF EXISTS vec_claims;` in sqlite3, then `what-was-said embed`
+**Check the schema version**: `PRAGMA user_version;` in sqlite3. Any write-capable command (`stats` is the cheapest) migrates to the current version
+
+**Re-embed everything, or change embedding models**: `DROP TABLE vec_chunks; DROP TABLE IF EXISTS vec_claims; DELETE FROM meta WHERE key = 'embedding_model';` in sqlite3, then `what-was-said embed`
+
+**Re-embed claims only**: `DROP TABLE vec_claims;` then `what-was-said embed`. This is also the cleanup for a database whose claims were re-extracted before schema version 3, when stale vectors could sit on reused claim ids
 
 **Re-extract all claims**: `what-was-said extract --force` then `what-was-said embed`
 
@@ -741,4 +862,4 @@ Two guarantees: (1) documents carrying a default-excluded tag are hidden from ev
 
 **Profile search**: Add timing around `query::search()` or `query::find_similar_grouped()`
 
-**Run tests**: `cargo test` (all tests use in-memory SQLite, no network or filesystem dependencies)
+**Run tests**: `cargo test` (all tests use in-memory SQLite, no network or filesystem dependencies). CI runs `cargo test --locked` on Ubuntu and macOS, so commit `Cargo.lock` changes along with `Cargo.toml` ones. Test data uses fictional names and `example.org` addresses only (decision 50)
